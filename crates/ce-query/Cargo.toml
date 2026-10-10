@@ -1,0 +1,11 @@
+[package]
+name = "ce-query"
+description = "CEngine query planner: manifest-checked requests to parameterised SQL with a mandatory tenant predicate (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ce-manifest = { path = "../ce-manifest" }
+serde_json = "1"
