@@ -18,7 +18,7 @@ fn target(entity: &str) -> Target {
 }
 
 fn scope() -> TenantScope {
-    TenantScope::new("11111111-1111-1111-1111-111111111111")
+    TenantScope::for_tests("11111111-1111-1111-1111-111111111111")
 }
 
 fn plan(m: &Manifest, entity: &str, req: &ListRequest) -> Result<Planned, QueryError> {

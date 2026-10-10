@@ -7,5 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ce-auth = { path = "../ce-auth" }
 ce-manifest = { path = "../ce-manifest" }
 serde_json = "1"
+
+[dev-dependencies]
+ce-auth = { path = "../ce-auth", features = ["test-util"] }
