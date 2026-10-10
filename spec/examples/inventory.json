@@ -1,0 +1,39 @@
+{
+  "manifest_version": 1,
+  "template": {"name": "inventory", "version": "0.1.0", "title": "Inventory and monthly close"},
+  "entities": {
+    "item": {
+      "fields": {
+        "name": {"type": "string", "required": true, "max_length": 120, "indexed": true},
+        "category": {"type": "enum", "values": ["dry", "cold", "frozen", "supplies"], "indexed": true},
+        "unit_cost": {"type": "decimal", "precision": 12, "scale": 4, "required": true},
+        "on_hand": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
+        "value": {"type": "decimal", "precision": 16, "scale": 2, "computed": "round(on_hand * unit_cost, 2)"}
+      },
+      "invariants": [{"name": "non_negative_stock", "expr": "on_hand >= 0", "message_code": "inventory.negative_stock"}],
+      "governed": true,
+      "sort_keys": ["name", "category"],
+      "locked_when": "ref(period).state == 'published'"
+    },
+    "period": {
+      "fields": {
+        "month": {"type": "date", "required": true, "unique": true},
+        "state": {"type": "enum", "values": ["open", "published"]}
+      },
+      "state": {
+        "field": "state", "initial": "open",
+        "states": {"open": {"code": 200, "to": ["published"]}, "published": {"code": 600}}
+      }
+    }
+  },
+  "actions": {
+    "close_period": {
+      "entity": "period",
+      "requires_state": ["open"],
+      "effect": [{"transition": "published"}, {"emit": "inventory.period.closed"}],
+      "async": true
+    }
+  },
+  "roles": {"manager": {"read": ["*"], "write": ["item", "period"], "actions": ["close_period"]}, "staff": {"read": ["item"], "write": []}},
+  "runtime": {"storage": {"relational": true}, "compute": {"jobs": true}}
+}

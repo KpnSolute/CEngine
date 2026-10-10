@@ -1,0 +1,16 @@
+{
+  "catalog": "cengine.events", "version": 1, "status": "draft",
+  "envelope": "CloudEvents 1.0, delivered through a transactional outbox, HMAC signed with 10-minute previous-key overlap",
+  "type_pattern": "com.kpnsolute.compute.{domain}.{entity}.{verb}.v{n}",
+  "events": [
+    {"type": "com.kpnsolute.{domain}.state.changed.v1", "data": ["from_code", "to_code", "reason", "actor", "time"], "note": "One per lifecycle transition, same transaction as the change."},
+    {"type": "com.kpnsolute.compute.changeset.proposed.v1"},
+    {"type": "com.kpnsolute.compute.changeset.merged.v1"},
+    {"type": "com.kpnsolute.compute.changeset.reverted.v1"},
+    {"type": "com.kpnsolute.compute.job.finished.v1"},
+    {"type": "com.kpnsolute.infajn.resource.ready.v1", "owner": "infajn"},
+    {"type": "com.kpnsolute.infajn.resource.drifted.v1", "owner": "infajn"},
+    {"type": "com.kpnsolute.infajn.resource.failed.v1", "owner": "infajn"}
+  ],
+  "template_events": "Declared in manifest actions via effect.emit and entity verbs created/updated/deleted. Names must match the type pattern."
+}

@@ -1,0 +1,17 @@
+{
+  "registry": "kpnsolute.states", "version": 1, "status": "draft",
+  "rules": "Codes are 3 digits, immutable, never reused. Retired states keep their code. Adding a code is additive; renumbering is a major-version break.",
+  "classes": {"1xx": "pending", "2xx": "active", "3xx": "limited", "4xx": "failed", "5xx": "winding down", "6xx": "terminal"},
+  "domains": {
+    "tenant": {"100":"requested","110":"provisioning","120":"awaiting_verification","200":"live","210":"degraded","300":"suspended","310":"read_only","320":"frozen","400":"failed","410":"rolling_back","500":"archiving","600":"archived","690":"purged"},
+    "template": {"100":"draft","110":"generating","120":"in_review","200":"approved","210":"published","300":"deprecated","400":"generation_failed","410":"rejected","600":"retired"},
+    "persona": {"100":"collecting","110":"packaging","120":"awaiting_confirmation","200":"current","300":"superseded","400":"invalid","600":"archived"},
+    "installation": {"100":"pending","110":"migrating","200":"active","300":"paused","400":"migration_failed","500":"removing","600":"removed"},
+    "domain_name": {"100":"reserved","120":"awaiting_dns","130":"issuing_certificate","200":"active","400":"verification_failed","500":"releasing","600":"held","610":"released"},
+    "job": {"100":"queued","110":"running","200":"succeeded","300":"retrying","400":"failed","410":"dead_lettered","500":"cancelling","600":"cancelled"},
+    "changeset": {"100":"proposed","120":"in_review","200":"approved","210":"merged","400":"rejected","410":"conflicted","500":"reverting","600":"reverted","610":"withdrawn"}
+  },
+  "directory_buckets": {"live": "code < 500", "archived": "code >= 500"},
+  "reason_codes": {"R001":"all ready/complete","R100":"customer request","R210":"billing lapsed","R211":"billing restored","R310":"step failed","R320":"retry exhausted","R410":"owner action","R510":"retention expiry"},
+  "note": "Code 690 (purged) needs an approved retention policy before use."
+}

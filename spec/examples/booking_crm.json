@@ -1,0 +1,41 @@
+{
+  "manifest_version": 1,
+  "template": {"name": "booking_crm", "version": "0.1.0", "title": "Bookings and contacts"},
+  "entities": {
+    "contact": {
+      "fields": {
+        "full_name": {"type": "string", "required": true, "max_length": 120, "pii": true, "indexed": true},
+        "email": {"type": "string", "unique": true, "pii": true},
+        "phone": {"type": "string", "pii": true}
+      },
+      "sort_keys": ["full_name"]
+    },
+    "booking": {
+      "fields": {
+        "contact": {"type": "ref", "ref": "contact", "required": true, "indexed": true},
+        "starts_at": {"type": "datetime", "required": true, "indexed": true},
+        "ends_at": {"type": "datetime", "required": true},
+        "status": {"type": "enum", "values": ["requested", "confirmed", "cancelled", "completed"]},
+        "notes": {"type": "text"}
+      },
+      "state": {
+        "field": "status", "initial": "requested",
+        "states": {
+          "requested": {"code": 100, "to": ["confirmed", "cancelled"]},
+          "confirmed": {"code": 200, "to": ["cancelled", "completed"]},
+          "cancelled": {"code": 600},
+          "completed": {"code": 610}
+        }
+      },
+      "invariants": [{"name": "valid_window", "expr": "ends_at > starts_at", "message_code": "booking.invalid_window"}],
+      "sort_keys": ["starts_at"]
+    }
+  },
+  "actions": {
+    "confirm_booking": {"entity": "booking", "requires_state": ["requested"], "effect": [{"transition": "confirmed"}, {"emit": "booking.confirmed"}]},
+    "cancel_booking": {"entity": "booking", "requires_state": ["requested", "confirmed"], "effect": [{"transition": "cancelled"}, {"emit": "booking.cancelled"}]}
+  },
+  "projections": {"public_slots": {"entity": "booking", "fields": ["starts_at", "ends_at"], "filter": "status == 'confirmed'"}},
+  "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}},
+  "runtime": {"storage": {"relational": true}, "network": {"public_projections": true, "outbound_webhooks": true}}
+}

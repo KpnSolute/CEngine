@@ -1,0 +1,21 @@
+{
+  "catalog": "cengine.errors", "version": 1, "status": "draft",
+  "format": "RFC 9457 application/problem+json with type, code, status, detail, request_id, retryable, errors[{path, code, detail}]",
+  "errors": [
+    {"code": "unauthenticated", "status": 401, "retryable": false},
+    {"code": "forbidden", "status": 403, "retryable": false},
+    {"code": "workspace_mismatch", "status": 403, "retryable": false},
+    {"code": "template_not_allowed", "status": 403, "retryable": false},
+    {"code": "entitlement_required", "status": "402|403", "retryable": false, "note": "Console decides; CEngine enforces the token claim."},
+    {"code": "not_found", "status": 404, "retryable": false, "note": "Unknown, inactive and out-of-scope are indistinguishable."},
+    {"code": "version_conflict", "status": 409, "retryable": true},
+    {"code": "idempotency_conflict", "status": 409, "retryable": false},
+    {"code": "invalid_transition", "status": 409, "retryable": false, "note": "Includes the current state code."},
+    {"code": "entity_locked", "status": 409, "retryable": false},
+    {"code": "precondition_required", "status": 428, "retryable": false},
+    {"code": "validation_failed", "status": 422, "retryable": false},
+    {"code": "tenant_not_routable", "status": "by state", "retryable": "by state", "note": "Status follows the tenant state registry (e.g. 300 suspended is 402, 320 frozen is 423, 500 archiving is 410)."},
+    {"code": "rate_limited", "status": 429, "retryable": true},
+    {"code": "overloaded", "status": 503, "retryable": true, "note": "Carries Retry-After."}
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "manifest_version": 1,
+  "template": {"name": "approval_workflow", "version": "0.1.0", "title": "Request and approval"},
+  "entities": {
+    "request": {
+      "fields": {
+        "title": {"type": "string", "required": true, "max_length": 160},
+        "amount": {"type": "decimal", "precision": 12, "scale": 2},
+        "requester": {"type": "string", "required": true},
+        "decided_by": {"type": "string"},
+        "attachment": {"type": "file"}
+      },
+      "state": {
+        "field": "state", "initial": "submitted",
+        "states": {
+          "submitted": {"code": 100, "to": ["in_review", "withdrawn"]},
+          "in_review": {"code": 120, "to": ["approved", "rejected"]},
+          "approved": {"code": 200, "to": ["closed"]},
+          "rejected": {"code": 400},
+          "withdrawn": {"code": 610},
+          "closed": {"code": 600}
+        }
+      },
+      "governed": true
+    }
+  },
+  "actions": {
+    "start_review": {"entity": "request", "requires_state": ["submitted"], "effect": [{"transition": "in_review"}]},
+    "approve": {"entity": "request", "requires_state": ["in_review"], "input": {"comment": {"type": "text"}}, "effect": [{"set": {"decided_by": "actor.id"}}, {"transition": "approved"}, {"emit": "request.approved"}]},
+    "reject": {"entity": "request", "requires_state": ["in_review"], "input": {"comment": {"type": "text", "required": true}}, "effect": [{"set": {"decided_by": "actor.id"}}, {"transition": "rejected"}, {"emit": "request.rejected"}]}
+  },
+  "roles": {"requester": {"read": ["request"], "write": ["request"]}, "approver": {"read": ["request"], "actions": ["start_review", "approve", "reject"]}},
+  "runtime": {"storage": {"relational": true, "files": true, "max_file_mb": 25}}
+}

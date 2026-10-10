@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.kpnsolute.com/cengine/v1/manifest.schema.json",
+  "title": "CEngine template manifest (DRAFT v1)",
+  "description": "A template is data. It declares entities, actions, states, invariants, projections and runtime needs. It carries no routes, secrets, tenant IDs, slugs or arbitrary code.",
+  "type": "object",
+  "required": ["manifest_version", "template", "entities"],
+  "additionalProperties": false,
+  "$defs": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,62}$" },
+    "code": { "type": "integer", "minimum": 100, "maximum": 699 },
+    "fieldType": {
+      "enum": ["string", "text", "integer", "decimal", "boolean", "date", "datetime", "enum", "ref", "json", "file"]
+    },
+    "field": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "$ref": "#/$defs/fieldType" },
+        "required": { "type": "boolean", "default": false },
+        "unique": { "type": "boolean", "default": false },
+        "indexed": { "type": "boolean", "default": false },
+        "max_length": { "type": "integer", "minimum": 1 },
+        "precision": { "type": "integer", "minimum": 1, "maximum": 38 },
+        "scale": { "type": "integer", "minimum": 0, "maximum": 18 },
+        "values": { "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true },
+        "ref": { "$ref": "#/$defs/name", "description": "Target entity for type=ref." },
+        "default": {},
+        "computed": { "type": "string", "description": "Expression in the fixed CEngine expression language. Evaluated in the same transaction as the write." },
+        "pii": { "type": "boolean", "default": false }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "enum" } }, "required": ["type"] }, "then": { "required": ["values"] } },
+        { "if": { "properties": { "type": { "const": "ref" } }, "required": ["type"] }, "then": { "required": ["ref"] } },
+        { "if": { "properties": { "type": { "const": "decimal" } }, "required": ["type"] }, "then": { "required": ["precision", "scale"] } }
+      ]
+    },
+    "stateModel": {
+      "type": "object",
+      "required": ["field", "states", "initial"],
+      "additionalProperties": false,
+      "properties": {
+        "field": { "$ref": "#/$defs/name" },
+        "initial": { "$ref": "#/$defs/name" },
+        "states": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/name" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["code"],
+            "additionalProperties": false,
+            "properties": {
+              "code": { "$ref": "#/$defs/code" },
+              "to": { "type": "array", "items": { "$ref": "#/$defs/name" }, "uniqueItems": true }
+            }
+          }
+        }
+      }
+    },
+    "invariant": {
+      "type": "object",
+      "required": ["name", "expr"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "expr": { "type": "string" },
+        "message_code": { "type": "string", "pattern": "^[a-z][a-z0-9_.]{0,62}$" }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "required": ["fields"],
+      "additionalProperties": false,
+      "properties": {
+        "fields": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/field" } },
+        "state": { "$ref": "#/$defs/stateModel" },
+        "invariants": { "type": "array", "items": { "$ref": "#/$defs/invariant" } },
+        "governed": { "type": "boolean", "default": false, "description": "Non-privileged writes become changeset operations that must be merged." },
+        "soft_delete": { "type": "boolean", "default": true },
+        "locked_when": { "type": "string", "description": "Expression. When true, writes fail with entity_locked." },
+        "freeze_windows": { "type": "array", "items": { "type": "object", "required": ["field", "states"], "additionalProperties": false, "properties": { "field": { "$ref": "#/$defs/name" }, "states": { "type": "array", "items": { "$ref": "#/$defs/name" } } } } },
+        "sort_keys": { "type": "array", "items": { "$ref": "#/$defs/name" }, "description": "Fields clients may sort by. Each must be indexed." }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["entity", "effect"],
+      "additionalProperties": false,
+      "properties": {
+        "entity": { "$ref": "#/$defs/name" },
+        "input": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/field" } },
+        "requires_state": { "type": "array", "items": { "$ref": "#/$defs/name" } },
+        "effect": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "set": { "type": "object", "additionalProperties": { "type": "string" } },
+              "transition": { "$ref": "#/$defs/name" },
+              "create": { "type": "object", "required": ["entity", "values"], "additionalProperties": false, "properties": { "entity": { "$ref": "#/$defs/name" }, "values": { "type": "object", "additionalProperties": { "type": "string" } } } },
+              "emit": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*$" }
+            },
+            "minProperties": 1
+          }
+        },
+        "async": { "type": "boolean", "default": false, "description": "True returns 202 and a job." },
+        "handler": { "type": "string", "description": "Optional reference to a sandboxed WASM handler by content hash. Escape hatch; reviewed per template." }
+      }
+    },
+    "projection": {
+      "type": "object",
+      "required": ["entity", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "entity": { "$ref": "#/$defs/name" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/name" }, "minItems": 1, "uniqueItems": true },
+        "filter": { "type": "string" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Needs only. Never provider names, hosts or credentials.",
+      "additionalProperties": false,
+      "properties": {
+        "storage": { "type": "object", "additionalProperties": false, "properties": { "relational": { "type": "boolean" }, "files": { "type": "boolean" }, "max_file_mb": { "type": "integer", "minimum": 1 } } },
+        "compute": { "type": "object", "additionalProperties": false, "properties": { "jobs": { "type": "boolean" }, "schedules": { "type": "array", "items": { "type": "object", "required": ["name", "cron", "action"], "additionalProperties": false, "properties": { "name": { "$ref": "#/$defs/name" }, "cron": { "type": "string" }, "action": { "$ref": "#/$defs/name" } } } } } },
+        "network": { "type": "object", "additionalProperties": false, "properties": { "public_projections": { "type": "boolean" }, "outbound_webhooks": { "type": "boolean" } } },
+        "domains": { "type": "object", "additionalProperties": false, "properties": { "custom_domain": { "type": "boolean" } } }
+      }
+    }
+  },
+  "properties": {
+    "manifest_version": { "const": 1 },
+    "template": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "title": { "type": "string" },
+        "number": { "type": "integer", "minimum": 1, "description": "Assigned by the Template registry. Authors never set it; it is present in published manifests only." }
+      }
+    },
+    "entities": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/entity" } },
+    "actions": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/action" } },
+    "roles": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "type": "object", "additionalProperties": false, "properties": { "read": { "type": "array", "items": { "type": "string" } }, "write": { "type": "array", "items": { "type": "string" } }, "actions": { "type": "array", "items": { "type": "string" } } } } },
+    "projections": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/projection" } },
+    "runtime": { "$ref": "#/$defs/runtime" }
+  }
+}

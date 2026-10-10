@@ -1,0 +1,126 @@
+{
+  "suite": "cengine.expression",
+  "version": 1,
+  "status": "draft",
+  "note": "Result encoding: decimals as strings, ints as strings, bools true/false, null null. Env encoding: ints and bools and strings and null are plain JSON; decimals are {\"dec\": \"1.50\"}. Every binding must produce identical canonical output.",
+  "vectors": [
+    {
+      "expr": "1 + 2",
+      "env": {},
+      "out": "3"
+    },
+    {
+      "expr": "0.1 + 0.2",
+      "env": {},
+      "out": "0.3"
+    },
+    {
+      "expr": "round(on_hand * unit_cost, 2)",
+      "env": {
+        "on_hand": {
+          "dec": "10.5"
+        },
+        "unit_cost": {
+          "dec": "1.005"
+        }
+      },
+      "out": "10.55"
+    },
+    {
+      "expr": "round(2.5, 0)",
+      "env": {},
+      "out": "3"
+    },
+    {
+      "expr": "round(-2.5, 0)",
+      "env": {},
+      "out": "-3"
+    },
+    {
+      "expr": "10 / 4",
+      "env": {},
+      "out": "2.500000000000000000"
+    },
+    {
+      "expr": "1 / 0",
+      "env": {},
+      "out": null
+    },
+    {
+      "expr": "null == null",
+      "env": {},
+      "out": true
+    },
+    {
+      "expr": "1 == null",
+      "env": {},
+      "out": null
+    },
+    {
+      "expr": "null and false",
+      "env": {},
+      "out": false
+    },
+    {
+      "expr": "null or true",
+      "env": {},
+      "out": true
+    },
+    {
+      "expr": "null and true",
+      "env": {},
+      "out": null
+    },
+    {
+      "expr": "on_hand >= 0",
+      "env": {
+        "on_hand": -1
+      },
+      "out": false
+    },
+    {
+      "expr": "coalesce(a, b, 7)",
+      "env": {
+        "a": null,
+        "b": null
+      },
+      "out": "7"
+    },
+    {
+      "expr": "when(amount > 1000, 'director', 'manager')",
+      "env": {
+        "amount": {
+          "dec": "1000.01"
+        }
+      },
+      "out": "director"
+    },
+    {
+      "expr": "when(null, 'a', 'b')",
+      "env": {},
+      "out": "b"
+    },
+    {
+      "expr": "status in ['open', 'held']",
+      "env": {
+        "status": "held"
+      },
+      "out": true
+    },
+    {
+      "expr": "concat('it''s ', upper('ok'))",
+      "env": {},
+      "out": "it's OK"
+    },
+    {
+      "expr": "not (1 == 2)",
+      "env": {},
+      "out": true
+    },
+    {
+      "expr": "-3 + 5 * 2",
+      "env": {},
+      "out": "7"
+    }
+  ]
+}
