@@ -1,0 +1,15 @@
+[package]
+name = "ce-auth"
+description = "CEngine auth: verifies Platform-issued tokens and mints the only TenantScope (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"

@@ -7,8 +7,9 @@
 //! 3. Every value is a bound parameter; none is spliced into SQL text.
 //! 4. Only declared, indexed fields can be sorted; page size is capped.
 //!
-//! `TenantScope::new` is the only way to build a scope. Until the auth crate exists it is
-//! public; when `verify_token` lands, the constructor becomes private to that crate.
+//! `TenantScope` comes from `ce-auth`: only a verified token can produce one.
+
+pub use ce_auth::TenantScope;
 
 mod filter;
 mod plan;
@@ -17,20 +18,3 @@ pub use plan::{
     plan_list, ListRequest, Param, Planned, QueryError, SortDir, SortKey, Target, DEFAULT_LIMIT,
     MAX_LIMIT,
 };
-
-/// Proof that a request is scoped to one tenant.
-#[derive(Debug, Clone)]
-pub struct TenantScope {
-    tenant_id: String,
-}
-
-impl TenantScope {
-    pub fn new(tenant_id: impl Into<String>) -> Self {
-        TenantScope {
-            tenant_id: tenant_id.into(),
-        }
-    }
-    pub fn tenant_id(&self) -> &str {
-        &self.tenant_id
-    }
-}
