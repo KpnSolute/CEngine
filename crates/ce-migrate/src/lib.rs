@@ -20,6 +20,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+/// Largest `n` Postgres accepts in `varchar(n)`.
+const MAX_VARCHAR: u64 = 10_485_760;
+
 /// Columns the engine owns; a manifest field may not use these names.
 pub const RESERVED: [&str; 6] = [
     "id",
@@ -76,7 +79,8 @@ fn sql_type(entity: &str, name: &str, f: &Value) -> Result<String, MigrateError>
     };
     Ok(match f["type"].as_str().ok_or_else(bad)? {
         "string" => match f["max_length"].as_u64() {
-            Some(n) if n > 0 => format!("varchar({n})"),
+            Some(n) if n > 0 && n <= MAX_VARCHAR => format!("varchar({n})"),
+            // Longer than Postgres allows for varchar(n): text, with the limit as a CHECK below.
             _ => "text".into(),
         },
         "text" | "enum" => "text".into(),
@@ -123,7 +127,7 @@ pub fn generate(m: &Manifest, schema: &str) -> Result<Vec<String>, MigrateError>
             e["fields"].as_object().unwrap_or(&empty).iter().collect();
 
         let mut cols = vec![
-            "\"id\" uuid PRIMARY KEY".to_string(),
+            "\"id\" uuid NOT NULL".to_string(),
             "\"tenant_id\" uuid NOT NULL".to_string(),
             "\"version\" bigint NOT NULL DEFAULT 1".to_string(),
             "\"created_at\" timestamptz NOT NULL".to_string(),
@@ -178,6 +182,14 @@ pub fn generate(m: &Manifest, schema: &str) -> Result<Vec<String>, MigrateError>
             };
             cols.push(format!("\"{fname}\" {ty}{not_null}"));
 
+            if let Some(n) = f["max_length"].as_u64() {
+                if f["type"] == "string" && n > MAX_VARCHAR {
+                    checks.push(format!(
+                        "CONSTRAINT \"{}\" CHECK (char_length(\"{fname}\") <= {n})",
+                        name("ln", &[ename, fname])
+                    ));
+                }
+            }
             if f["type"] == "enum" {
                 let values: Vec<String> = f["values"]
                     .as_array()
@@ -234,26 +246,25 @@ pub fn generate(m: &Manifest, schema: &str) -> Result<Vec<String>, MigrateError>
             }
         }
 
-        // Targets of composite foreign keys need a unique (tenant_id, id).
+        // Identity is (tenant, id): two tenants may hold the same id, and composite foreign
+        // keys target this key.
         checks.push(format!(
-            "CONSTRAINT \"{}\" UNIQUE (\"tenant_id\", \"id\")",
-            name("uqid", &[ename])
+            "CONSTRAINT \"{}\" PRIMARY KEY (\"tenant_id\", \"id\")",
+            name("pk", &[ename])
         ));
         cols.extend(checks);
         out.push(format!(
             "CREATE TABLE \"{schema}\".\"{ename}\" (\n  {}\n)",
             cols.join(",\n  ")
         ));
-        // Default list order with no sort: tenant first, then id.
-        indexes.push(format!(
-            "CREATE INDEX \"{}\" ON \"{schema}\".\"{ename}\" (\"tenant_id\", \"id\"){}",
-            name("lst", &[ename]),
-            if soft {
-                " WHERE \"deleted_at\" IS NULL"
-            } else {
-                ""
-            }
-        ));
+        // Default list order with no sort: tenant first, then id. Hard-delete tables are
+        // already served by the primary key.
+        if soft {
+            indexes.push(format!(
+                "CREATE INDEX \"{}\" ON \"{schema}\".\"{ename}\" (\"tenant_id\", \"id\") WHERE \"deleted_at\" IS NULL",
+                name("lst", &[ename])
+            ));
+        }
     }
 
     out.extend(fks);

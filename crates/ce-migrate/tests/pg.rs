@@ -334,3 +334,39 @@ fn insert_period(c: &mut Client, m: &Manifest, schema: &str, id: &str, tenant: &
     )
     .unwrap_or_else(|e| panic!("{e}"));
 }
+
+#[test]
+fn two_tenants_may_use_the_same_record_id_and_big_limits_install() {
+    let Some(url) = url() else { return };
+    let mut c = Client::connect(&url, NoTls).unwrap();
+    let mut v = example("inventory").value.clone();
+    v["entities"]["item"]["fields"]["name"]["max_length"] = json!(10_485_761);
+    let m = validate(v.to_string().as_bytes()).expect("still valid");
+    let schema = schema_name();
+    install(&mut c, &m, &schema);
+    let id = "aaaaaaaa-0000-0000-0000-000000000001";
+    insert_period(&mut c, &m, &schema, id, A);
+    insert_period(&mut c, &m, &schema, id, B);
+    // and an oversized value is still refused by the CHECK
+    insert_period(
+        &mut c,
+        &m,
+        &schema,
+        "aaaaaaaa-0000-0000-0000-000000000002",
+        A,
+    );
+    let long = "x".repeat(10_485_762);
+    let res = c.execute(
+        format!(
+            "INSERT INTO \"{schema}\".\"item\" (\"id\", \"tenant_id\", \"created_at\", \"updated_at\", \"name\", \"unit_cost\") \
+             VALUES ('cccccccc-0000-0000-0000-000000000001', $1::text::uuid, now(), now(), $2, 1)"
+        )
+        .as_str(),
+        &[&A, &long],
+    );
+    assert_eq!(
+        res.expect_err("too long").code().map(|c| c.code()),
+        Some("23514")
+    );
+    drop_schema(&mut c, &schema);
+}

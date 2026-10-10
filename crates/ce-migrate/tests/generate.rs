@@ -31,7 +31,7 @@ fn every_table_has_the_engine_columns() {
     let sql = joined(&example("inventory"));
     assert!(sql.starts_with("CREATE SCHEMA \"ce_t1\""));
     for col in [
-        "\"id\" uuid PRIMARY KEY",
+        "\"id\" uuid NOT NULL",
         "\"tenant_id\" uuid NOT NULL",
         "\"version\" bigint NOT NULL DEFAULT 1",
         "\"deleted_at\" timestamptz",
@@ -62,7 +62,8 @@ fn references_are_tenant_scoped_foreign_keys() {
     assert!(sql.contains(
         "FOREIGN KEY (\"tenant_id\", \"period\") REFERENCES \"ce_t1\".\"period\" (\"tenant_id\", \"id\")"
     ));
-    assert!(sql.contains("UNIQUE (\"tenant_id\", \"id\")"));
+    assert!(sql.contains("PRIMARY KEY (\"tenant_id\", \"id\")"));
+    assert!(!sql.contains("PRIMARY KEY (\"id\")") && !sql.contains("\"id\" uuid PRIMARY KEY"));
 }
 
 #[test]
@@ -177,4 +178,19 @@ fn generated_names_are_short_and_do_not_collide() {
         .unwrap()
         .iter()
         .all(|s| s.split('"').nth(1).is_none_or(|n| n.len() <= 63)));
+}
+
+#[test]
+fn string_limits_beyond_varchar_become_text_with_a_check() {
+    let m = from(json!({
+        "manifest_version": 1, "template": { "name": "t", "version": "0.1.0", "title": "T" },
+        "entities": { "thing": { "fields": {
+            "ok": { "type": "string", "max_length": 10485760 },
+            "big": { "type": "string", "max_length": 10485761 }
+        }}}
+    }));
+    let sql = joined(&m);
+    assert!(sql.contains("\"ok\" varchar(10485760)"), "{sql}");
+    assert!(sql.contains("\"big\" text"), "{sql}");
+    assert!(sql.contains("char_length(\"big\") <= 10485761"), "{sql}");
 }
