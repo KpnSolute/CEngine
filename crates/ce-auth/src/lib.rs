@@ -23,14 +23,6 @@ impl TenantScope {
     pub fn tenant_id(&self) -> &str {
         &self.tenant_id
     }
-
-    /// Test helper behind the `test-util` feature.
-    #[cfg(feature = "test-util")]
-    pub fn for_tests(tenant_id: impl Into<String>) -> Self {
-        TenantScope {
-            tenant_id: tenant_id.into(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

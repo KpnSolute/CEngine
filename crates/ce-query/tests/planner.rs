@@ -2,6 +2,24 @@ use ce_manifest::{validate, Manifest};
 use ce_query::*;
 use serde_json::{json, Value};
 
+/// Builds a scope the only legitimate way: by verifying a signed token.
+fn test_scope(tenant: &str) -> TenantScope {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let key = b"0123456789abcdef0123456789abcdef";
+    let h = B64.encode(r#"{"alg":"HS256"}"#);
+    let p = B64.encode(format!(r#"{{"sub":"u1","tenant":"{tenant}","exp":2000}}"#));
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+    mac.update(format!("{h}.{p}").as_bytes());
+    let token = format!("{h}.{p}.{}", B64.encode(mac.finalize().into_bytes()));
+    let principal = ce_auth::Verifier::new(key)
+        .unwrap()
+        .verify_token(&token, 1000)
+        .unwrap();
+    principal.scope().clone()
+}
+
 fn manifest(name: &str) -> Manifest {
     let path = format!(
         "{}/../../spec/examples/{name}.json",
@@ -18,7 +36,7 @@ fn target(entity: &str) -> Target {
 }
 
 fn scope() -> TenantScope {
-    TenantScope::for_tests("11111111-1111-1111-1111-111111111111")
+    test_scope("11111111-1111-1111-1111-111111111111")
 }
 
 fn plan(m: &Manifest, entity: &str, req: &ListRequest) -> Result<Planned, QueryError> {
