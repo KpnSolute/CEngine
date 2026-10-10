@@ -58,6 +58,12 @@ pub fn eval(e: &Expr, env: &Env) -> R {
             _ => Err(ty("not needs a bool")),
         },
         Expr::Call(f, a) => call(f, a, env),
+        Expr::Field(base, _) => match eval(base, env)? {
+            Value::Null => Ok(Value::Null),
+            _ => Err(ty(
+                "field access on a value needs the store (not available here)",
+            )),
+        },
         Expr::Bin(op, a, b) => bin(*op, a, b, env),
     }
 }
@@ -199,7 +205,7 @@ fn arity(name: &str, args: &[Value], n: usize) -> Result<(), EvalError> {
 }
 
 fn call(name: &str, raw: &[Expr], env: &Env) -> R {
-    if matches!(name, "sum" | "count" | "children") {
+    if matches!(name, "sum" | "count" | "children" | "ref") {
         return Err(EvalError::Aggregate(name.to_string()));
     }
     let args: Vec<Value> = raw.iter().map(|x| eval(x, env)).collect::<Result<_, _>>()?;
