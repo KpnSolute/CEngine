@@ -1,0 +1,19 @@
+[package]
+name = "ce-migrate"
+description = "CEngine migration generator: typed per-entity Postgres tables from a validated manifest (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ce-manifest = { path = "../ce-manifest" }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+ce-query = { path = "../ce-query" }
+ce-auth = { path = "../ce-auth" }
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+base64 = "0.22"
+hmac = "0.12"

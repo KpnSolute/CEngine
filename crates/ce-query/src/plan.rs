@@ -9,7 +9,7 @@ pub const MAX_LIMIT: usize = 200;
 pub enum Param {
     Text(String),
     Int(i64),
-    /// Exact decimal as a string; bound with a `::numeric` cast.
+    /// Exact decimal as a string; bound with a `::text::numeric` cast.
     Dec(String),
     Bool(bool),
 }
@@ -121,19 +121,19 @@ impl Ctx<'_> {
                 if !ok {
                     return Err(bad());
                 }
-                (Param::Dec(s.to_string()), "::numeric")
+                (Param::Dec(s.to_string()), "::text::numeric")
             }
             "date" => (
                 Param::Text(v.as_str().ok_or_else(bad)?.to_string()),
-                "::date",
+                "::text::date",
             ),
             "datetime" => (
                 Param::Text(v.as_str().ok_or_else(bad)?.to_string()),
-                "::timestamptz",
+                "::text::timestamptz",
             ),
             "ref" => (
                 Param::Text(v.as_str().ok_or_else(bad)?.to_string()),
-                "::uuid",
+                "::text::uuid",
             ),
             "enum" => {
                 let s = v.as_str().ok_or_else(bad)?;
@@ -190,7 +190,7 @@ pub fn plan_list(
         }
     }
 
-    let mut wheres = vec!["\"tenant_id\" = $1::uuid".to_string()];
+    let mut wheres = vec!["\"tenant_id\" = $1::text::uuid".to_string()];
     if entity["soft_delete"] != false {
         wheres.push("\"deleted_at\" IS NULL".to_string());
     }
