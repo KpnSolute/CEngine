@@ -1,6 +1,7 @@
 //! CEngine events (draft v1): the envelope, the signature and the outbox.
 //!
-//! - **Envelope:** CloudEvents 1.0 JSON. Type is `com.kpnsolute.compute.{entity}.{verb}.v{n}`.
+//! - **Envelope:** CloudEvents 1.0 JSON. Type is `com.kpnsolute.compute.{name}.v{n}`, where
+//!   `name` is the manifest's dotted emit name (`request.approved` or `inventory.period.closed`).
 //!   The tenant comes from the `TenantScope` at enqueue time, never from the caller.
 //! - **Signing:** HMAC-SHA256 over the exact payload bytes. A rotated key stays valid for
 //!   10 minutes, so receivers need not update in lockstep.
@@ -22,9 +23,8 @@ use serde_json::{json, Value};
 /// What a template or the engine wants to publish, before it is stamped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewEvent {
-    /// Entity and verb, e.g. `request` and `approved`.
-    pub entity: String,
-    pub verb: String,
+    /// Dotted name with 2 to 4 segments, e.g. `request.approved` or `inventory.period.closed`.
+    pub name: String,
     /// Contract version of this event type, starting at 1.
     pub version: u32,
     /// The record the event is about.
@@ -32,18 +32,45 @@ pub struct NewEvent {
     pub data: Value,
 }
 
-/// `com.kpnsolute.compute.{entity}.{verb}.v{n}`
-pub fn event_type(entity: &str, verb: &str, version: u32) -> String {
-    format!("com.kpnsolute.compute.{entity}.{verb}.v{version}")
+/// `com.kpnsolute.compute.{name}.v{n}`
+pub fn event_type(name: &str, version: u32) -> String {
+    format!("com.kpnsolute.compute.{name}.v{version}")
 }
 
-/// Splits a manifest `emit` name such as `request.approved` into entity and verb.
-pub fn parse_emit(name: &str) -> Option<(String, String)> {
-    let (entity, verb) = name.split_once('.')?;
-    if entity.is_empty() || verb.is_empty() || verb.contains('.') {
-        return None;
-    }
-    Some((entity.to_string(), verb.to_string()))
+/// Checks a manifest `emit` name: 2 to 4 dot-separated segments, each `[a-z][a-z0-9_]*`.
+pub fn valid_event_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('.').collect();
+    (2..=4).contains(&parts.len())
+        && parts.iter().all(|p| {
+            let b = p.as_bytes();
+            !b.is_empty()
+                && b[0].is_ascii_lowercase()
+                && b.iter()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+        })
+}
+
+/// Unix seconds as an RFC 3339 UTC timestamp, e.g. `2026-10-10T19:30:00Z`.
+pub fn rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 /// A stamped event, ready to store and send.
@@ -62,8 +89,8 @@ impl Event {
             "specversion": "1.0",
             "id": self.id,
             "source": "/kpnsolute/compute",
-            "type": event_type(&self.new.entity, &self.new.verb, self.new.version),
-            "time": self.time,
+            "type": event_type(&self.new.name, self.new.version),
+            "time": rfc3339(self.time),
             "datacontenttype": "application/json",
             "tenant": self.tenant,
             "data": self.new.data,

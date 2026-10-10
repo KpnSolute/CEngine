@@ -126,6 +126,11 @@ impl MemoryOutbox {
                     blocked.push(tenant);
                     continue;
                 }
+                // A relay that keeps crashing never calls `fail`; the expired lease counts.
+                Status::InFlight if row.attempts >= MAX_ATTEMPTS => {
+                    row.status = Status::DeadLettered;
+                    continue;
+                }
                 _ => {}
             }
             if blocked.contains(&tenant) {

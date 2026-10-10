@@ -18,8 +18,9 @@ struct Key {
 
 pub struct Signer {
     current: Key,
-    /// The previous key and the time it was rotated out.
-    previous: Option<(Key, u64)>,
+    /// Every rotated-out key with the time it was rotated out. Each stays valid for
+    /// [`KEY_OVERLAP_SECS`] after its own rotation, however many rotations followed.
+    previous: Vec<(Key, u64)>,
 }
 
 fn mac(secret: &[u8], payload: &[u8]) -> Vec<u8> {
@@ -43,7 +44,7 @@ impl Signer {
                 id: key_id.into(),
                 secret: secret.to_vec(),
             },
-            previous: None,
+            previous: Vec::new(),
         })
     }
 
@@ -59,7 +60,9 @@ impl Signer {
                 secret: secret.to_vec(),
             },
         );
-        self.previous = Some((old, now));
+        self.previous
+            .retain(|(_, rotated)| now < rotated + KEY_OVERLAP_SECS);
+        self.previous.push((old, now));
         Ok(())
     }
 
@@ -82,9 +85,13 @@ impl Signer {
         let key = if key_id == self.current.id {
             &self.current
         } else {
-            match &self.previous {
-                Some((k, rotated)) if k.id == key_id && now < rotated + KEY_OVERLAP_SECS => k,
-                _ => return Err(SignError::BadSignature),
+            match self
+                .previous
+                .iter()
+                .find(|(k, rotated)| k.id == key_id && now < rotated + KEY_OVERLAP_SECS)
+            {
+                Some((k, _)) => k,
+                None => return Err(SignError::BadSignature),
             }
         };
         let expected = hex(&mac(&key.secret, payload));
