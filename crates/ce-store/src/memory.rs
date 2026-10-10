@@ -14,8 +14,8 @@ struct Stored {
 struct Inner {
     next_id: u64,
     records: HashMap<RecordKey, Stored>,
-    /// (tenant, key) -> (entity, payload, record id)
-    keys: HashMap<(String, String), (String, Value, String)>,
+    /// (tenant, key) -> (payload, snapshot of the original insert result)
+    keys: HashMap<(String, String), (Value, Record)>,
 }
 
 /// Reference backend for tests and local development. Not for production.
@@ -52,16 +52,11 @@ impl Store for MemoryStore {
         let mut g = self.lock();
         let idem = idempotency_key.map(|k| (scope.tenant_id().to_string(), k.to_string()));
         if let Some(k) = &idem {
-            if let Some((e, payload, id)) = g.keys.get(k) {
-                if e != entity || payload != &data {
+            if let Some((payload, original)) = g.keys.get(k) {
+                if original.entity != entity || payload != &data {
                     return Err(StoreError::IdempotencyKeyReused);
                 }
-                let rk = key(scope, entity, id);
-                return g
-                    .records
-                    .get(&rk)
-                    .map(|s| s.record.clone())
-                    .ok_or(StoreError::NotFound);
+                return Ok(original.clone());
             }
         }
         g.next_id += 1;
@@ -80,7 +75,7 @@ impl Store for MemoryStore {
             },
         );
         if let Some(k) = idem {
-            g.keys.insert(k, (entity.into(), data, id));
+            g.keys.insert(k, (data, record.clone()));
         }
         Ok(record)
     }
