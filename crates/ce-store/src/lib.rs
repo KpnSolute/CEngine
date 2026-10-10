@@ -12,6 +12,8 @@
 //!
 //! The trait is synchronous for now; the Postgres backend will move it to async before 0.1.
 
+#[cfg(feature = "contract-tests")]
+pub mod contract;
 mod memory;
 
 pub use ce_auth::TenantScope;
@@ -30,9 +32,13 @@ pub struct Record {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoreError {
     NotFound,
-    VersionConflict { current: u64 },
+    VersionConflict {
+        current: u64,
+    },
     IdempotencyKeyReused,
     BadData(&'static str),
+    /// The backend failed (connection, SQL). The message is for logs, not for callers.
+    Backend(String),
 }
 
 pub trait Store {

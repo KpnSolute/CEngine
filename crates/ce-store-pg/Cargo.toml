@@ -1,0 +1,19 @@
+[package]
+name = "ce-store-pg"
+description = "CEngine Postgres store: the Store contract on PostgreSQL (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ce-store = { path = "../ce-store" }
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+serde_json = "1"
+
+[dev-dependencies]
+ce-store = { path = "../ce-store", features = ["contract-tests"] }
+ce-auth = { path = "../ce-auth" }
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
