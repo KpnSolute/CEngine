@@ -12,6 +12,7 @@ Status: pre-release. Nothing here is deployed or used by KpnCompute yet.
 - `conformance/`: vectors every language binding must pass.
 - `reference/`: tiny Python evaluator used only to check the vectors are self-consistent.
 - `crates/ce-expr`: Rust expression lexer, parser and evaluator.
+- `crates/ce-manifest`: manifest JSON Schema validation plus semantic checks (references, state graphs, expressions, PII in public projections), and a content hash.
 
 ## Check
 ```
@@ -20,5 +21,5 @@ python3 reference/run_vectors.py
 ```
 
 ## Not done yet
-Manifest validation crate, query planner, store, events, server, Python and WASM bindings,
+Query planner, store, events, server, Python and WASM bindings,
 date and aggregate functions, static type checking of expressions.

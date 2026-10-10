@@ -16,6 +16,8 @@ pub enum Expr {
     /// `name` or `name.field.field`
     Path(Vec<String>),
     Call(String, Vec<Expr>),
+    /// `call(...).field`
+    Field(Box<Expr>, String),
     Neg(Box<Expr>),
     Not(Box<Expr>),
     Bin(Op, Box<Expr>, Box<Expr>),
@@ -334,7 +336,18 @@ impl Parser {
                         self.enter()?;
                         let a = self.args(")")?;
                         self.depth -= 1;
-                        Ok(Expr::Call(id, a))
+                        let mut e = Expr::Call(id, a);
+                        while self.is_op(".") {
+                            self.i += 1;
+                            match self.t.get(self.i) {
+                                Some(Tok::Ident(f)) => {
+                                    e = Expr::Field(Box::new(e), f.clone());
+                                    self.i += 1;
+                                }
+                                _ => return Err(ParseError::Unexpected("expected field".into())),
+                            }
+                        }
+                        Ok(e)
                     } else {
                         let mut path = vec![id];
                         while self.is_op(".") {

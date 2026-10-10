@@ -1,0 +1,13 @@
+[package]
+name = "ce-manifest"
+description = "CEngine template manifest: schema validation and semantic checks (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ce-expr = { path = "../ce-expr" }
+jsonschema = { version = "0.30", default-features = false }
+serde_json = "1"
+sha2 = "0.10"

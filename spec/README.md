@@ -10,6 +10,8 @@ implemented. Move into KpnSolute/CEngine only after ADR-0007 conditions 1 to 5.
 - `expression-language.md`: full expression language (grammar, types, null rules, functions, where allowed).
 - `languages.md`: how Rust, Python and JS/TS are used to build and consume the framework.
 - `reference/expr_ref.py` and `conformance/expression-vectors.json`: tiny reference evaluator and 20 vectors; all pass.
+- `groups-and-connectors.md`: the 15 template groups and connector types (owner-approved groups).
+- `capability-map.md`: MJCC audit, built-in versus missing, build order.
 - `examples/inventory.json`, `booking_crm.json`, `approval_workflow.json`: three unlike templates.
 
 ## Check performed
@@ -19,7 +21,7 @@ unique codes and only point to declared states (script run 2026-10-10).
 ## Not yet specified (found while drafting)
 1. **Expression language.** Now drafted in `expression-language.md`. Still open: aggregates over `children()` and SQL compilation are specified but have no vectors yet; the three example manifests are not yet type-checked against the language.
 2. **OpenAPI generation.** Not drafted; follows the manifest and the data-plane endpoints in the contract plan.
-3. **Entity state vs enum.** Examples declare both an enum field and a `state` model for the same field. Decide whether `state` replaces the enum.
+3. ~~Entity state vs enum.~~ Resolved in `ce-manifest`: the state field may be implicit (engine-managed) or declared; if declared it must be an enum whose values equal the state names.
 4. **Role grammar.** `read`/`write` use entity names and `*`; field-level rules are undefined.
 5. **Migrations.** Manifest-to-schema diff and the `migrate` plan/apply format are not specified.
 6. **Breaking-change rules** for manifest versions are not written.
