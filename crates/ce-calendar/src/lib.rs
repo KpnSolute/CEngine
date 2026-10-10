@@ -19,7 +19,7 @@ mod slots;
 pub use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc, Weekday};
 pub use chrono_tz::Tz;
 pub use interval::{conflicts, Interval};
-pub use rrule::{expand, Freq, Recurrence};
+pub use rrule::{expand, Freq, Recurrence, Until};
 pub use slots::{available_slots, WorkingHours};
 
 /// Longest window an expansion or slot search may cover.
@@ -55,18 +55,19 @@ pub(crate) fn resolve_local(tz: Tz, local: NaiveDateTime) -> DateTime<Utc> {
         LocalResult::None => {
             // In the gap: keep the offset that was in force before it, which moves the time
             // forward by the length of the gap (02:30 becomes 03:30 when 02:00 jumps to 03:00).
-            match tz
-                .from_local_datetime(&(local - Duration::hours(4)))
-                .earliest()
-            {
-                Some(before) => {
-                    use chrono::Offset;
-                    local.and_utc()
-                        - Duration::seconds(i64::from(before.offset().fix().local_minus_utc()))
+            // Gaps are usually one hour but can be a whole day (Pacific/Apia, 2011), so keep
+            // stepping back until a valid time is found.
+            use chrono::Offset;
+            let mut probe = local;
+            for _ in 0..(14 * 6) {
+                probe -= Duration::hours(4);
+                if let Some(before) = tz.from_local_datetime(&probe).earliest() {
+                    return local.and_utc()
+                        - Duration::seconds(i64::from(before.offset().fix().local_minus_utc()));
                 }
-                // Unreachable for real zones; fall back to reading the time as UTC.
-                None => local.and_utc(),
             }
+            // Unreachable for real zones; fall back to reading the time as UTC.
+            local.and_utc()
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
-    conflicts, resolve_local, CalendarError, Duration, Interval, NaiveTime, Tz, Weekday,
-    MAX_RESULTS, MAX_WINDOW_DAYS,
+    conflicts, interval::check_buffer, resolve_local, CalendarError, Duration, Interval, NaiveTime,
+    Tz, Weekday, MAX_RESULTS, MAX_WINDOW_DAYS,
 };
 use chrono::Datelike;
 use std::collections::BTreeMap;
@@ -59,6 +59,7 @@ pub fn available_slots(
     {
         return Err(CalendarError::BadStep);
     }
+    check_buffer(buffer)?;
     let mut out = Vec::new();
     // One day of slack either side: the local date can differ from the UTC date.
     let first = window.start.with_timezone(&tz).date_naive() - Duration::days(1);
@@ -67,24 +68,35 @@ pub fn available_slots(
     while date <= last {
         if let Some(ranges) = hours.days.get(&date.weekday().num_days_from_monday()) {
             for (from, to) in ranges {
-                let open = resolve_local(tz, date.and_time(*from));
                 let close = resolve_local(tz, date.and_time(*to));
-                let mut start = open;
-                while start + duration <= close {
-                    let slot = Interval {
-                        start,
-                        end: start + duration,
-                    };
-                    if slot.start >= window.start
-                        && slot.end <= window.end
-                        && conflicts(&slot, busy, buffer)?.is_empty()
-                    {
-                        out.push(slot);
-                        if out.len() >= MAX_RESULTS {
-                            return Ok(out);
+                // Candidates advance in local wall-clock time and are resolved one by one, so
+                // a repeated hour (fall back) is offered once, at its first occurrence. A
+                // candidate that resolves to an instant already offered (the spring gap) is
+                // skipped.
+                let mut local = date.and_time(*from);
+                let mut last: Option<crate::DateTime<chrono::Utc>> = None;
+                loop {
+                    let start = resolve_local(tz, local);
+                    if start + duration > close {
+                        break;
+                    }
+                    if last.is_none_or(|l| start > l) {
+                        last = Some(start);
+                        let slot = Interval {
+                            start,
+                            end: start + duration,
+                        };
+                        if slot.start >= window.start
+                            && slot.end <= window.end
+                            && conflicts(&slot, busy, buffer)?.is_empty()
+                        {
+                            out.push(slot);
+                            if out.len() >= MAX_RESULTS {
+                                return Ok(out);
+                            }
                         }
                     }
-                    start += step;
+                    local += step;
                 }
             }
         }

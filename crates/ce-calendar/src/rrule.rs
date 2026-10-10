@@ -20,8 +20,15 @@ pub struct Recurrence {
     pub by_day: Vec<Weekday>,
     pub by_month_day: Option<u32>,
     pub count: Option<u32>,
-    /// Last local date (inclusive) an occurrence may fall on.
-    pub until: Option<NaiveDate>,
+    pub until: Option<Until>,
+}
+
+/// End of a recurrence. A date is inclusive by the event's local date; an instant (UTC
+/// timestamp) is inclusive of an occurrence starting exactly at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Until {
+    Date(NaiveDate),
+    Instant(DateTime<Utc>),
 }
 
 fn bad(msg: impl Into<String>) -> CalendarError {
@@ -79,17 +86,18 @@ impl Recurrence {
                     )
                 }
                 "UNTIL" => {
-                    let date = value.get(..8).ok_or_else(|| bad("UNTIL"))?;
-                    let ok_tail = value.len() == 8
-                        || (value.len() == 16
-                            && value.as_bytes()[8] == b'T'
-                            && value.ends_with('Z'));
-                    until = Some(
-                        NaiveDate::parse_from_str(date, "%Y%m%d")
-                            .ok()
-                            .filter(|_| ok_tail)
-                            .ok_or_else(|| bad("UNTIL must be YYYYMMDD or YYYYMMDDTHHMMSSZ"))?,
-                    )
+                    until = Some(if value.len() == 8 {
+                        Until::Date(
+                            NaiveDate::parse_from_str(value, "%Y%m%d")
+                                .map_err(|_| bad("UNTIL must be YYYYMMDD or YYYYMMDDTHHMMSSZ"))?,
+                        )
+                    } else {
+                        Until::Instant(
+                            NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
+                                .map_err(|_| bad("UNTIL must be YYYYMMDD or YYYYMMDDTHHMMSSZ"))?
+                                .and_utc(),
+                        )
+                    })
                 }
                 "BYDAY" => {
                     for d in value.split(',') {
@@ -122,14 +130,48 @@ impl Recurrence {
         if by_month_day.is_some() && freq != Freq::Monthly {
             return Err(bad("BYMONTHDAY only applies to MONTHLY"));
         }
-        Ok(Recurrence {
+        let rule = Recurrence {
             freq,
             interval,
             by_day,
             by_month_day,
             count,
             until,
-        })
+        };
+        rule.validate()?;
+        Ok(rule)
+    }
+
+    /// Checks the constraints `parse` enforces; `expand` calls it so a hand-built value cannot
+    /// bypass them.
+    pub fn validate(&self) -> Result<(), CalendarError> {
+        if !(1..=366).contains(&self.interval) {
+            return Err(bad("INTERVAL must be 1 to 366"));
+        }
+        if self
+            .count
+            .is_some_and(|c| !(1..=MAX_RESULTS as u32).contains(&c))
+        {
+            return Err(bad("COUNT must be 1 to 1000"));
+        }
+        if self.count.is_some() && self.until.is_some() {
+            return Err(bad("COUNT and UNTIL cannot both be set"));
+        }
+        if !self.by_day.is_empty() && self.freq != Freq::Weekly {
+            return Err(bad("BYDAY only applies to WEEKLY"));
+        }
+        for (i, d) in self.by_day.iter().enumerate() {
+            if self.by_day[..i].contains(d) {
+                return Err(bad("BYDAY repeats a day"));
+            }
+        }
+        if self.by_month_day.is_some() && self.freq != Freq::Monthly {
+            return Err(bad("BYMONTHDAY only applies to MONTHLY"));
+        }
+        if self.by_month_day.is_some_and(|n| !(1..=31).contains(&n)) {
+            return Err(bad("BYMONTHDAY must be 1 to 31"));
+        }
+        Ok(())
     }
 }
 
@@ -142,7 +184,7 @@ fn dates(
 ) -> Vec<NaiveDate> {
     let mut out = Vec::new();
     let mut push = |d: NaiveDate, out: &mut Vec<NaiveDate>| -> bool {
-        if rule.until.is_some_and(|u| d > u) || rule.count.is_some_and(|c| out.len() as u32 >= c) {
+        if rule.count.is_some_and(|c| out.len() as u32 >= c) {
             return false;
         }
         if !keep_going(d) {
@@ -222,6 +264,7 @@ pub fn expand(
     tz: Tz,
     window: &Interval,
 ) -> Result<Vec<DateTime<Utc>>, CalendarError> {
+    rule.validate()?;
     if window.duration() > Duration::days(MAX_WINDOW_DAYS) {
         return Err(CalendarError::WindowTooLarge);
     }
@@ -229,8 +272,14 @@ pub fn expand(
     let end = window.end;
     // Count and until apply from the first occurrence, so expansion always starts there and
     // stops once past the window.
+    let past_until = |d: NaiveDate, t: DateTime<Utc>| match rule.until {
+        Some(Until::Date(u)) => d > u,
+        Some(Until::Instant(u)) => t > u,
+        None => false,
+    };
     let dates = dates(rule, first_local.date(), |d| {
-        resolve_local(tz, d.and_time(time)) < end
+        let t = resolve_local(tz, d.and_time(time));
+        t < end && !past_until(d, t)
     });
     Ok(dates
         .into_iter()

@@ -31,13 +31,19 @@ pub fn conflicts(
     existing: &[Interval],
     buffer: Duration,
 ) -> Result<Vec<usize>, CalendarError> {
-    if buffer < Duration::zero() || buffer > Duration::days(1) {
-        return Err(CalendarError::BadBuffer);
-    }
+    check_buffer(buffer)?;
     Ok(existing
         .iter()
         .enumerate()
         .filter(|(_, e)| proposed.start < e.end + buffer && e.start - buffer < proposed.end)
         .map(|(i, _)| i)
         .collect())
+}
+
+/// A buffer is between zero and one day.
+pub(crate) fn check_buffer(buffer: Duration) -> Result<(), CalendarError> {
+    if buffer < Duration::zero() || buffer > Duration::days(1) {
+        return Err(CalendarError::BadBuffer);
+    }
+    Ok(())
 }

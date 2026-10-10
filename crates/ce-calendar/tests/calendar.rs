@@ -418,3 +418,117 @@ fn slot_inputs_are_validated() {
         Err(CalendarError::BadTimeZone(_))
     ));
 }
+
+#[test]
+fn until_timestamp_is_enforced_to_the_second() {
+    let utc = parse_tz("UTC").unwrap();
+    let w = win(t(2026, 1, 1, 0, 0), t(2026, 2, 1, 0, 0));
+    // Day 3 at 08:00 is after 07:59:59, so only two occurrences remain.
+    let got = expand_text(
+        "FREQ=DAILY;UNTIL=20260103T075959Z",
+        local(2026, 1, 1, 8, 0),
+        utc,
+        &w,
+    );
+    assert_eq!(got.len(), 2);
+    let got = expand_text(
+        "FREQ=DAILY;UNTIL=20260103T080000Z",
+        local(2026, 1, 1, 8, 0),
+        utc,
+        &w,
+    );
+    assert_eq!(got.len(), 3);
+    for bad in [
+        "FREQ=DAILY;UNTIL=20260103T99Z",
+        "FREQ=DAILY;UNTIL=20260103T256161Z",
+        "FREQ=DAILY;UNTIL=20260103X080000Z",
+        "FREQ=DAILY;UNTIL=20260103T080000",
+    ] {
+        assert!(matches!(
+            Recurrence::parse(bad),
+            Err(CalendarError::BadRule(_))
+        ));
+    }
+}
+
+#[test]
+fn hand_built_rules_are_validated_on_expand() {
+    let utc = parse_tz("UTC").unwrap();
+    let w = win(t(2026, 1, 1, 0, 0), t(2026, 1, 8, 0, 0));
+    let mut rule = Recurrence::parse("FREQ=DAILY").unwrap();
+    rule.interval = 0;
+    assert!(matches!(
+        expand(&rule, local(2026, 1, 1, 8, 0), utc, &w),
+        Err(CalendarError::BadRule(_))
+    ));
+    let mut rule = Recurrence::parse("FREQ=DAILY").unwrap();
+    rule.count = Some(5);
+    rule.until = Some(Until::Date(NaiveDate::from_ymd_opt(2026, 1, 3).unwrap()));
+    assert!(matches!(
+        expand(&rule, local(2026, 1, 1, 8, 0), utc, &w),
+        Err(CalendarError::BadRule(_))
+    ));
+}
+
+#[test]
+fn a_day_long_gap_resolves_to_the_pre_gap_offset() {
+    // Samoa skipped 2011-12-30 entirely (UTC-10 to UTC+14).
+    let apia = parse_tz("Pacific/Apia").unwrap();
+    let w = win(t(2011, 12, 29, 0, 0), t(2011, 12, 31, 12, 0));
+    let got = expand_text("FREQ=DAILY;COUNT=3", local(2011, 12, 29, 12, 0), apia, &w);
+    assert_eq!(got[0], t(2011, 12, 29, 22, 0));
+    assert_eq!(got[1], t(2011, 12, 30, 22, 0));
+}
+
+#[test]
+fn ambiguous_hour_slots_are_offered_once() {
+    let tz = ny();
+    let mut hours = WorkingHours::new();
+    hours = hours
+        .open(
+            Weekday::Sun,
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
+        )
+        .unwrap();
+    // 2026-11-01 is the fall-back Sunday in New York.
+    let w = win(t(2026, 11, 1, 0, 0), t(2026, 11, 1, 12, 0));
+    let got = available_slots(
+        &hours,
+        tz,
+        &w,
+        &[],
+        Duration::hours(1),
+        Duration::hours(1),
+        Duration::zero(),
+    )
+    .unwrap();
+    let starts: Vec<_> = got.iter().map(|s| s.start).collect();
+    let mut dedup = starts.clone();
+    dedup.dedup();
+    assert_eq!(starts, dedup);
+    assert_eq!(
+        starts.len(),
+        4,
+        "00:00, 01:00, 02:00, 03:00 local, each once"
+    );
+    assert!(starts.windows(2).all(|p| p[0] < p[1]));
+}
+
+#[test]
+fn bad_buffer_is_rejected_even_on_closed_days() {
+    let hours = WorkingHours::new();
+    let w = win(t(2026, 1, 1, 0, 0), t(2026, 1, 2, 0, 0));
+    assert_eq!(
+        available_slots(
+            &hours,
+            ny(),
+            &w,
+            &[],
+            Duration::hours(1),
+            Duration::hours(1),
+            Duration::minutes(-1),
+        ),
+        Err(CalendarError::BadBuffer)
+    );
+}
