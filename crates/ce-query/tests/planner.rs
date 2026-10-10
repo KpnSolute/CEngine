@@ -329,7 +329,7 @@ fn random_filter(r: &mut Rng, depth: usize) -> Value {
         "x\"y",
     ];
     let ops = ["eq", "ne", "gt", "lt", "in", "nin", "like", "null", "zzz"];
-    if depth < 3 && r.next() % 3 == 0 {
+    if depth < 3 && r.next().is_multiple_of(3) {
         return match r.next() % 3 {
             0 => json!({"and": [random_filter(r, depth + 1), random_filter(r, depth + 1)]}),
             1 => json!({"or": [random_filter(r, depth + 1), random_filter(r, depth + 1)]}),
