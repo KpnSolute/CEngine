@@ -1,0 +1,11 @@
+[package]
+name = "ce-calendar"
+description = "CEngine calendar and booking logic: recurrence, conflicts and available slots, DST-correct (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
