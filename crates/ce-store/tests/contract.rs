@@ -136,3 +136,24 @@ fn non_object_data_is_refused() {
         Err(StoreError::BadData(_))
     ));
 }
+
+#[test]
+fn idempotent_replay_returns_the_original_result_after_changes() {
+    let s = MemoryStore::new();
+    let first = s
+        .insert(&scope(A), "item", json!({"n": 1}), Some("k"))
+        .unwrap();
+    s.update(&scope(A), "item", &first.id, 1, json!({"n": 2}))
+        .unwrap();
+    assert_eq!(
+        s.insert(&scope(A), "item", json!({"n": 1}), Some("k"))
+            .unwrap(),
+        first
+    );
+    s.delete(&scope(A), "item", &first.id, 2).unwrap();
+    assert_eq!(
+        s.insert(&scope(A), "item", json!({"n": 1}), Some("k"))
+            .unwrap(),
+        first
+    );
+}
