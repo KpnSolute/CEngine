@@ -295,10 +295,7 @@ fn typed_values_are_checked() {
         run(f("name", "bogus", json!("x"))),
         Err(QueryError::BadOp(_, _))
     ));
-    assert!(matches!(
-        run(f("period", "eq", json!("not-a-uuid-but-bound"))),
-        Ok(_)
-    ));
+    assert!(run(f("period", "eq", json!("not-a-uuid-but-bound"))).is_ok());
     let nested = (0..20).fold(f("name", "eq", json!("x")), |acc, _| json!({"not": acc}));
     assert_eq!(run(nested), Err(QueryError::FilterTooLarge));
 }
