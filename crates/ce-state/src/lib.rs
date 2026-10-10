@@ -14,6 +14,8 @@ pub enum StateError {
     NoStateModel(String),
     UnknownState(String),
     UnknownAction(String),
+    /// The action's entity has a state model but no current state was given.
+    MissingCurrentState(String),
     /// The move is not in the entity's state graph.
     InvalidTransition {
         from: String,
@@ -162,25 +164,55 @@ pub struct ActionPlan {
 
 /// Checks `requires_state` and walks the action's effects, validating every transition
 /// from the state the previous effect left behind.
-pub fn plan_action(m: &Manifest, action: &str, current: &str) -> Result<ActionPlan, StateError> {
+///
+/// `current` is the record's current state. It is required when the action's entity has a
+/// state model and ignored when it does not: actions on stateless entities (`set`, `create`,
+/// `emit` only) are planned without a machine. A stateless entity whose action asks for
+/// `requires_state` or `transition` is refused with `NoStateModel`.
+pub fn plan_action(
+    m: &Manifest,
+    action: &str,
+    current: Option<&str>,
+) -> Result<ActionPlan, StateError> {
     let a = m.value["actions"]
         .get(action)
         .ok_or_else(|| StateError::UnknownAction(action.to_string()))?;
     let entity = a["entity"].as_str().unwrap_or_default();
-    let machine = Machine::new(m, entity)?;
-    machine.code(current)?;
+    let has_model = m.value["entities"]
+        .get(entity)
+        .ok_or_else(|| StateError::UnknownEntity(entity.to_string()))?
+        .get("state")
+        .is_some_and(Value::is_object);
+    let machine = if has_model {
+        Some(Machine::new(m, entity)?)
+    } else {
+        None
+    };
+    let mut at = match (&machine, current) {
+        (Some(mc), Some(c)) => {
+            mc.code(c)?;
+            Some(c.to_string())
+        }
+        (Some(_), None) => return Err(StateError::MissingCurrentState(action.to_string())),
+        (None, _) => None,
+    };
 
     if let Some(req) = a["requires_state"].as_array() {
         let required: Vec<String> = req
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
-        if !required.is_empty() && !required.iter().any(|r| r == current) {
-            return Err(StateError::WrongState {
-                action: action.into(),
-                current: current.into(),
-                required,
-            });
+        if !required.is_empty() {
+            let Some(cur) = &at else {
+                return Err(StateError::NoStateModel(entity.to_string()));
+            };
+            if !required.iter().any(|r| r == cur) {
+                return Err(StateError::WrongState {
+                    action: action.into(),
+                    current: cur.clone(),
+                    required,
+                });
+            }
         }
     }
 
@@ -193,7 +225,6 @@ pub fn plan_action(m: &Manifest, action: &str, current: &str) -> Result<ActionPl
         creates: vec![],
         is_async: a["async"].as_bool().unwrap_or(false),
     };
-    let mut at = current.to_string();
     for effect in a["effect"].as_array().into_iter().flatten() {
         if let Some(set) = effect["set"].as_object() {
             for (k, v) in set {
@@ -202,8 +233,11 @@ pub fn plan_action(m: &Manifest, action: &str, current: &str) -> Result<ActionPl
             }
         }
         if let Some(to) = effect["transition"].as_str() {
-            let mv = machine.transition(&at, to)?;
-            at = mv.to.clone();
+            let (Some(mc), Some(from)) = (&machine, &at) else {
+                return Err(StateError::NoStateModel(entity.to_string()));
+            };
+            let mv = mc.transition(from, to)?;
+            at = Some(mv.to.clone());
             plan.moves.push(mv);
         }
         if let Some(c) = effect.get("create").filter(|c| c.is_object()) {

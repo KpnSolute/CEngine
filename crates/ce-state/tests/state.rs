@@ -75,7 +75,7 @@ fn unknown_entity_and_missing_state_model() {
 #[test]
 fn plan_action_checks_required_state_and_collects_effects() {
     let m = approval();
-    let p = plan_action(&m, "approve", "in_review").unwrap();
+    let p = plan_action(&m, "approve", Some("in_review")).unwrap();
     assert_eq!(p.entity, "request");
     assert_eq!(p.moves.len(), 1);
     assert_eq!(
@@ -86,7 +86,7 @@ fn plan_action_checks_required_state_and_collects_effects() {
     assert_eq!(p.emits, ["request.approved"]);
     assert!(!p.is_async);
 
-    match plan_action(&m, "approve", "submitted") {
+    match plan_action(&m, "approve", Some("submitted")) {
         Err(StateError::WrongState {
             required, current, ..
         }) => {
@@ -96,11 +96,11 @@ fn plan_action_checks_required_state_and_collects_effects() {
         other => panic!("{other:?}"),
     }
     assert!(matches!(
-        plan_action(&m, "nope", "submitted"),
+        plan_action(&m, "nope", Some("submitted")),
         Err(StateError::UnknownAction(_))
     ));
     assert!(matches!(
-        plan_action(&m, "approve", "ghost"),
+        plan_action(&m, "approve", Some("ghost")),
         Err(StateError::UnknownState(_))
     ));
 }
@@ -118,7 +118,7 @@ fn action_that_jumps_outside_the_graph_is_refused() {
         v["actions"]["start_review"]["effect"] = serde_json::json!([{"transition": "approved"}]);
     });
     assert!(matches!(
-        plan_action(&m, "start_review", "submitted"),
+        plan_action(&m, "start_review", Some("submitted")),
         Err(StateError::InvalidTransition { .. })
     ));
 }
@@ -130,7 +130,7 @@ fn multi_step_actions_chain_from_the_state_left_behind() {
         v["actions"]["start_review"]["effect"] =
             serde_json::json!([{"transition": "in_review"}, {"transition": "approved"}]);
     });
-    let p = plan_action(&m, "start_review", "submitted").unwrap();
+    let p = plan_action(&m, "start_review", Some("submitted")).unwrap();
     assert_eq!(p.moves.len(), 2);
     assert_eq!(p.moves[1].from, "in_review");
     assert_eq!(p.moves[1].to_code, 200);
@@ -139,7 +139,7 @@ fn multi_step_actions_chain_from_the_state_left_behind() {
         v["actions"]["start_review"]["effect"] =
             serde_json::json!([{"transition": "in_review"}, {"transition": "closed"}]);
     });
-    assert!(plan_action(&m, "start_review", "submitted").is_err());
+    assert!(plan_action(&m, "start_review", Some("submitted")).is_err());
 }
 
 #[test]
@@ -149,4 +149,55 @@ fn state_class_covers_the_registry_ranges() {
     assert_eq!(StateClass::of(510), Some(StateClass::WindingDown));
     assert_eq!(StateClass::of(690), Some(StateClass::Terminal));
     assert_eq!(StateClass::of(50), None);
+}
+
+#[test]
+fn stateless_entity_actions_are_planned_without_a_machine() {
+    // Give the inventory item (no state model) a plain set/emit action.
+    let inv = load("inventory");
+    let entity = inv.value["entities"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, e)| e.get("state").is_none())
+        .map(|(k, _)| k.clone())
+        .expect("inventory has a stateless entity");
+    let field = inv.value["entities"][entity.as_str()]["fields"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let mut v = inv.value.clone();
+    v["actions"]["touch"] = serde_json::json!({
+        "entity": entity,
+        "effect": [{"set": {field: "actor.id"}}, {"emit": "item.touched"}]
+    });
+    let m = validate(serde_json::to_vec(&v).unwrap().as_slice()).expect("valid");
+    let p = plan_action(&m, "touch", None).unwrap();
+    assert!(p.moves.is_empty());
+    assert_eq!(p.emits, ["item.touched"]);
+    assert_eq!(p.sets.len(), 1);
+    // A current state is ignored for a stateless entity.
+    assert!(plan_action(&m, "touch", Some("whatever")).is_ok());
+
+    // But a transition on a stateless entity is refused.
+    let mut v2 = v.clone();
+    v2["actions"]["touch"]["effect"] = serde_json::json!([{"transition": "x"}]);
+    if let Ok(m2) = validate(serde_json::to_vec(&v2).unwrap().as_slice()) {
+        assert!(matches!(
+            plan_action(&m2, "touch", None),
+            Err(StateError::NoStateModel(_))
+        ));
+    }
+}
+
+#[test]
+fn stateful_actions_need_a_current_state() {
+    let m = approval();
+    assert!(matches!(
+        plan_action(&m, "approve", None),
+        Err(StateError::MissingCurrentState(_))
+    ));
 }
