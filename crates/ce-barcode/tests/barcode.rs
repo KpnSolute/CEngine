@@ -215,19 +215,31 @@ fn svg_is_deterministic_and_contains_no_input() {
 }
 
 #[test]
-fn svg_size_follows_options() {
+fn svg_size_follows_options_and_default_quiet_zones_meet_the_standards() {
+    let opts = |quiet_zone| SvgOptions {
+        module_size: 3,
+        quiet_zone,
+        bar_height: 40,
+    };
+    // EAN-13 needs 11 modules on the left: width (95 + 2 * 11) * 3 = 351.
     let e = encode(Symbology::Ean13, "590123412345").unwrap();
-    let s = render_svg(
-        &e,
-        &SvgOptions {
-            module_size: 3,
-            quiet_zone: None,
-            bar_height: 40,
-        },
-    )
-    .unwrap();
-    // width (95 + 2 * 10) * 3 = 345, height (40 + 2 * 10) * 3 = 180
-    assert!(s.contains("viewBox=\"0 0 345 180\""), "{s}");
+    assert!(render_svg(&e, &opts(None))
+        .unwrap()
+        .contains("viewBox=\"0 0 351 186\""));
+    // UPC-A needs 9: width (95 + 2 * 9) * 3 = 339.
+    let u = encode(Symbology::UpcA, "03600029145").unwrap();
+    assert!(render_svg(&u, &opts(None))
+        .unwrap()
+        .contains("viewBox=\"0 0 339 174\""));
+    // Code 128 uses 10: 134 modules for "Wikipedia" gives (134 + 20) * 3 = 462.
+    let c = encode(Symbology::Code128, "Wikipedia").unwrap();
+    assert!(render_svg(&c, &opts(None))
+        .unwrap()
+        .contains("viewBox=\"0 0 462 180\""));
+    // An explicit value always wins.
+    assert!(render_svg(&e, &opts(Some(10)))
+        .unwrap()
+        .contains("viewBox=\"0 0 345 180\""));
 }
 
 #[test]

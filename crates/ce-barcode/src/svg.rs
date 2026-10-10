@@ -1,12 +1,13 @@
-use crate::{Barcode, BarcodeError, Modules};
+use crate::{Barcode, BarcodeError, Modules, Symbology};
 use std::fmt::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SvgOptions {
     /// Width of one module in SVG units (1..=32).
     pub module_size: u32,
-    /// Quiet zone around the symbol, in modules (0..=20). `None` picks the standard: 10 for
-    /// linear codes and 4 for QR.
+    /// Quiet zone around the symbol, in modules (0..=20). `None` picks the symbology's
+    /// minimum: 10 for Code 128, 11 for EAN-13 (left side; applied to both), 9 for UPC-A,
+    /// and 4 for QR.
     pub quiet_zone: Option<u32>,
     /// Height of the bars for linear codes, in modules (1..=400). QR is always square.
     pub bar_height: u32,
@@ -38,7 +39,11 @@ pub fn render_svg(code: &Barcode, opt: &SvgOptions) -> Result<String, BarcodeErr
     let mut body = String::new();
     let (w, h) = match &code.modules {
         Modules::Linear(bars) => {
-            let q = opt.quiet_zone.unwrap_or(10);
+            let q = opt.quiet_zone.unwrap_or(match code.symbology {
+                Symbology::Ean13 => 11,
+                Symbology::UpcA => 9,
+                _ => 10,
+            });
             let mut x = 0usize;
             while x < bars.len() {
                 if bars[x] {
