@@ -111,6 +111,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-events"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "ce-auth",
+ "hmac",
+ "serde_json",
+ "sha2",
+ "subtle",
+]
+
+[[package]]
 name = "ce-expr"
 version = "0.0.1"
 dependencies = [
