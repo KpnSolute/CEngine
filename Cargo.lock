@@ -350,6 +350,8 @@ dependencies = [
 name = "ce-validate"
 version = "0.0.1"
 dependencies = [
+ "bigdecimal",
+ "ce-expr",
  "ce-manifest",
  "chrono",
  "serde_json",

@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 ce-manifest = { path = "../ce-manifest" }
+ce-expr = { path = "../ce-expr" }
+bigdecimal = "0.4"
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 

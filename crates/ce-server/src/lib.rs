@@ -215,6 +215,25 @@ fn validate_body<S>(
     })
 }
 
+/// Invariants of the manifest against the whole record, as a validation problem.
+fn check_invariants<S>(
+    st: &AppState<S>,
+    entity: &str,
+    rec: &Map<String, Value>,
+) -> Result<(), Problem> {
+    ce_validate::check_invariants(&st.manifest, entity, rec).map_err(invariant_problem)
+}
+
+fn invariant_problem(errors: Vec<ce_validate::FieldError>) -> Problem {
+    Problem::validation(
+        "the record breaks a rule of the template",
+        errors
+            .into_iter()
+            .map(|e| json!({"path": e.path, "code": e.code, "detail": e.detail}))
+            .collect(),
+    )
+}
+
 /// RFC 7396 JSON Merge Patch.
 fn merge_patch(target: &mut Value, patch: &Value) {
     if let Value::Object(p) = patch {
@@ -351,6 +370,7 @@ async fn create<S: Store + Send + Sync + 'static>(
         if let (Some(f), Some(i)) = (sm["field"].as_str(), sm["initial"].as_str()) {
             obj.insert(f.to_string(), Value::String(i.to_string()));
         }
+        check_invariants(&st, &entity, &obj)?;
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
         let ent = entity.clone();
@@ -402,6 +422,8 @@ async fn update<S: Store + Send + Sync + 'static>(
         let expected = if_match(&headers)?;
         let patch = parse_object(&body.map_err(body_problem)?)?;
         validate_body(&st, &entity, &patch, ce_validate::Mode::Patch)?;
+        let manifest = st.manifest.clone();
+        let ent = entity.clone();
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
         let rec = blocking(&st, move |s| {
@@ -413,9 +435,15 @@ async fn update<S: Store + Send + Sync + 'static>(
             }
             let mut data = current.data.clone();
             merge_patch(&mut data, &Value::Object(patch));
-            s.update(&scope, &entity, &id, expected, data)
+            if let Some(rec) = data.as_object() {
+                if let Err(e) = ce_validate::check_invariants(&manifest, &ent, rec) {
+                    return Ok(Err(e));
+                }
+            }
+            s.update(&scope, &entity, &id, expected, data).map(Ok)
         })
-        .await?;
+        .await?
+        .map_err(invariant_problem)?;
         Ok(record_response(StatusCode::OK, &rec, &rid, readable))
     };
     finish(&rid, run.await)

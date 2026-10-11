@@ -672,3 +672,40 @@ async fn create_sets_the_initial_state_and_refuses_a_caller_choice() {
     let r = call(&a, "POST", &path, Some(&tok), &h, Some(body)).await;
     assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+#[tokio::test]
+async fn invariants_refuse_bad_creates_and_patches() {
+    let a = app();
+    let tok = manager(T1);
+    let r = create(
+        &a,
+        &tok,
+        "inv1",
+        json!({"name": "flour", "unit_cost": 2, "on_hand": "-1"}),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(r.body["errors"][0]["code"], "invariant_failed");
+    assert_eq!(r.body["errors"][0]["detail"], "inventory.negative_stock");
+
+    let made = create(&a, &tok, "inv2", json!({"name": "flour", "unit_cost": 2})).await;
+    assert_eq!(made.status, StatusCode::CREATED);
+    let uri = format!(
+        "/v1/{INST}/item/{}",
+        made.body["data"]["id"].as_str().unwrap()
+    );
+    let r = call(
+        &a,
+        "PATCH",
+        &uri,
+        Some(&tok),
+        &[("if-match", "\"1\"")],
+        Some(json!({"on_hand": "-5"})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(r.body["errors"][0]["detail"], "inventory.negative_stock");
+    // The rejected patch changed nothing: version is still 1.
+    let r = call(&a, "GET", &uri, Some(&tok), &[], None).await;
+    assert_eq!(r.body["data"]["version"], 1);
+}
