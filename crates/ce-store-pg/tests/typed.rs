@@ -196,7 +196,198 @@ fn required_computed_fields_are_refused_at_install() {
 }
 
 #[test]
+fn list_pages_sorts_filters_and_isolates_tenants() {
+    use ce_store::{ListRequest, QueryError, SortDir, SortKey};
+    let Some(url) = url() else { return };
+    let s = fresh(&url);
+    let sc = scope();
+    let other = scope_of("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+    for (n, p) in [
+        ("e", "5.50"),
+        ("a", "10.00"),
+        ("c", "2.25"),
+        ("b", "10.00"),
+        ("d", "7"),
+    ] {
+        s.insert(&sc, "part", json!({"name": n, "price": p}), None)
+            .unwrap();
+    }
+    s.insert(&other, "part", json!({"name": "zz"}), None)
+        .unwrap();
+    let by = |f: &str| {
+        vec![SortKey {
+            field: f.into(),
+            dir: SortDir::Asc,
+        }]
+    };
 
+    // Numeric (not text) order: 2.25, 5.50, 7.00, 10.00, 10.00. Ties break on id.
+    let mut req = ListRequest {
+        sort: by("price"),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let mut seen = Vec::new();
+    loop {
+        let page = s.list(&sc, "part", &req).unwrap();
+        seen.extend(
+            page.records
+                .iter()
+                .map(|r| r.data["price"].as_str().unwrap().to_string()),
+        );
+        match page.next {
+            Some(c) => req.after = Some(c),
+            None => break,
+        }
+    }
+    assert_eq!(seen, ["2.25", "5.50", "7.00", "10.00", "10.00"]);
+
+    // Filter, select, and tenant scoping.
+    let page = s
+        .list(
+            &sc,
+            "part",
+            &ListRequest {
+                select: Some(vec!["name".into()]),
+                filter: Some(json!({"field": "name", "op": "eq", "value": "c"})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].data["name"], "c");
+    assert!(page.records[0].data.get("price").is_none());
+    let all = s.list(&sc, "part", &ListRequest::default()).unwrap();
+    assert_eq!(all.records.len(), 5);
+    assert!(all.records.iter().all(|r| r.data["name"] != "zz"));
+
+    // Deleted rows disappear; bad queries are refused.
+    let id = all.records[0].id.clone();
+    s.delete(&sc, "part", &id, 1).unwrap();
+    assert_eq!(
+        s.list(&sc, "part", &ListRequest::default())
+            .unwrap()
+            .records
+            .len(),
+        4
+    );
+    assert!(matches!(
+        s.list(
+            &sc,
+            "part",
+            &ListRequest {
+                sort: by("kind"),
+                ..Default::default()
+            }
+        ),
+        Err(StoreError::Query(QueryError::UnindexedSort(_)))
+    ));
+    s.drop_schema().unwrap();
+}
+
+#[test]
+fn paging_handles_null_sort_values_mixed_directions_and_hidden_sort_fields() {
+    use ce_store::{ListRequest, SortDir, SortKey};
+    let Some(url) = url() else { return };
+    let s = fresh(&url);
+    let sc = scope();
+    // `owner` is optional; no item exists for it, so use `part.kind` (default a) and price.
+    // Prices: a=1, b=1, c=2, d=2, e=3. Two rows have no name filter issue: names are unique.
+    for (n, p) in [("a", "1"), ("b", "1"), ("c", "2"), ("d", "2"), ("e", "3")] {
+        s.insert(&sc, "part", json!({"name": n, "price": p}), None)
+            .unwrap();
+    }
+    let key = |f: &str, dir| SortKey {
+        field: f.into(),
+        dir,
+    };
+    // price DESC, name ASC, two per page: e, then c d, then a b.
+    let mut req = ListRequest {
+        sort: vec![key("price", SortDir::Desc), key("name", SortDir::Asc)],
+        select: Some(vec!["name".into()]),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let mut seen = Vec::new();
+    loop {
+        let page = s.list(&sc, "part", &req).unwrap();
+        for r in &page.records {
+            // `price` was read for the cursor only and is not returned.
+            assert!(r.data.get("price").is_none());
+            seen.push(r.data["name"].as_str().unwrap().to_string());
+        }
+        match page.next {
+            Some(c) => req.after = Some(c),
+            None => break,
+        }
+    }
+    assert_eq!(seen, ["e", "c", "d", "a", "b"]);
+    s.drop_schema().unwrap();
+}
+
+#[test]
+fn paging_through_null_sort_values_loses_and_repeats_nothing() {
+    use ce_store::{ListRequest, SortDir, SortKey};
+    let Some(url) = url() else { return };
+    let s = fresh(&url);
+    let sc = scope();
+    // rank: a=2, b=null, c=1, d=null, e=2, f=null. Nulls sort last in both directions.
+    for (n, r) in [
+        ("a", Some(2)),
+        ("b", None),
+        ("c", Some(1)),
+        ("d", None),
+        ("e", Some(2)),
+        ("f", None),
+    ] {
+        let mut d = json!({"name": n});
+        if let Some(r) = r {
+            d["rank"] = json!(r);
+        }
+        s.insert(&sc, "part", d, None).unwrap();
+    }
+    for (dir, _) in [
+        (SortDir::Asc, ["c", "a", "e"]),
+        (SortDir::Desc, ["a", "e", "c"]),
+    ] {
+        let mut req = ListRequest {
+            sort: vec![SortKey {
+                field: "rank".into(),
+                dir,
+            }],
+            select: Some(vec!["name".into()]),
+            limit: Some(2),
+            ..Default::default()
+        };
+        let mut seen = Vec::new();
+        loop {
+            let page = s.list(&sc, "part", &req).unwrap();
+            seen.extend(
+                page.records
+                    .iter()
+                    .map(|r| r.data["name"].as_str().unwrap().to_string()),
+            );
+            match page.next {
+                Some(c) => req.after = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 6, "{seen:?}");
+        let mut all = seen.clone();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 6, "{seen:?}");
+        // The three ranked rows come first (ties on rank 2 break by id), then the unranked.
+        let mut head = seen[..3].to_vec();
+        head.sort();
+        assert_eq!(head, ["a", "c", "e"], "{seen:?}");
+        let c_at = seen.iter().position(|n| n == "c").unwrap();
+        assert_eq!(c_at, if dir == SortDir::Asc { 0 } else { 2 }, "{seen:?}");
+    }
+    s.drop_schema().unwrap();
+}
+
+#[test]
 fn built_in_tools_install_and_run_on_the_typed_store() {
     let Some(url) = url() else { return };
     let shell = json!({
@@ -251,3 +442,5 @@ fn built_in_tools_install_and_run_on_the_typed_store() {
         (n.data["status"].as_str(), n.data["channel"].as_str()),
         (Some("pending"), Some("in_app"))
     );
+    s.drop_schema().unwrap();
+}
