@@ -61,6 +61,10 @@ impl Connector {
         .map_err(|_| bad("TLS setup failed"))?
         .with_root_certificates(roots)
         .with_no_client_auth();
+        // Direct TLS negotiation (PostgreSQL 17+) requires the server's ALPN name; earlier
+        // servers and the usual negotiation ignore it.
+        let mut cfg = cfg;
+        cfg.alpn_protocols = vec![b"postgresql".to_vec()];
         Ok(Connector::Tls(
             tokio_postgres_rustls::MakeRustlsConnect::new(cfg),
         ))
@@ -93,11 +97,53 @@ fn without_sslmode(url: &str) -> String {
             format!("{base}?{}", keep.join("&"))
         }
     } else {
-        url.split_whitespace()
-            .filter(|kv| !is_sslmode(kv))
-            .collect::<Vec<_>>()
-            .join(" ")
+        drop_conninfo_key(url, "sslmode")
     }
+}
+
+/// Removes every `key=value` setting named `key` from a libpq key/value string, leaving the
+/// rest of the text as it was. Values may be single-quoted (with `\'` and `\\` escapes) and
+/// then may hold spaces and `=`; a bare value ends at whitespace.
+fn drop_conninfo_key(s: &str, key: &str) -> String {
+    let b = s.as_bytes();
+    let (mut out, mut i) = (String::new(), 0);
+    while i < b.len() {
+        let start = i;
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let k0 = i;
+        while i < b.len() && b[i] != b'=' && !b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let name = &s[k0..i];
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < b.len() && b[i] == b'=' {
+            i += 1;
+            while i < b.len() && b[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < b.len() && b[i] == b'\'' {
+                i += 1;
+                while i < b.len() && b[i] != b'\'' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            } else {
+                while i < b.len() && !b[i].is_ascii_whitespace() {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+        }
+        let i_end = i.min(b.len());
+        if name != key {
+            out.push_str(&s[start..i_end]);
+        }
+        i = i_end;
+    }
+    out.trim().to_string()
 }
 
 /// Opens one connection the way the store would. For tools that need the same settings.
@@ -127,6 +173,15 @@ mod tests {
         assert_eq!(
             without_sslmode("host=h sslmode=verify-full user=u"),
             "host=h user=u"
+        );
+        // Quoted values are left alone, whatever they contain.
+        assert_eq!(
+            without_sslmode("password='a sslmode=verify-full  b' sslmode = 'verify-ca' host=h"),
+            "password='a sslmode=verify-full  b' host=h"
+        );
+        assert_eq!(
+            without_sslmode(r"password='it\'s sslmode=x' host=h"),
+            r"password='it\'s sslmode=x' host=h"
         );
     }
 }
