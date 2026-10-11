@@ -31,6 +31,7 @@
       "invariants": [
         {"name": "total_adds_up", "expr": "total == subtotal + tax", "message_code": "invoice.total_mismatch"},
         {"name": "non_negative", "expr": "subtotal >= 0 and tax >= 0", "message_code": "invoice.negative_amount"},
+        {"name": "currency_code", "expr": "len(currency) == 3 and currency == upper(currency)", "message_code": "invoice.bad_currency"},
         {"name": "due_after_issue", "expr": "is_null(due_date) or due_date >= issue_date", "message_code": "invoice.due_before_issue"}
       ],
       "sort_keys": ["number", "issue_date", "due_date"]

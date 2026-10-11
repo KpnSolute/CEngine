@@ -124,7 +124,15 @@ fn invoicing_checks_totals_with_invariants() {
         .iter()
         .map(|i| i["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["total_adds_up", "non_negative", "due_after_issue"]);
+    assert_eq!(
+        names,
+        [
+            "total_adds_up",
+            "non_negative",
+            "currency_code",
+            "due_after_issue"
+        ]
+    );
     assert_eq!(
         m["entities"]["invoice"]["fields"]["bill_to_email"]["pii"],
         true
@@ -149,7 +157,7 @@ fn invoice_rules_are_enforced_by_the_checker() {
         ce_validate::check_invariants(&m, entity, v.as_object().unwrap(), None, &ctx)
             .map_err(|e| e.into_iter().map(|x| x.detail).collect::<Vec<_>>())
     };
-    let inv = |sub: &str, tax: &str, total: &str, due: &str| json!({"subtotal": sub, "tax": tax, "total": total, "issue_date": "2026-11-01", "due_date": due});
+    let inv = |sub: &str, tax: &str, total: &str, due: &str| json!({"subtotal": sub, "tax": tax, "total": total, "currency": "USD", "issue_date": "2026-11-01", "due_date": due});
     assert_eq!(
         run("invoice", inv("100.00", "8.25", "108.25", "2026-12-01")),
         Ok(())
@@ -162,9 +170,18 @@ fn invoice_rules_are_enforced_by_the_checker() {
         run("invoice", inv("100.00", "8.25", "108.25", "2026-10-01")),
         Err(vec!["invoice.due_before_issue".to_string()])
     );
+    let mut bad = inv("100.00", "8.25", "108.25", "2026-12-01");
+    for code in ["", "US", "usd"] {
+        bad["currency"] = json!(code);
+        assert_eq!(
+            run("invoice", bad.clone()),
+            Err(vec!["invoice.bad_currency".to_string()]),
+            "{code}"
+        );
+    }
     let line = |q: &str, p: &str, t: &str| json!({"quantity": q, "unit_price": p, "line_total": t});
     assert_eq!(run("invoice_line", line("2.5", "10.00", "25.00")), Ok(()));
-    assert_eq!(run("invoice_line", line("3", "0.335", "1.01")), Ok(())); // 1.005 rounds half up
+    assert_eq!(run("invoice_line", line("0.125", "0.20", "0.03")), Ok(())); // 0.025 rounds half up
     assert_eq!(
         run("invoice_line", line("2.5", "10.00", "24.00")),
         Err(vec!["invoice.line_mismatch".to_string()])
