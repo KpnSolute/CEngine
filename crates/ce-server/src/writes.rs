@@ -20,6 +20,7 @@ use ce_validate::{
     FieldError,
 };
 use serde_json::{Map, Value};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 /// How many levels of parents a write may update (child, parent, grandparent...).
@@ -65,6 +66,17 @@ struct StoreResolver<'a> {
     entity: &'a str,
     /// None while the record is being created: it has no children yet.
     id: Option<&'a str>,
+    /// The first store failure met while answering. The evaluator only sees a message, so this
+    /// keeps the real error: a backend or unsupported-store failure is not a broken rule.
+    failed: RefCell<Option<StoreError>>,
+}
+
+impl StoreResolver<'_> {
+    fn fail(&self, e: StoreError) -> String {
+        let msg = format!("{e:?}");
+        self.failed.borrow_mut().get_or_insert(e);
+        msg
+    }
 }
 
 fn field_type<'m>(m: &'m Manifest, entity: &str, field: &str) -> &'m str {
@@ -85,7 +97,7 @@ impl Resolver for StoreResolver<'_> {
                 .get(attr)
                 .map_or(Ev::Null, |v| json_to_expr(field_type(m, target, attr), v))),
             Err(StoreError::NotFound) => Ok(Ev::Null),
-            Err(e) => Err(format!("{e:?}")),
+            Err(e) => Err(self.fail(e)),
         }
     }
 
@@ -101,7 +113,7 @@ impl Resolver for StoreResolver<'_> {
         let values = self
             .store
             .child_values(self.env.scope, entity, ref_field, id, attr)
-            .map_err(|e| format!("{e:?}"))?;
+            .map_err(|e| self.fail(e))?;
         let ty = attr.map_or("", |a| field_type(self.env.manifest, entity, a));
         Ok(values.iter().map(|v| json_to_expr(ty, v)).collect())
     }
@@ -121,10 +133,15 @@ fn settle(
         env,
         entity,
         id,
+        failed: RefCell::new(None),
     };
-    evaluate_computed_with(env.manifest, entity, record, old, env.ctx, Some(&r))
-        .and_then(|()| check_invariants_with(env.manifest, entity, record, old, env.ctx, Some(&r)))
-        .map_err(Failure::Rules)
+    let out = evaluate_computed_with(env.manifest, entity, record, old, env.ctx, Some(&r))
+        .and_then(|()| check_invariants_with(env.manifest, entity, record, old, env.ctx, Some(&r)));
+    match (out, r.failed.into_inner()) {
+        (_, Some(e)) => Err(Failure::Store(e)),
+        (Err(errors), None) => Err(Failure::Rules(errors)),
+        (Ok(()), None) => Ok(()),
+    }
 }
 
 /// Brings every parent of a changed child up to date. `old` and `new` are the child's data
@@ -184,7 +201,15 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
         Op::Create { data, key } => {
             let mut obj = data.clone();
             settle(tx, env, entity, None, &mut obj, None)?;
-            let rec = tx.insert(env.scope, entity, Value::Object(obj), Some(key))?;
+            // Retries are matched on the body as sent, not on values derived from other records.
+            obj.retain(|k, v| data.get(k) != Some(&*v));
+            let rec = tx.insert_derived(
+                env.scope,
+                entity,
+                Value::Object(data.clone()),
+                obj,
+                Some(key),
+            )?;
             refresh_parents(tx, env, entity, None, rec.data.as_object(), 0)?;
             Ok(Some(rec))
         }
@@ -257,5 +282,115 @@ pub(crate) fn execute<S: Store>(
             step(store, env, entity, op)
         }
         Err(e) => Err(failed.unwrap_or(Failure::Store(e))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+    use ce_store::{ListRequest, MemoryStore, Page};
+    use hmac::{Hmac, Mac};
+    use serde_json::json;
+    use sha2::Sha256;
+
+    /// A store whose reads of child records fail like a dropped database connection.
+    struct Flaky(MemoryStore, StoreError);
+
+    impl Store for Flaky {
+        fn list(&self, s: &TenantScope, e: &str, r: &ListRequest) -> Result<Page, StoreError> {
+            self.0.list(s, e, r)
+        }
+        fn insert(
+            &self,
+            s: &TenantScope,
+            e: &str,
+            d: Value,
+            k: Option<&str>,
+        ) -> Result<Record, StoreError> {
+            self.0.insert(s, e, d, k)
+        }
+        fn get(&self, s: &TenantScope, e: &str, id: &str) -> Result<Record, StoreError> {
+            self.0.get(s, e, id)
+        }
+        fn update(
+            &self,
+            s: &TenantScope,
+            e: &str,
+            id: &str,
+            v: u64,
+            d: Value,
+        ) -> Result<Record, StoreError> {
+            self.0.update(s, e, id, v, d)
+        }
+        fn delete(&self, s: &TenantScope, e: &str, id: &str, v: u64) -> Result<(), StoreError> {
+            self.0.delete(s, e, id, v)
+        }
+        fn child_values(
+            &self,
+            _: &TenantScope,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<Value>, StoreError> {
+            Err(self.1.clone())
+        }
+    }
+
+    #[test]
+    fn a_failing_store_is_a_store_error_not_a_broken_rule() {
+        let m = ce_manifest::validate(
+            json!({
+              "manifest_version": 1,
+              "template": {"name": "t", "version": "0.1.0"},
+              "entities": {
+                "order": {"fields": {"total": {"type": "integer", "computed": "sum(children(item, order).qty)"}}},
+                "item": {"fields": {"order": {"type": "ref", "ref": "order"}, "qty": {"type": "integer"}}}
+              }
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        let key = b"0123456789abcdef0123456789abcdef";
+        let (h, p) = (
+            B64.encode(r#"{"alg":"HS256"}"#),
+            B64.encode(r#"{"sub":"u","tenant":"11111111-1111-1111-1111-111111111111","exp":2000}"#),
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+        mac.update(format!("{h}.{p}").as_bytes());
+        let token = format!("{h}.{p}.{}", B64.encode(mac.finalize().into_bytes()));
+        let who = ce_auth::Verifier::new(key)
+            .unwrap()
+            .verify_token(&token, 1000)
+            .unwrap();
+        let ctx = Context {
+            actor_id: "u".into(),
+            actor_role: None,
+            now_unix: 1000,
+        };
+        let env = Env {
+            manifest: &m,
+            scope: who.scope(),
+            ctx: &ctx,
+        };
+        let store = Flaky(
+            MemoryStore::new(),
+            StoreError::Backend("connection reset".into()),
+        );
+        let rec = store
+            .insert(who.scope(), "order", json!({"total": 0}), None)
+            .unwrap();
+        let op = Op::Patch {
+            id: rec.id,
+            expected: 1,
+            patch: Map::new(),
+        };
+        match step(&store, &env, "order", &op) {
+            Err(Failure::Store(StoreError::Backend(_))) => {}
+            Err(Failure::Rules(_)) => panic!("reported as a broken rule"),
+            _ => panic!("expected a store failure"),
+        }
     }
 }

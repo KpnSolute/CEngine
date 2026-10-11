@@ -20,7 +20,7 @@ mod memory;
 pub use ce_auth::TenantScope;
 pub use ce_query::{ListRequest, QueryError, SortDir, SortKey};
 pub use memory::MemoryStore;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Record {
@@ -79,6 +79,26 @@ pub trait Store {
         data: Value,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError>;
+
+    /// Like `insert`, for a body whose `derived` fields were computed by the host from the
+    /// store's current contents (so they can differ between two identical requests). The
+    /// idempotency check compares only `caller`, the body as the client sent it; the record
+    /// stored is `caller` with `derived` merged over it. The default merges and calls `insert`,
+    /// which compares the merged body.
+    fn insert_derived(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derived: Map<String, Value>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        let mut data = caller;
+        if let Value::Object(o) = &mut data {
+            o.extend(derived);
+        }
+        self.insert(scope, entity, data, idempotency_key)
+    }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError>;
 

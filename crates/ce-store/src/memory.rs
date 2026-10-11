@@ -1,5 +1,5 @@
 use crate::{Record, Store, StoreError, TenantScope};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -46,6 +46,7 @@ impl Inner {
         scope: &TenantScope,
         entity: &str,
         data: Value,
+        caller: Option<&Value>,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
         if !data.is_object() {
@@ -54,7 +55,7 @@ impl Inner {
         let idem = idempotency_key.map(|k| (scope.tenant_id().to_string(), k.to_string()));
         if let Some(k) = &idem {
             if let Some((payload, original)) = self.keys.get(k) {
-                if original.entity != entity || payload != &data {
+                if original.entity != entity || payload != caller.unwrap_or(&data) {
                     return Err(StoreError::IdempotencyKeyReused);
                 }
                 return Ok(original.clone());
@@ -76,7 +77,8 @@ impl Inner {
             },
         );
         if let Some(k) = idem {
-            self.keys.insert(k, (data, record.clone()));
+            self.keys
+                .insert(k, (caller.unwrap_or(&data).clone(), record.clone()));
         }
         Ok(record)
     }
@@ -168,7 +170,24 @@ impl Store for MemoryStore {
         data: Value,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
-        self.lock().insert(scope, entity, data, idempotency_key)
+        self.lock()
+            .insert(scope, entity, data, None, idempotency_key)
+    }
+
+    fn insert_derived(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derived: Map<String, Value>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        let mut data = caller.clone();
+        if let Value::Object(o) = &mut data {
+            o.extend(derived);
+        }
+        self.lock()
+            .insert(scope, entity, data, Some(&caller), idempotency_key)
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
@@ -241,7 +260,24 @@ impl Store for MemoryTx {
     ) -> Result<Record, StoreError> {
         self.inner
             .borrow_mut()
-            .insert(scope, entity, data, idempotency_key)
+            .insert(scope, entity, data, None, idempotency_key)
+    }
+
+    fn insert_derived(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derived: Map<String, Value>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        let mut data = caller.clone();
+        if let Value::Object(o) = &mut data {
+            o.extend(derived);
+        }
+        self.inner
+            .borrow_mut()
+            .insert(scope, entity, data, Some(&caller), idempotency_key)
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {

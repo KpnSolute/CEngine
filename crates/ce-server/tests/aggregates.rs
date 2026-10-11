@@ -85,11 +85,23 @@ impl Api {
         body: Option<Value>,
     ) -> (StatusCode, Value) {
         self.n += 1;
+        let key = format!("k{}", self.n);
+        self.call_keyed(method, uri, version, body, &key).await
+    }
+
+    async fn call_keyed(
+        &mut self,
+        method: &str,
+        uri: &str,
+        version: Option<u64>,
+        body: Option<Value>,
+        key: &str,
+    ) -> (StatusCode, Value) {
         let mut req = Request::builder()
             .method(method)
             .uri(uri)
             .header(header::AUTHORIZATION, format!("Bearer {}", token(T1)))
-            .header("idempotency-key", format!("k{}", self.n));
+            .header("idempotency-key", key);
         if let Some(v) = version {
             req = req.header("if-match", format!("\"{v}\""));
         }
@@ -354,5 +366,65 @@ async fn totals_cascade_and_a_broken_rule_keeps_the_whole_write_out() {
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(api.get("item", &id(&i2)).await["data"]["price"], "40.00");
     assert_eq!(api.get("customer", &cid).await["data"]["owed"], "40.00");
+    close(api.app).await;
+}
+
+fn tiered() -> Value {
+    json!({
+        "manifest_version": 1,
+        "template": {"name": "tiered", "version": "0.1.0"},
+        "entities": {
+            "customer": {"fields": {"tier": {"type": "string"}}},
+            "order": {"fields": {
+                "customer": {"type": "ref", "ref": "customer", "required": true},
+                "tier": {"type": "string", "computed": "ref(customer).tier"}
+            }}
+        },
+        "roles": {"owner": {"read": ["*"], "write": ["*"]}}
+    })
+}
+
+#[tokio::test]
+async fn a_retry_replays_even_when_a_referenced_record_changed_meanwhile() {
+    let Some(url) = url() else { return };
+    let mut api = Api {
+        app: app(&url, tiered()).await,
+        n: 0,
+    };
+    let (_, c) = api.post("customer", json!({"tier": "gold"})).await;
+    let cid = id(&c);
+    let uri = format!("/v1/{INST}/order");
+    let body = json!({"customer": cid});
+    let (s, first) = api
+        .call_keyed("POST", &uri, None, Some(body.clone()), "retry-1")
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{first}");
+    assert_eq!(first["data"]["tier"], "gold");
+    // The customer changes, then the client retries the identical request.
+    let (s, _) = api
+        .patch(
+            "customer",
+            &cid,
+            c["data"]["version"].as_u64().unwrap(),
+            json!({"tier": "silver"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, again) = api
+        .call_keyed("POST", &uri, None, Some(body), "retry-1")
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{again}");
+    assert_eq!(again["data"], first["data"]);
+    // A different body under the same key is still refused.
+    let (s, _) = api
+        .call_keyed(
+            "POST",
+            &uri,
+            None,
+            Some(json!({"customer": id(&c), "tier": "x"})),
+            "retry-1",
+        )
+        .await;
+    assert_ne!(s, StatusCode::CREATED);
     close(api.app).await;
 }

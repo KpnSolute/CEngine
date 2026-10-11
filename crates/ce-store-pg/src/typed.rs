@@ -412,8 +412,11 @@ impl TypedPgStore {
         scope: &TenantScope,
         entity: &str,
         data: Value,
+        caller: Option<&Value>,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
+        // What the idempotency check compares: the client's body, when the host derived fields.
+        let fingerprint = caller.unwrap_or(&data);
         let Value::Object(obj) = &data else {
             return Err(StoreError::BadData("data must be a JSON object"));
         };
@@ -470,7 +473,7 @@ impl TypedPgStore {
                            ON CONFLICT (tenant_id, key) DO NOTHING
                            RETURNING key"#
                     ),
-                    &[&scope.tenant_id(), &key, &entity, &data],
+                    &[&scope.tenant_id(), &key, &entity, fingerprint],
                 )
                 .map_err(db)?;
             if claimed.is_none() {
@@ -485,7 +488,7 @@ impl TypedPgStore {
                     .map_err(db)?;
                 let (e, payload, result): (String, Value, Option<Value>) =
                     (row.get(0), row.get(1), row.get(2));
-                if e != entity || payload != data {
+                if e != entity || &payload != fingerprint {
                     return Err(StoreError::IdempotencyKeyReused);
                 }
                 return replay(result);
@@ -718,7 +721,27 @@ impl Store for TypedPgStore {
     ) -> Result<Record, StoreError> {
         let mut c = self.lock();
         let mut tx = c.transaction().map_err(db)?;
-        let record = self.insert_on(&mut tx, scope, entity, data, idempotency_key)?;
+        let record = self.insert_on(&mut tx, scope, entity, data, None, idempotency_key)?;
+        tx.commit().map_err(db)?;
+        Ok(record)
+    }
+
+    fn insert_derived(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derived: Map<String, Value>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        let mut data = caller.clone();
+        if let Value::Object(o) = &mut data {
+            o.extend(derived);
+        }
+        let mut c = self.lock();
+        let mut tx = c.transaction().map_err(db)?;
+        let record =
+            self.insert_on(&mut tx, scope, entity, data, Some(&caller), idempotency_key)?;
         tx.commit().map_err(db)?;
         Ok(record)
     }
@@ -809,6 +832,29 @@ impl Store for TypedTx<'_> {
             scope,
             entity,
             data,
+            None,
+            idempotency_key,
+        )
+    }
+
+    fn insert_derived(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derived: Map<String, Value>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        let mut data = caller.clone();
+        if let Value::Object(o) = &mut data {
+            o.extend(derived);
+        }
+        self.store.insert_on(
+            &mut *self.tx.borrow_mut(),
+            scope,
+            entity,
+            data,
+            Some(&caller),
             idempotency_key,
         )
     }
