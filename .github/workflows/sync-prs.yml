@@ -1,0 +1,89 @@
+name: Sync PRs
+
+# When main moves, bring it into every open PR branch of this repository that is behind it.
+# Mechanical conflicts (Cargo.lock, append-only test files) are settled by scripts/sync-branch.sh;
+# anything else is left for a person and listed in the job summary. History is never rewritten:
+# the branch gets a merge commit, and only after fmt, clippy and tests pass on the result.
+#
+# Pushes made with the default GITHUB_TOKEN do not start pull_request workflows, so after a
+# push this job starts CI on the branch itself with workflow_dispatch. A repository secret
+# CE_SYNC_TOKEN (a token that may push to branches) makes the push start CI directly instead.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Sync only this PR branch (default is every open PR)
+        required: false
+
+concurrency:
+  group: sync-prs
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ce
+          POSTGRES_PASSWORD: ce
+          POSTGRES_DB: ce_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ce -d ce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CE_TEST_DATABASE_URL: postgresql://ce:ce@127.0.0.1:5432/ce_test
+      CE_REQUIRE_DB: '1'
+      GH_TOKEN: ${{ secrets.CE_SYNC_TOKEN || github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.CE_SYNC_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: rustup component add rustfmt clippy
+      - run: |
+          git config user.name "ce-sync"
+          git config user.email "ce-sync@users.noreply.github.com"
+      - name: Sync open PR branches
+        env:
+          ONE: ${{ github.event.inputs.branch }}
+          HAVE_TOKEN: ${{ secrets.CE_SYNC_TOKEN != '' }}
+        run: |
+          if [ -n "$ONE" ]; then
+            branches="$ONE"
+          else
+            branches="$(gh pr list --state open --limit 500 --json headRefName,headRepositoryOwner,isCrossRepository \
+              --jq '.[] | select(.isCrossRepository | not) | .headRefName')"
+          fi
+          failed=0
+          for b in $branches; do
+            [ "$b" = main ] && continue
+            echo "### $b" >> "$GITHUB_STEP_SUMMARY"
+            if out="$(scripts/sync-branch.sh "$b" 2>&1)"; then
+              echo "$out" | tail -1 | tee -a "$GITHUB_STEP_SUMMARY"
+              if [ "$(echo "$out" | tail -1)" = synced ] && [ "$HAVE_TOKEN" != true ]; then
+                gh workflow run ci.yml --ref "$b"
+              fi
+            else
+              failed=1
+              printf '%s\n' "$out" | tail -30 | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            git checkout -q --detach origin/main
+          done
+          exit $failed
