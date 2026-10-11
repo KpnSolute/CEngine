@@ -1,0 +1,26 @@
+[package]
+name = "ce-server"
+description = "CEngine HTTP server: data endpoints over the store, auth, policy, problem+json errors, OpenAPI (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ce-auth = { path = "../ce-auth" }
+ce-manifest = { path = "../ce-manifest" }
+ce-policy = { path = "../ce-policy" }
+ce-store = { path = "../ce-store" }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
