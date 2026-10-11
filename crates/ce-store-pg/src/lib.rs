@@ -15,8 +15,9 @@
 //! The connection is synchronous and held behind a mutex; a pool and TLS come before any
 //! production use. Schema names are validated, never spliced from user input.
 
+mod pool;
 mod typed;
-pub use typed::TypedPgStore;
+pub use typed::{PoolConfig, TypedPgStore};
 
 use ce_store::{Record, Store, StoreError, TenantScope};
 use postgres::{Client, NoTls};
