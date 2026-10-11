@@ -20,8 +20,10 @@
 
 mod computed;
 mod invariants;
-pub use computed::evaluate_computed;
-pub use invariants::{check_invariants, unenforced_invariants, Context, Unenforced};
+pub use computed::{evaluate_computed, evaluate_computed_with};
+pub use invariants::{
+    check_invariants, check_invariants_with, unenforced_invariants, Context, Unenforced,
+};
 
 use ce_manifest::Manifest;
 use chrono::{DateTime, NaiveDate};

@@ -9,12 +9,12 @@
 //!
 //! Bindings besides fields: `old.field` (null on create), `actor.id`, `actor.role`, `now`,
 //! `today`. Computed fields are available once `evaluate_computed` has run. `ref(...)` and
-//! computed sums over other records cannot be resolved here yet, so an invariant that reads
-//! one is skipped rather than failing every write; `unenforced_invariants` lists them.
+//! computed sums over other records need a resolver; without one an invariant that reads them
+//! is skipped rather than failing every write, and `unenforced_invariants` lists them.
 
 use crate::FieldError;
 use bigdecimal::BigDecimal;
-use ce_expr::{Env, Value as Ev};
+use ce_expr::{Env, Resolver, Value as Ev};
 use ce_manifest::Manifest;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
@@ -137,12 +137,26 @@ pub(crate) fn build_env(
 /// would be stored). `old` is the stored record on patch and `None` on create. Returns one
 /// error per failed invariant, path `""`, code `invariant_failed`, detail the invariant's
 /// `message_code` (or its name).
+///
+/// Without a resolver, invariants that read `ref()` or sums over other records are skipped.
 pub fn check_invariants(
     m: &Manifest,
     entity: &str,
     record: &Map<String, Value>,
     old: Option<&Map<String, Value>>,
     ctx: &Context,
+) -> Result<(), Vec<FieldError>> {
+    check_invariants_with(m, entity, record, old, ctx, None)
+}
+
+/// Like [`check_invariants`], and with a resolver no invariant is skipped.
+pub fn check_invariants_with(
+    m: &Manifest,
+    entity: &str,
+    record: &Map<String, Value>,
+    old: Option<&Map<String, Value>>,
+    ctx: &Context,
+    resolver: Option<&dyn Resolver>,
 ) -> Result<(), Vec<FieldError>> {
     let ent = &m.value["entities"][entity];
     let Some(list) = ent["invariants"].as_array() else {
@@ -154,10 +168,14 @@ pub fn check_invariants(
         let Some(src) = inv["expr"].as_str() else {
             continue;
         };
-        if unenforceable(ent, src).is_some() {
+        if resolver.is_none() && unenforceable(ent, src).is_some() {
             continue;
         }
-        let passed = matches!(ce_expr::run(src, &env), Ok(Ev::Bool(true)));
+        let ran = match resolver {
+            Some(r) => ce_expr::run_with(src, &env, r),
+            None => ce_expr::run(src, &env),
+        };
+        let passed = matches!(ran, Ok(Ev::Bool(true)));
         if !passed {
             let what = inv["message_code"]
                 .as_str()
