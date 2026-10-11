@@ -423,6 +423,14 @@ fn walk(out: &mut Vec<Issue>, p: &str, e: &Expr, names: &BTreeSet<&str>, site: S
     }
 }
 
+fn is_children_chain(e: &Expr) -> bool {
+    match e {
+        Expr::Call(f, _) => f == "children",
+        Expr::Field(b, _) => is_children_chain(b),
+        _ => false,
+    }
+}
+
 /// `children(entity, ref_field)`: the entity must exist and the field must be a `ref` from it
 /// back to the entity that holds the computed field.
 fn check_children(out: &mut Vec<Issue>, path: &str, e: &Expr, entities: &Obj, owner: &str) {
@@ -469,6 +477,17 @@ fn check_children(out: &mut Vec<Issue>, path: &str, e: &Expr, entities: &Obj, ow
             .iter()
             .for_each(|a| check_children(out, path, a, entities, owner)),
         Expr::Field(b, name) => {
+            // Only one field can be read off the child rows: `children(a, b).value.ghost` has
+            // nothing to read from `value`.
+            if let Expr::Field(inner, _) = &**b {
+                if is_children_chain(inner) {
+                    out.push(issue(
+                        path,
+                        "bad_children",
+                        format!("`.{name}` follows a field of the child rows; only one field can be read"),
+                    ));
+                }
+            }
             // `children(line, invoice).line_total` reads a field of the child rows.
             if let Expr::Call(f, args) = &**b {
                 if let (true, Some(Expr::Path(p))) = (f == "children", args.first()) {
