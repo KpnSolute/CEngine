@@ -21,7 +21,7 @@ fn manifest() -> ce_manifest::Manifest {
                 {"name": "seats", "expr": "seats >= 1"},
                 {"name": "price", "expr": "price >= 0"},
                 {"name": "grows", "expr": "is_null(old.seats) or seats >= old.seats"},
-                {"name": "double", "expr": "total > 0"},
+                {"name": "double", "expr": "is_null(total) or total >= 0"},
                 {"name": "owner", "expr": "ref(owner).state == 'open'"},
                 {"name": "text", "expr": "trim(note) != '' and floor(2.5) == 2 and ceil(2.5) == 3"}
             ]
@@ -45,12 +45,16 @@ fn map(v: Value) -> Map<String, Value> {
 }
 
 fn run(v: Value) -> Result<(), Vec<String>> {
-    check_invariants(&manifest(), "booking", &map(v), None, &ctx())
+    let mut rec = map(v);
+    ce_validate::evaluate_computed(&manifest(), "booking", &mut rec, None, &ctx()).unwrap();
+    check_invariants(&manifest(), "booking", &rec, None, &ctx())
         .map_err(|e| e.into_iter().map(|x| x.detail).collect())
 }
 
 fn patch(old: Value, new: Value) -> Result<(), Vec<String>> {
-    check_invariants(&manifest(), "booking", &map(new), Some(&map(old)), &ctx())
+    let (old, mut new) = (map(old), map(new));
+    ce_validate::evaluate_computed(&manifest(), "booking", &mut new, Some(&old), &ctx()).unwrap();
+    check_invariants(&manifest(), "booking", &new, Some(&old), &ctx())
         .map_err(|e| e.into_iter().map(|x| x.detail).collect())
 }
 
@@ -94,7 +98,8 @@ fn every_failed_rule_is_reported() {
         Err(vec![
             "booking.invalid_window".into(),
             "seats".into(),
-            "price".into()
+            "price".into(),
+            "double".into()
         ])
     );
 }
@@ -123,10 +128,64 @@ fn nanosecond_differences_are_kept() {
 }
 
 #[test]
-fn computed_and_ref_invariants_are_skipped_and_listed() {
+fn ref_invariants_are_skipped_and_listed() {
     let names: Vec<String> = unenforced_invariants(&manifest())
         .into_iter()
         .map(|u| u.name)
         .collect();
-    assert_eq!(names, ["double", "owner"]);
+    assert_eq!(names, ["owner"]);
+}
+
+#[test]
+fn computed_fields_are_evaluated_rounded_and_chained() {
+    let m = validate_manifest(
+        json!({
+            "manifest_version": 1,
+            "template": {"name": "t", "version": "0.1.0", "title": "T"},
+            "entities": {"line": {"fields": {
+                "qty": {"type": "decimal", "precision": 10, "scale": 3},
+                "price": {"type": "decimal", "precision": 10, "scale": 2},
+                "net": {"type": "decimal", "precision": 10, "scale": 2, "computed": "round(qty * price, 2)"},
+                "gross": {"type": "decimal", "precision": 4, "scale": 2, "computed": "net * 2"},
+                "label": {"type": "string", "computed": "concat('n=', 'x')"},
+                "units": {"type": "integer", "computed": "5 % 3"}
+            }}},
+            "roles": {"admin": {"read": ["*"], "write": ["*"]}},
+            "runtime": {"storage": {"relational": true}}
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .expect("valid");
+    let mut rec = map(json!({"qty": "0.125", "price": "0.20"}));
+    let r = ce_validate::evaluate_computed(&m, "line", &mut rec, None, &ctx());
+    // net = round(0.025, 2) = 0.03; gross = 0.06 fits numeric(4,2)
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(rec["net"], "0.03");
+    assert_eq!(rec["gross"], "0.06");
+    assert_eq!(rec["label"], "n=x");
+    assert_eq!(rec["units"], 2);
+}
+
+#[test]
+fn computed_results_that_do_not_fit_are_reported() {
+    let m = validate_manifest(
+        json!({
+            "manifest_version": 1,
+            "template": {"name": "t", "version": "0.1.0", "title": "T"},
+            "entities": {"line": {"fields": {
+                "a": {"type": "decimal", "precision": 10, "scale": 2},
+                "big": {"type": "decimal", "precision": 4, "scale": 2, "computed": "a * 1000"}
+            }}},
+            "roles": {"admin": {"read": ["*"], "write": ["*"]}},
+            "runtime": {"storage": {"relational": true}}
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .expect("valid");
+    let mut rec = map(json!({"a": "50.00"}));
+    let e = ce_validate::evaluate_computed(&m, "line", &mut rec, None, &ctx()).unwrap_err();
+    assert_eq!(e[0].path, "/big");
+    assert_eq!(e[0].code, "computed_failed");
 }

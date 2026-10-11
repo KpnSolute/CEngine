@@ -395,6 +395,9 @@ async fn create<S: Store + Send + Sync + 'static>(
                 obj.insert(name.clone(), f["default"].clone());
             }
         }
+        let ctx = invariant_context(&st, &who);
+        ce_validate::evaluate_computed(&st.manifest, &entity, &mut obj, None, &ctx)
+            .map_err(invariant_problem)?;
         check_invariants(&st, &who, &entity, &obj, None)?;
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
@@ -461,9 +464,11 @@ async fn update<S: Store + Send + Sync + 'static>(
             }
             let mut data = current.data.clone();
             merge_patch(&mut data, &Value::Object(patch));
-            if let Some(rec) = data.as_object() {
+            if let Some(rec) = data.as_object_mut() {
                 let old = current.data.as_object();
-                if let Err(e) = ce_validate::check_invariants(&manifest, &ent, rec, old, &ctx) {
+                let checked = ce_validate::evaluate_computed(&manifest, &ent, rec, old, &ctx)
+                    .and_then(|()| ce_validate::check_invariants(&manifest, &ent, rec, old, &ctx));
+                if let Err(e) = checked {
                     return Ok(Err(e));
                 }
             }

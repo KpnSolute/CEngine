@@ -8,9 +8,9 @@
 //! default fills them first, on patch it does not (a removed field is null).
 //!
 //! Bindings besides fields: `old.field` (null on create), `actor.id`, `actor.role`, `now`,
-//! `today`. `ref(...)` and computed fields cannot be resolved here yet, so an invariant that
-//! reads one is skipped rather than failing every write; `unenforced_invariants` lists them
-//! so a host can warn.
+//! `today`. Computed fields are available once `evaluate_computed` has run. `ref(...)` and
+//! computed sums over other records cannot be resolved here yet, so an invariant that reads
+//! one is skipped rather than failing every write; `unenforced_invariants` lists them.
 
 use crate::FieldError;
 use bigdecimal::BigDecimal;
@@ -90,9 +90,13 @@ fn unenforceable(ent: &Value, src: &str) -> Option<&'static str> {
     if words.iter().any(|w| w == "ref") {
         return Some("reads another record with ref()");
     }
-    let computed = |w: &String| ent["fields"][w.as_str()]["computed"].is_string();
-    if words.iter().any(computed) {
-        return Some("reads a computed field");
+    let uncomputable = |w: &String| {
+        ent["fields"][w.as_str()]["computed"]
+            .as_str()
+            .is_some_and(crate::computed::uncomputable)
+    };
+    if words.iter().any(uncomputable) {
+        return Some("reads a computed field that is a sum over other records");
     }
     None
 }
@@ -117,21 +121,12 @@ pub fn unenforced_invariants(m: &Manifest) -> Vec<Unenforced> {
     out
 }
 
-/// Checks every enforceable invariant of `entity` against `record` (the whole record as it
-/// would be stored). `old` is the stored record on patch and `None` on create. Returns one
-/// error per failed invariant, path `""`, code `invariant_failed`, detail the invariant's
-/// `message_code` (or its name).
-pub fn check_invariants(
-    m: &Manifest,
-    entity: &str,
+pub(crate) fn build_env(
+    ent: &Value,
     record: &Map<String, Value>,
     old: Option<&Map<String, Value>>,
     ctx: &Context,
-) -> Result<(), Vec<FieldError>> {
-    let ent = &m.value["entities"][entity];
-    let Some(list) = ent["invariants"].as_array() else {
-        return Ok(());
-    };
+) -> Env {
     let mut env = Env::new();
     if let Some(fields) = ent["fields"].as_object() {
         for (name, f) in fields {
@@ -158,6 +153,25 @@ pub fn check_invariants(
         );
         env.insert("today".into(), Ev::Str(t.format("%Y-%m-%d").to_string()));
     }
+    env
+}
+
+/// Checks every enforceable invariant of `entity` against `record` (the whole record as it
+/// would be stored). `old` is the stored record on patch and `None` on create. Returns one
+/// error per failed invariant, path `""`, code `invariant_failed`, detail the invariant's
+/// `message_code` (or its name).
+pub fn check_invariants(
+    m: &Manifest,
+    entity: &str,
+    record: &Map<String, Value>,
+    old: Option<&Map<String, Value>>,
+    ctx: &Context,
+) -> Result<(), Vec<FieldError>> {
+    let ent = &m.value["entities"][entity];
+    let Some(list) = ent["invariants"].as_array() else {
+        return Ok(());
+    };
+    let env = build_env(ent, record, old, ctx);
     let mut errors = Vec::new();
     for inv in list {
         let Some(src) = inv["expr"].as_str() else {

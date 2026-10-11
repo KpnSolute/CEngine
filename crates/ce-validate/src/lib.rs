@@ -18,7 +18,9 @@
 //! Invariants are checked by `check_invariants` against the whole record. Not here: computed
 //! values, uniqueness and reference existence (the store enforces those).
 
+mod computed;
 mod invariants;
+pub use computed::evaluate_computed;
 pub use invariants::{check_invariants, unenforced_invariants, Context, Unenforced};
 
 use ce_manifest::Manifest;
