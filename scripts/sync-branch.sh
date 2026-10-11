@@ -19,6 +19,10 @@ if git merge-base --is-ancestor origin/main HEAD; then
   exit 0
 fi
 
+# Older branches do not carry .gitattributes yet, so load main's rules before merging.
+mkdir -p "$(git rev-parse --git-dir)/info"
+git show origin/main:.gitattributes > "$(git rev-parse --git-dir)/info/attributes" 2>/dev/null || true
+
 if ! git merge --no-edit -m "Merge main into $branch" origin/main >/dev/null 2>&1; then
   conflicts="$(git diff --name-only --diff-filter=U)"
   other="$(printf '%s\n' "$conflicts" | grep -v '^Cargo.lock$' || true)"
@@ -47,10 +51,14 @@ if ! out="$(cargo clippy --workspace --all-targets 2>&1 && cargo test --workspac
   printf 'the merged result fails checks:\n%s\n' "$(printf '%s\n' "$out" | tail -30)"
   exit 1
 fi
+if [ -f reference/run_vectors.py ] && ! out="$(python3 reference/run_vectors.py 2>&1)"; then
+  printf 'the conformance vectors fail on the merged result:\n%s\n' "$(printf '%s\n' "$out" | tail -30)"
+  exit 1
+fi
 
 if [ -n "${DRY_RUN:-}" ]; then
   echo "dry run: merge is clean and passes; not pushing"
   exit 0
 fi
-git push -q origin "HEAD:$branch"
+git push -q origin "HEAD:$branch" || { echo "push rejected; the branch moved or is protected"; exit 1; }
 echo "synced"

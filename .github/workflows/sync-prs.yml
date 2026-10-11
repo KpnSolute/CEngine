@@ -53,6 +53,9 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.CE_SYNC_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - run: rustup component add rustfmt clippy
       - run: |
           git config user.name "ce-sync"
@@ -65,7 +68,7 @@ jobs:
           if [ -n "$ONE" ]; then
             branches="$ONE"
           else
-            branches="$(gh pr list --state open --json headRefName,headRepositoryOwner,isCrossRepository \
+            branches="$(gh pr list --state open --limit 500 --json headRefName,headRepositoryOwner,isCrossRepository \
               --jq '.[] | select(.isCrossRepository | not) | .headRefName')"
           fi
           failed=0
