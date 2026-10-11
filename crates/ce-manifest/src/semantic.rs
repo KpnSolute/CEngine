@@ -423,6 +423,13 @@ fn walk(out: &mut Vec<Issue>, p: &str, e: &Expr, names: &BTreeSet<&str>, site: S
     }
 }
 
+fn name_of(a: &Expr) -> Option<&str> {
+    match a {
+        Expr::Path(p) if p.len() == 1 => Some(p[0].as_str()),
+        _ => None,
+    }
+}
+
 fn is_children_chain(e: &Expr) -> bool {
     match e {
         Expr::Call(f, _) => f == "children",
@@ -437,10 +444,6 @@ fn check_children(out: &mut Vec<Issue>, path: &str, e: &Expr, entities: &Obj, ow
     match e {
         Expr::Call(f, args) => {
             if f == "children" {
-                let name_of = |a: &Expr| match a {
-                    Expr::Path(p) if p.len() == 1 => Some(p[0].as_str()),
-                    _ => None,
-                };
                 let (child, field) = match &args[..] {
                     [a, b] => match (name_of(a), name_of(b)) {
                         (Some(c), Some(f)) => (c, f),
