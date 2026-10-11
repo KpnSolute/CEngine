@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ce-expr", "crates/ce-manifest", "crates/ce-query", "crates/ce-auth", "crates/ce-store"]
+members = ["crates/ce-expr", "crates/ce-manifest", "crates/ce-query", "crates/ce-auth", "crates/ce-store", "crates/ce-calendar"]
 
 [workspace.package]
 version = "0.0.1"
