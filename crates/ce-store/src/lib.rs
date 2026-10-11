@@ -83,8 +83,9 @@ pub trait Store {
     /// Like `insert`, for a body whose `derived` fields were computed by the host from the
     /// store's current contents (so they can differ between two identical requests). The
     /// idempotency check compares only `caller`, the body as the client sent it; the record
-    /// stored is `caller` with `derived` merged over it. The default merges and calls `insert`,
-    /// which compares the merged body.
+    /// stored is `caller` with `derived` merged over it. A store that cannot compare that way
+    /// returns `Unsupported` when there are derived fields, rather than reporting a retry as a
+    /// reused key; with none it is `insert`.
     fn insert_derived(
         &self,
         scope: &TenantScope,
@@ -93,11 +94,10 @@ pub trait Store {
         derived: Map<String, Value>,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
-        let mut data = caller;
-        if let Value::Object(o) = &mut data {
-            o.extend(derived);
+        if !derived.is_empty() {
+            return Err(StoreError::Unsupported);
         }
-        self.insert(scope, entity, data, idempotency_key)
+        self.insert(scope, entity, caller, idempotency_key)
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError>;
