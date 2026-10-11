@@ -14,13 +14,16 @@
 //! On update the state field in the incoming data is ignored, so a read-merge-write cycle
 //! cannot move state.
 
+use crate::pool::{Conn, Pool};
 use ce_manifest::Manifest;
 use ce_query::{plan_list, ListRequest, Param, Target};
 use ce_store::{Page, Record, Store, StoreError, TenantScope};
 use ce_validate::{validate, Mode};
 use postgres::{types::ToSql, Client, GenericClient, NoTls};
 use serde_json::{json, Map, Value};
-use std::{cell::RefCell, collections::HashMap, sync::Mutex};
+use std::{cell::RefCell, collections::HashMap};
+
+pub use crate::pool::PoolConfig;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -52,7 +55,7 @@ struct Ent {
 }
 
 pub struct TypedPgStore {
-    client: Mutex<Client>,
+    pool: Pool,
     schema: String,
     manifest: Manifest,
     ents: HashMap<String, Ent>,
@@ -164,9 +167,20 @@ impl TypedPgStore {
     /// Creates the schema, tables and idempotency table for a fresh installation, then
     /// returns the store. Fails if the schema already exists.
     pub fn install(url: &str, m: &Manifest, schema: &str) -> Result<Self, StoreError> {
+        Self::install_with(url, m, schema, PoolConfig::default())
+    }
+
+    /// Like [`install`](Self::install), with explicit pool limits.
+    pub fn install_with(
+        url: &str,
+        m: &Manifest,
+        schema: &str,
+        cfg: PoolConfig,
+    ) -> Result<Self, StoreError> {
         let ddl = ce_migrate::generate(m, schema)
             .map_err(|_| StoreError::BadData("manifest cannot be installed"))?;
-        let mut client = Client::connect(url, NoTls).map_err(db)?;
+        let pool = Self::pool(url, cfg);
+        let mut client = pool.get()?;
         let mut tx = client.transaction().map_err(db)?;
         for stmt in &ddl {
             tx.batch_execute(stmt).map_err(db)?;
@@ -183,16 +197,37 @@ impl TypedPgStore {
         ))
         .map_err(db)?;
         tx.commit().map_err(db)?;
-        Self::build(client, m, schema)
+        drop(client);
+        Self::build(pool, m, schema)
     }
 
     /// Connects to an installed schema. Does not change the database.
     pub fn open(url: &str, m: &Manifest, schema: &str) -> Result<Self, StoreError> {
-        let client = Client::connect(url, NoTls).map_err(db)?;
-        Self::build(client, m, schema)
+        Self::open_with(url, m, schema, PoolConfig::default())
     }
 
-    fn build(client: Client, m: &Manifest, schema: &str) -> Result<Self, StoreError> {
+    /// Like [`open`](Self::open), with explicit pool limits. Fails if the database cannot be
+    /// reached.
+    pub fn open_with(
+        url: &str,
+        m: &Manifest,
+        schema: &str,
+        cfg: PoolConfig,
+    ) -> Result<Self, StoreError> {
+        let pool = Self::pool(url, cfg);
+        drop(pool.get()?);
+        Self::build(pool, m, schema)
+    }
+
+    fn pool(url: &str, cfg: PoolConfig) -> Pool {
+        let url = url.to_string();
+        Pool::new(
+            Box::new(move || Client::connect(&url, NoTls).map_err(db)),
+            cfg,
+        )
+    }
+
+    fn build(pool: Pool, m: &Manifest, schema: &str) -> Result<Self, StoreError> {
         if !ident_ok(schema) {
             return Err(StoreError::BadData("invalid schema name"));
         }
@@ -247,7 +282,7 @@ impl TypedPgStore {
             );
         }
         Ok(TypedPgStore {
-            client: Mutex::new(client),
+            pool,
             schema: schema.to_string(),
             manifest: m.clone(),
             ents,
@@ -260,7 +295,7 @@ impl TypedPgStore {
 
     /// Drops the schema and everything in it. For tests.
     pub fn drop_schema(&self) -> Result<(), StoreError> {
-        self.lock()
+        self.lock()?
             .batch_execute(&format!(
                 r#"DROP SCHEMA IF EXISTS "{}" CASCADE"#,
                 self.schema
@@ -268,8 +303,8 @@ impl TypedPgStore {
             .map_err(db)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Client> {
-        self.client.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> Result<Conn<'_>, StoreError> {
+        self.pool.get()
     }
 
     fn ent(&self, entity: &str) -> Result<&Ent, StoreError> {
@@ -705,7 +740,7 @@ impl Store for TypedPgStore {
         entity: &str,
         req: &ListRequest,
     ) -> Result<Page, StoreError> {
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         self.list_on(&mut *c, scope, entity, req)
     }
 
@@ -716,7 +751,7 @@ impl Store for TypedPgStore {
         data: Value,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         let mut tx = c.transaction().map_err(db)?;
         let record = self.insert_on(&mut tx, scope, entity, data, idempotency_key)?;
         tx.commit().map_err(db)?;
@@ -724,7 +759,7 @@ impl Store for TypedPgStore {
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         self.get_on(&mut *c, scope, entity, id, false)
     }
 
@@ -736,7 +771,7 @@ impl Store for TypedPgStore {
         expected_version: u64,
         data: Value,
     ) -> Result<Record, StoreError> {
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         self.update_on(&mut *c, scope, entity, id, expected_version, data)
     }
 
@@ -747,7 +782,7 @@ impl Store for TypedPgStore {
         id: &str,
         expected_version: u64,
     ) -> Result<(), StoreError> {
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         self.delete_on(&mut *c, scope, entity, id, expected_version)
     }
 
@@ -759,7 +794,7 @@ impl Store for TypedPgStore {
         parent_id: &str,
         attr: Option<&str>,
     ) -> Result<Vec<Value>, StoreError> {
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         self.child_values_on(&mut *c, scope, entity, ref_field, parent_id, attr)
     }
 
@@ -768,7 +803,7 @@ impl Store for TypedPgStore {
         &self,
         f: &mut dyn FnMut(&dyn Store) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         let tx = TypedTx {
             store: self,
             tx: RefCell::new(c.transaction().map_err(db)?),

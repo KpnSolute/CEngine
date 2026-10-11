@@ -14,6 +14,7 @@
 //! | `CE_JWT_KEY` | HS256 signing key, at least 32 bytes (required) |
 //! | `CE_INSTALLATION` | installation id used in URLs, `/v1/{id}/...` (required) |
 //! | `CE_SCHEMA` | Postgres schema name (default `ce_` + the installation id) |
+//! | `CE_POOL_SIZE` | most database connections open at once (default 8) |
 //! | `CE_BIND` | listen address (default `127.0.0.1:8080`) |
 
 use ce_auth::Verifier;
@@ -70,6 +71,14 @@ fn run() -> Result<(), String> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_schema(&installation));
+    let mut pool = ce_store_pg::PoolConfig::default();
+    if let Ok(v) = std::env::var("CE_POOL_SIZE") {
+        pool.max = v
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=256).contains(n))
+            .ok_or("CE_POOL_SIZE must be a number from 1 to 256")?;
+    }
     let bind = std::env::var("CE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
 
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -85,7 +94,7 @@ fn run() -> Result<(), String> {
 
     // Blocking Postgres work happens here, before and after the async runtime, never inside it.
     if cmd == "install" {
-        let store = TypedPgStore::install(&url, &manifest, &schema)
+        let store = TypedPgStore::install_with(&url, &manifest, &schema, pool)
             .map_err(|e| format!("install failed: {e:?}"))?;
         drop(store);
         println!("installed schema {schema}");
@@ -96,7 +105,7 @@ fn run() -> Result<(), String> {
             "schema {schema} does not exist (run `ce-serve install` first)"
         ));
     }
-    let store = TypedPgStore::open(&url, &manifest, &schema).map_err(|e| {
+    let store = TypedPgStore::open_with(&url, &manifest, &schema, pool).map_err(|e| {
         format!("cannot open schema {schema}: {e:?} (run `ce-serve install` first)")
     })?;
     let app = router(AppState::new(store, verifier, manifest, &installation));

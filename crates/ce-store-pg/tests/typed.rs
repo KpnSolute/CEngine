@@ -521,3 +521,69 @@ fn typed_store_passes_the_transaction_contract() {
         s.drop_schema().unwrap();
     }
 }
+
+fn pooled(url: &str, cfg: ce_store_pg::PoolConfig) -> TypedPgStore {
+    let name = format!(
+        "ce_typed_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    );
+    TypedPgStore::install_with(url, &manifest(), &name, cfg).expect("install")
+}
+
+#[test]
+fn pooled_writers_taking_turns_on_one_row_lose_no_update() {
+    let Some(url) = url() else { return };
+    let cfg = ce_store_pg::PoolConfig {
+        max: 4,
+        ..Default::default()
+    };
+    let s = pooled(&url, cfg);
+    let sc = scope();
+    let id = s.insert(&sc, "parent", json!({"n": 0}), None).unwrap().id;
+    // More threads than connections: the extra ones wait for a free connection.
+    std::thread::scope(|t| {
+        for _ in 0..12 {
+            t.spawn(|| {
+                for _ in 0..5 {
+                    s.atomic(&mut |tx| {
+                        let r = tx.get_locked(&sc, "parent", &id)?;
+                        let n = r.data["n"].as_i64().unwrap();
+                        tx.update(&sc, "parent", &id, r.version, json!({"n": n + 1}))?;
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            });
+        }
+    });
+    let r = s.get(&sc, "parent", &id).unwrap();
+    assert_eq!(r.data["n"], 60);
+    assert_eq!(r.version, 61);
+    s.drop_schema().unwrap();
+}
+
+#[test]
+fn an_exhausted_pool_is_an_error_not_a_hang() {
+    let Some(url) = url() else { return };
+    let cfg = ce_store_pg::PoolConfig {
+        max: 1,
+        wait: std::time::Duration::from_millis(200),
+    };
+    let s = pooled(&url, cfg);
+    let sc = scope();
+    // The transaction holds the only connection, so a call on the outer store cannot get one.
+    let mut seen = None;
+    s.atomic(&mut |_| {
+        seen = Some(s.get(&sc, "parent", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaab"));
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(seen, Some(Err(StoreError::Backend(_)))));
+    // Once the transaction ended the connection is back.
+    assert!(matches!(
+        s.get(&sc, "parent", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaab"),
+        Err(StoreError::NotFound)
+    ));
+    s.drop_schema().unwrap();
+}
