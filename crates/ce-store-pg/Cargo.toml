@@ -17,6 +17,7 @@ serde_json = "1"
 [dev-dependencies]
 ce-store = { path = "../ce-store", features = ["contract-tests"] }
 ce-auth = { path = "../ce-auth" }
+ce-tools = { path = "../ce-tools" }
 base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
