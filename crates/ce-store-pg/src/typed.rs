@@ -13,7 +13,8 @@
 //! read-merge-write cycle cannot move state.
 
 use ce_manifest::Manifest;
-use ce_store::{Record, Store, StoreError, TenantScope};
+use ce_query::{plan_list, ListRequest, Param, Target};
+use ce_store::{Page, Record, Store, StoreError, TenantScope};
 use ce_validate::{validate, Mode};
 use postgres::{types::ToSql, Client, NoTls};
 use serde_json::{json, Map, Value};
@@ -305,6 +306,109 @@ fn replay(result: Option<Value>) -> Result<Record, StoreError> {
 }
 
 impl Store for TypedPgStore {
+    fn list(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        req: &ListRequest,
+    ) -> Result<Page, StoreError> {
+        let ent = self
+            .ents
+            .get(entity)
+            .ok_or(StoreError::BadData("unknown entity"))?;
+        let limit = req
+            .limit
+            .unwrap_or(ce_query::DEFAULT_LIMIT)
+            .clamp(1, ce_query::MAX_LIMIT);
+        // The cursor is built from the last row's sort values, so sort fields are always read.
+        let mut req = req.clone();
+        let mut hidden: Vec<String> = Vec::new();
+        if let Some(sel) = req.select.as_mut() {
+            for k in &req.sort {
+                if k.field != "id" && !sel.contains(&k.field) {
+                    sel.push(k.field.clone());
+                    hidden.push(k.field.clone());
+                }
+            }
+        }
+        let target = Target {
+            schema: self.schema.clone(),
+            entity: entity.to_string(),
+        };
+        let planned = plan_list(&self.manifest, &target, scope, &req).map_err(StoreError::Query)?;
+        let params: Vec<Box<dyn ToSql + Sync>> = planned
+            .params
+            .iter()
+            .map(|p| match p {
+                Param::Text(s) | Param::Dec(s) => Box::new(s.clone()) as Box<dyn ToSql + Sync>,
+                Param::Int(i) => Box::new(*i),
+                Param::Bool(b) => Box::new(*b),
+            })
+            .collect();
+        let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = self
+            .client
+            .lock()
+            .map_err(|_| StoreError::Backend("poisoned".into()))?
+            .query(planned.sql.as_str(), &refs)
+            .map_err(db)?;
+        let mut records: Vec<Record> = rows
+            .iter()
+            .map(|row| {
+                let mut data = Map::new();
+                for (i, name) in planned.columns.iter().enumerate() {
+                    let decimal = ent
+                        .cols
+                        .iter()
+                        .any(|c| &c.name == name && matches!(c.kind, Kind::Decimal));
+                    let v = if decimal {
+                        row.get::<_, Option<String>>(2 + i).map(Value::String)
+                    } else {
+                        row.get::<_, Option<Value>>(2 + i)
+                    };
+                    if let Some(v) = v.filter(|v| !v.is_null()) {
+                        data.insert(name.clone(), v);
+                    }
+                }
+                Record {
+                    id: row.get(0),
+                    entity: entity.to_string(),
+                    version: row.get::<_, i64>(1) as u64,
+                    data: Value::Object(data),
+                }
+            })
+            .collect();
+        // The planner reads one extra row to learn whether another page exists.
+        let next = if records.len() > limit {
+            records.truncate(limit);
+            let last = records.last().expect("limit is at least 1");
+            let mut cursor = Vec::new();
+            for k in &req.sort {
+                cursor.push(if k.field == "id" {
+                    Value::String(last.id.clone())
+                } else {
+                    // Null columns are omitted from the record; the cursor says null.
+                    last.data.get(&k.field).cloned().unwrap_or(Value::Null)
+                });
+            }
+            if !req.sort.iter().any(|k| k.field == "id") {
+                cursor.push(Value::String(last.id.clone()));
+            }
+            Some(cursor)
+        } else {
+            None
+        };
+        // Sort fields read only for the cursor are not part of what the caller asked for.
+        for r in &mut records {
+            if let Value::Object(d) = &mut r.data {
+                for h in &hidden {
+                    d.remove(h);
+                }
+            }
+        }
+        Ok(Page { records, next })
+    }
+
     fn insert(
         &self,
         scope: &TenantScope,

@@ -24,7 +24,6 @@ pub enum QueryError {
     BadFilter(&'static str),
     FilterTooLarge,
     UnindexedSort(String),
-    MixedSortCursor,
     BadCursor,
     BadSchema,
 }
@@ -61,6 +60,9 @@ pub struct ListRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Planned {
     pub sql: String,
+    /// The fields behind result columns 2.., in order. Columns 0 and 1 are `id` (text) and
+    /// `version`. Decimal columns come back as text, every other column as `jsonb`.
+    pub columns: Vec<String>,
     /// `$1` is always the tenant id.
     pub params: Vec<Param>,
 }
@@ -173,21 +175,41 @@ pub fn plan_list(
         params: vec![Param::Text(scope.tenant_id().to_string())],
     };
 
-    // SELECT list: declared fields only, plus id.
-    let mut cols = vec!["\"id\"".to_string()];
+    // SELECT list: id and version, then declared fields (and an engine-managed state field).
+    let mut names: Vec<String> = Vec::new();
     match &req.select {
         Some(sel) => {
             for f in sel {
-                if f != "id" {
-                    cols.push(ctx.column(f)?);
+                if f != "id" && !names.contains(f) {
+                    ctx.column(f)?;
+                    names.push(f.clone());
                 }
             }
         }
         None => {
             if let Some(fields) = entity["fields"].as_object() {
-                cols.extend(fields.keys().map(|k| format!("\"{k}\"")));
+                names.extend(fields.keys().cloned());
+            }
+            if let Some(sf) = entity["state"]["field"].as_str() {
+                if !names.iter().any(|n| n == sf) {
+                    names.push(sf.to_string());
+                }
             }
         }
+    }
+    // Output columns get neutral aliases so `ORDER BY "col"` always means the table column,
+    // never a text-cast output of the same name.
+    let mut cols = vec![
+        "\"id\"::text AS \"_c0\"".to_string(),
+        "\"version\" AS \"_c1\"".to_string(),
+    ];
+    for (i, n) in names.iter().enumerate() {
+        let alias = i + 2;
+        cols.push(if ctx.field_type(n)? == "decimal" {
+            format!("\"{n}\"::text AS \"_c{alias}\"")
+        } else {
+            format!("to_jsonb(\"{n}\") AS \"_c{alias}\"")
+        });
     }
 
     let mut wheres = vec!["\"tenant_id\" = $1::text::uuid".to_string()];
@@ -217,29 +239,50 @@ pub fn plan_list(
         order.push(("id".into(), dir));
     }
 
-    // Keyset cursor: ROW(sort fields..., id) > ROW($..) when all directions agree.
+    // Keyset cursor, expanded lexicographically so each key keeps its own direction and nulls
+    // sort last in both directions (`NULLS LAST`): the page after (c1..cn) is the OR over i of
+    // "keys before i equal their cursor value, and key i comes after c_i". A null cursor value
+    // has nothing after it, only ties to break on the next key.
     if let Some(after) = &req.after {
         if after.len() != order.len() {
             return Err(QueryError::BadCursor);
         }
-        let dir = order[0].1;
-        if order.iter().any(|(_, d)| *d != dir) {
-            return Err(QueryError::MixedSortCursor);
+        // (column, direction, bound placeholder with cast, or None for a null cursor value)
+        let mut keys: Vec<(String, SortDir, Option<String>)> = Vec::new();
+        for ((f, d), v) in order.iter().zip(after) {
+            let col = ctx.column(f)?;
+            if v.is_null() {
+                if f == "id" {
+                    return Err(QueryError::BadCursor);
+                }
+                keys.push((col, *d, None));
+            } else {
+                let (p, cast) = ctx.value(f, v)?;
+                let n = ctx.bind(p);
+                keys.push((col, *d, Some(format!("${n}{cast}"))));
+            }
         }
-        let mut left = Vec::new();
-        let mut right = Vec::new();
-        for ((f, _), v) in order.iter().zip(after) {
-            left.push(ctx.column(f)?);
-            let (p, cast) = ctx.value(f, v)?;
-            let n = ctx.bind(p);
-            right.push(format!("${n}{cast}"));
+        let mut alts = Vec::new();
+        for i in 0..keys.len() {
+            let mut parts: Vec<String> = keys[..i]
+                .iter()
+                .map(|(col, _, ph)| match ph {
+                    Some(ph) => format!("{col} IS NOT DISTINCT FROM {ph}"),
+                    None => format!("{col} IS NULL"),
+                })
+                .collect();
+            let (col, dir, ph) = &keys[i];
+            let Some(ph) = ph else { continue };
+            let cmp = if *dir == SortDir::Asc { ">" } else { "<" };
+            parts.push(format!("({col} {cmp} {ph} OR {col} IS NULL)"));
+            alts.push(format!("({})", parts.join(" AND ")));
         }
-        let cmp = if dir == SortDir::Asc { ">" } else { "<" };
-        wheres.push(format!(
-            "(ROW({}) {cmp} ROW({}))",
-            left.join(", "),
-            right.join(", ")
-        ));
+        // Every key null (only the id can't be) leaves no later row: match nothing.
+        wheres.push(if alts.is_empty() {
+            "FALSE".to_string()
+        } else {
+            format!("({})", alts.join(" OR "))
+        });
     }
 
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
@@ -247,7 +290,7 @@ pub fn plan_list(
         .iter()
         .map(|(f, d)| {
             format!(
-                "\"{f}\" {}",
+                "\"{f}\" {} NULLS LAST",
                 if *d == SortDir::Asc { "ASC" } else { "DESC" }
             )
         })
@@ -263,6 +306,7 @@ pub fn plan_list(
     );
     Ok(Planned {
         sql,
+        columns: names,
         params: ctx.params,
     })
 }

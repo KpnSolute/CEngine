@@ -5,10 +5,11 @@
 //! entity exists (404). A caller without a grant gets 403 for known and unknown entities
 //! alike, so entity names do not leak. Tenant comes only from the verified token.
 //!
-//! Endpoints: `POST /v1/{inst}/{entity}` (Idempotency-Key required), `GET|PATCH|DELETE
+//! Endpoints: `GET|POST /v1/{inst}/{entity}` (POST needs an Idempotency-Key), `GET|PATCH|DELETE
 //! /v1/{inst}/{entity}/{id}` (If-Match required on writes; PATCH is JSON Merge Patch),
 //! `GET /_meta/health/{live,ready}`, `GET /_meta/manifest`, `GET /_meta/openapi`.
-//! Field types and limits are checked by `ce-validate`. Not yet: list/query, batch, actions,
+//! Field types and limits are checked by `ce-validate`. `GET /v1/{inst}/{entity}` lists by
+//! keyset cursor on stores that support it (the typed Postgres store). Not yet: batch, actions,
 //! changesets, events, files, invariants.
 
 mod openapi;
@@ -18,7 +19,7 @@ pub use problem::Problem;
 
 use axum::{
     body::Bytes,
-    extract::{rejection::BytesRejection, DefaultBodyLimit, Path, State},
+    extract::{rejection::BytesRejection, DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -27,9 +28,9 @@ use axum::{
 use ce_auth::{Principal, Verifier};
 use ce_manifest::Manifest;
 use ce_policy::{Access, Policy};
-use ce_store::{Record, Store, StoreError};
+use ce_store::{ListRequest, QueryError, Record, SortDir, SortKey, Store, StoreError};
 use serde_json::{json, Map, Value};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 const MAX_BODY: usize = 1024 * 1024;
 
@@ -83,7 +84,7 @@ where
         .route("/_meta/health/ready", get(health))
         .route("/_meta/manifest", get(manifest::<S>))
         .route("/_meta/openapi", get(openapi_doc::<S>))
-        .route("/v1/{inst}/{entity}", axum::routing::post(create::<S>))
+        .route("/v1/{inst}/{entity}", get(list::<S>).post(create::<S>))
         .route(
             "/v1/{inst}/{entity}/{id}",
             get(read::<S>).patch(update::<S>).delete(remove::<S>),
@@ -289,6 +290,12 @@ fn store_problem(e: StoreError) -> Problem {
             format!("the write breaks a {kind} rule"),
         ),
         // The cause goes to logs, never to the caller.
+        StoreError::Query(q) => query_problem(q),
+        StoreError::Unsupported => Problem::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "not_implemented",
+            "this installation's store cannot do that yet",
+        ),
         StoreError::Backend(_) => Problem::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
@@ -481,6 +488,139 @@ async fn remove<S: Store + Send + Sync + 'static>(
         let scope = who.scope().clone();
         blocking(&st, move |s| s.delete(&scope, &entity, &id, expected)).await?;
         Ok(StatusCode::NO_CONTENT.into_response())
+    };
+    finish(&rid, run.await)
+}
+
+/// Maps a planner error to a 422 that names the offending request parameter.
+fn query_problem(e: QueryError) -> Problem {
+    let (path, code, detail) = match e {
+        QueryError::UnknownEntity(_) => return Problem::not_found(),
+        QueryError::UnknownField(f) => ("select", "unknown_field", format!("unknown field {f}")),
+        QueryError::NotFilterable(f) => {
+            ("filter", "not_filterable", format!("cannot filter on {f}"))
+        }
+        QueryError::BadOp(f, op) => (
+            "filter",
+            "bad_operator",
+            format!("{op} is not allowed on {f}"),
+        ),
+        QueryError::BadValue(f) => (
+            "filter",
+            "bad_value",
+            format!("the value for {f} has the wrong type"),
+        ),
+        QueryError::BadFilter(why) => ("filter", "bad_filter", why.to_string()),
+        QueryError::FilterTooLarge => (
+            "filter",
+            "filter_too_large",
+            "the filter is too large".to_string(),
+        ),
+        QueryError::UnindexedSort(f) => {
+            ("sort", "unindexed_sort", format!("{f} is not a sort key"))
+        }
+        QueryError::BadCursor => (
+            "after",
+            "bad_cursor",
+            "the cursor does not match this request".to_string(),
+        ),
+        QueryError::BadSchema => {
+            return store_problem(StoreError::Backend("bad schema".into()));
+        }
+    };
+    Problem::validation(
+        "the list request is invalid",
+        vec![json!({"path": path, "code": code, "detail": detail})],
+    )
+}
+
+fn bad_param(path: &str, detail: &str) -> Problem {
+    Problem::validation(
+        "the list request is invalid",
+        vec![json!({"path": path, "code": "invalid_value", "detail": detail})],
+    )
+}
+
+/// Builds the planner request from `?select=a,b&sort=-price,name&limit=50&after=..&filter=..`.
+fn list_request(q: &HashMap<String, String>) -> Result<ListRequest, Problem> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+    if q.values().any(|v| v.len() > 8192) {
+        return Err(bad_param("query", "a parameter is too long"));
+    }
+    let names = |v: &str| v.split(',').map(str::to_string).collect::<Vec<_>>();
+    let sort = q
+        .get("sort")
+        .map(|v| {
+            names(v)
+                .into_iter()
+                .map(|f| match f.strip_prefix('-') {
+                    Some(f) => SortKey {
+                        field: f.to_string(),
+                        dir: SortDir::Desc,
+                    },
+                    None => SortKey {
+                        field: f,
+                        dir: SortDir::Asc,
+                    },
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let limit = match q.get("limit") {
+        Some(v) => Some(
+            v.parse::<usize>()
+                .map_err(|_| bad_param("limit", "limit must be a whole number"))?,
+        ),
+        None => None,
+    };
+    let filter = match q.get("filter") {
+        Some(v) => Some(
+            serde_json::from_str::<Value>(v)
+                .map_err(|_| bad_param("filter", "filter must be JSON"))?,
+        ),
+        None => None,
+    };
+    let after = match q.get("after") {
+        Some(v) => {
+            let raw = B64
+                .decode(v)
+                .map_err(|_| bad_param("after", "the cursor is not valid"))?;
+            match serde_json::from_slice::<Value>(&raw) {
+                Ok(Value::Array(a)) => Some(a),
+                _ => return Err(bad_param("after", "the cursor is not valid")),
+            }
+        }
+        None => None,
+    };
+    Ok(ListRequest {
+        select: q.get("select").map(|v| names(v)),
+        filter,
+        sort,
+        limit,
+        after,
+    })
+}
+
+async fn list<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, entity)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+    let rid = request_id();
+    let run = async {
+        let who = guard(&st, &headers, &inst, &entity, Access::Read)?;
+        let req = list_request(&q)?;
+        let scope = who.scope().clone();
+        let page = blocking(&st, move |s| s.list(&scope, &entity, &req)).await?;
+        let data: Vec<Value> = page.records.iter().map(record_json).collect();
+        let next = page.next.map(|c| B64.encode(Value::Array(c).to_string()));
+        Ok((
+            StatusCode::OK,
+            Json(json!({"data": data, "meta": {"request_id": rid, "next": next}})),
+        )
+            .into_response())
     };
     finish(&rid, run.await)
 }

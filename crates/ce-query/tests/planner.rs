@@ -181,7 +181,10 @@ fn select_is_limited_to_declared_fields() {
         },
     )
     .unwrap();
-    assert!(ok.sql.starts_with("SELECT \"id\", \"starts_at\" FROM"));
+    assert_eq!(ok.columns, vec!["starts_at".to_string()]);
+    assert!(ok.sql.starts_with(
+        "SELECT \"id\"::text AS \"_c0\", \"version\" AS \"_c1\", to_jsonb(\"starts_at\") AS \"_c2\" FROM"
+    ));
     let bad = plan(
         &m,
         "booking",
@@ -212,7 +215,9 @@ fn only_indexed_sort_keys_are_allowed_and_limit_is_capped() {
         },
     )
     .unwrap();
-    assert!(ok.sql.contains("ORDER BY \"starts_at\" DESC, \"id\" DESC"));
+    assert!(ok
+        .sql
+        .contains("ORDER BY \"starts_at\" DESC NULLS LAST, \"id\" DESC NULLS LAST"));
     assert!(ok.sql.ends_with(&format!("LIMIT {}", MAX_LIMIT + 1)));
     let bad = plan(
         &m,
@@ -243,7 +248,7 @@ fn keyset_cursor_uses_row_comparison_with_bound_values() {
     assert_tenant_scoped(&p);
     assert!(
         p.sql
-            .contains("(ROW(\"starts_at\", \"id\") > ROW($2::text::timestamptz, $3::text::uuid))"),
+            .contains("(((\"starts_at\" > $2::text::timestamptz OR \"starts_at\" IS NULL)) OR (\"starts_at\" IS NOT DISTINCT FROM $2::text::timestamptz AND (\"id\" > $3::text::uuid OR \"id\" IS NULL)))"),
         "{}",
         p.sql
     );
@@ -269,10 +274,36 @@ fn keyset_cursor_uses_row_comparison_with_bound_values() {
         ]),
         ..Default::default()
     };
-    assert_eq!(
-        plan(&m, "booking", &mixed),
-        Err(QueryError::MixedSortCursor)
+    // Mixed directions page too: each key keeps its own comparison.
+    let p = plan(&m, "booking", &mixed).unwrap();
+    assert!(p.sql.contains("\"id\" < $3::text::uuid"), "{}", p.sql);
+    assert!(
+        p.sql.contains("\"starts_at\" > $2::text::timestamptz"),
+        "{}",
+        p.sql
     );
+    // A null sort value in the cursor has nothing after it; ties go to the next key.
+    let null_cursor = ListRequest {
+        after: Some(vec![
+            serde_json::Value::Null,
+            json!("22222222-2222-2222-2222-222222222222"),
+        ]),
+        ..req.clone()
+    };
+    let p = plan(&m, "booking", &null_cursor).unwrap();
+    assert!(
+        p.sql
+            .contains("(\"starts_at\" IS NULL AND (\"id\" > $2::text::uuid OR \"id\" IS NULL))"),
+        "{}",
+        p.sql
+    );
+    assert_eq!(placeholders(&p.sql), p.params.len());
+    // The id can never be null.
+    let bad = ListRequest {
+        after: Some(vec![json!("2026-10-10T12:00:00Z"), serde_json::Value::Null]),
+        ..req.clone()
+    };
+    assert_eq!(plan(&m, "booking", &bad), Err(QueryError::BadCursor));
 }
 
 #[test]
@@ -389,4 +420,35 @@ fn fuzz_every_planned_statement_is_tenant_scoped() {
         ok > 100 && rejected > 100,
         "fuzz should hit both paths: ok={ok} rejected={rejected}"
     );
+}
+
+#[test]
+fn decimals_select_as_text_and_sort_as_numbers() {
+    let m = manifest("inventory");
+    let p = plan(
+        &m,
+        "item",
+        &ListRequest {
+            select: Some(vec!["unit_cost".into()]),
+            sort: vec![SortKey {
+                field: "unit_cost".into(),
+                dir: SortDir::Asc,
+            }],
+            ..Default::default()
+        },
+    );
+    // Whether or not unit_cost is a declared sort key, the select must alias the text cast.
+    let sql = match p {
+        Ok(p) => p.sql,
+        Err(QueryError::UnindexedSort(_)) => return,
+        Err(e) => panic!("{e:?}"),
+    };
+    assert!(sql.contains("\"unit_cost\"::text AS \"_c2\""), "{sql}");
+}
+
+#[test]
+fn engine_managed_state_is_selected_by_default() {
+    let m = manifest("approval_workflow");
+    let p = plan(&m, "request", &ListRequest::default()).unwrap();
+    assert!(p.columns.contains(&"state".to_string()));
 }
