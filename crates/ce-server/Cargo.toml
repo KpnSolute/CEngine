@@ -11,6 +11,7 @@ ce-auth = { path = "../ce-auth" }
 ce-manifest = { path = "../ce-manifest" }
 ce-policy = { path = "../ce-policy" }
 ce-store = { path = "../ce-store" }
+ce-validate = { path = "../ce-validate" }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 serde = { version = "1", features = ["derive"] }

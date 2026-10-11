@@ -281,10 +281,8 @@ async fn bodies_are_validated() {
     let r = create(&a, &tok, "k1", json!([1, 2])).await;
     assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
     let r = create(&a, &tok, "k2", json!({"name": "x"})).await;
-    assert_eq!(
-        r.body["errors"][0],
-        json!({"path": "/unit_cost", "code": "required"})
-    );
+    assert_eq!(r.body["errors"][0]["path"], "/unit_cost");
+    assert_eq!(r.body["errors"][0]["code"], "required");
     let r = create(
         &a,
         &tok,
@@ -547,10 +545,8 @@ async fn patch_cannot_remove_required_fields() {
     )
     .await;
     assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        r.body["errors"][0],
-        json!({"path": "/name", "code": "required"})
-    );
+    assert_eq!(r.body["errors"][0]["path"], "/name");
+    assert_eq!(r.body["errors"][0]["code"], "required");
     let r = call(&a, "GET", &uri, Some(&tok), &[], None).await;
     assert_eq!(r.body["data"]["name"], "flour");
     assert_eq!(r.body["data"]["version"], 1);
@@ -594,4 +590,62 @@ async fn manifest_and_openapi_are_served_to_authenticated_callers() {
         .as_array()
         .unwrap()
         .contains(&json!("unit_cost")));
+}
+
+#[tokio::test]
+async fn field_types_and_limits_come_from_the_manifest() {
+    let a = app();
+    let tok = manager(T1);
+    let cases = [
+        (
+            json!({"name": "x", "unit_cost": "abc"}),
+            "/unit_cost",
+            "invalid_format",
+        ),
+        (
+            json!({"name": "x", "unit_cost": 1.00001}),
+            "/unit_cost",
+            "out_of_range",
+        ),
+        (
+            json!({"name": "x".repeat(121), "unit_cost": 1}),
+            "/name",
+            "too_long",
+        ),
+        (
+            json!({"name": "x", "unit_cost": 1, "category": "nope"}),
+            "/category",
+            "invalid_value",
+        ),
+        (
+            json!({"name": "x", "unit_cost": 1, "period": "not-a-uuid"}),
+            "/period",
+            "invalid_format",
+        ),
+        (json!({"name": 7, "unit_cost": 1}), "/name", "type_mismatch"),
+    ];
+    for (i, (body, path, code)) in cases.into_iter().enumerate() {
+        let r = create(&a, &tok, &format!("t{i}"), body).await;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+        assert_eq!(r.body["errors"][0]["path"], path);
+        assert_eq!(r.body["errors"][0]["code"], code);
+    }
+    // a patch is checked the same way, and nothing is written when it fails
+    let made = create(&a, &tok, "ok", item()).await;
+    let uri = format!(
+        "/v1/{INST}/item/{}",
+        made.body["data"]["id"].as_str().unwrap()
+    );
+    let r = call(
+        &a,
+        "PATCH",
+        &uri,
+        Some(&tok),
+        &[("if-match", "\"1\"")],
+        Some(json!({"category": "nope"})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let g = call(&a, "GET", &uri, Some(&tok), &[], None).await;
+    assert_eq!(g.body["data"]["version"], 1);
 }

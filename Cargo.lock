@@ -290,6 +290,7 @@ dependencies = [
  "ce-manifest",
  "ce-policy",
  "ce-store",
+ "ce-validate",
  "hmac 0.12.1",
  "http-body-util",
  "serde",
