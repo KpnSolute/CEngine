@@ -193,30 +193,27 @@ impl Store for MemoryStore {
             .insert(scope, entity, data, None, idempotency_key)
     }
 
-    fn replay_insert(
-        &self,
-        scope: &TenantScope,
-        entity: &str,
-        caller: &Value,
-        key: &str,
-    ) -> Result<Option<Record>, StoreError> {
-        self.lock().replay(scope, entity, caller, key)
-    }
-
-    fn insert_derived(
+    fn insert_with(
         &self,
         scope: &TenantScope,
         entity: &str,
         caller: Value,
-        derived: Map<String, Value>,
+        derive: &mut dyn FnMut() -> Result<Map<String, Value>, StoreError>,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
-        let mut data = caller.clone();
-        if let Value::Object(o) = &mut data {
-            o.extend(derived);
+        // The first result is looked up before `derive` runs, and no lock is held while it does
+        // (it reads through this same store).
+        if let Some(key) = idempotency_key {
+            if let Some(first) = self.lock().replay(scope, entity, &caller, key)? {
+                return Ok(first);
+            }
+        }
+        let mut body = caller.clone();
+        if let Value::Object(o) = &mut body {
+            o.extend(derive()?);
         }
         self.lock()
-            .insert(scope, entity, data, Some(&caller), idempotency_key)
+            .insert(scope, entity, body, Some(&caller), idempotency_key)
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
@@ -292,31 +289,28 @@ impl Store for MemoryTx {
             .insert(scope, entity, data, None, idempotency_key)
     }
 
-    fn replay_insert(
-        &self,
-        scope: &TenantScope,
-        entity: &str,
-        caller: &Value,
-        key: &str,
-    ) -> Result<Option<Record>, StoreError> {
-        self.inner.borrow().replay(scope, entity, caller, key)
-    }
-
-    fn insert_derived(
+    fn insert_with(
         &self,
         scope: &TenantScope,
         entity: &str,
         caller: Value,
-        derived: Map<String, Value>,
+        derive: &mut dyn FnMut() -> Result<Map<String, Value>, StoreError>,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
-        let mut data = caller.clone();
-        if let Value::Object(o) = &mut data {
-            o.extend(derived);
+        // The first result is looked up before `derive` runs, and no lock is held while it does
+        // (it reads through this same store).
+        if let Some(key) = idempotency_key {
+            if let Some(first) = self.inner.borrow().replay(scope, entity, &caller, key)? {
+                return Ok(first);
+            }
+        }
+        let mut body = caller.clone();
+        if let Value::Object(o) = &mut body {
+            o.extend(derive()?);
         }
         self.inner
             .borrow_mut()
-            .insert(scope, entity, data, Some(&caller), idempotency_key)
+            .insert(scope, entity, body, Some(&caller), idempotency_key)
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {

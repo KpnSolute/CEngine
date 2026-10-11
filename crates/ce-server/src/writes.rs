@@ -199,24 +199,38 @@ fn refresh_parents(
 fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Record>, Failure> {
     match op {
         Op::Create { data, key } => {
-            // A retry replays the first result even if the derived fields would no longer
-            // compute (the records they read may have changed since).
-            if let Some(rec) =
-                tx.replay_insert(env.scope, entity, &Value::Object(data.clone()), key)?
-            {
-                return Ok(Some(rec));
-            }
-            let mut obj = data.clone();
-            settle(tx, env, entity, None, &mut obj, None)?;
-            // Retries are matched on the body as sent, not on values derived from other records.
-            obj.retain(|k, v| data.get(k) != Some(&*v));
-            let rec = tx.insert_derived(
+            // The derived fields are computed only if this call really creates the record: a
+            // retry of the same request replays the first result even when the records they
+            // read have changed since (or would now break a rule).
+            let mut failed = None;
+            let rec = tx.insert_with(
                 env.scope,
                 entity,
                 Value::Object(data.clone()),
-                obj,
+                &mut || {
+                    let mut obj = data.clone();
+                    match settle(tx, env, entity, None, &mut obj, None) {
+                        Ok(()) => {
+                            obj.retain(|k, v| data.get(k) != Some(&*v));
+                            Ok(obj)
+                        }
+                        Err(f) => {
+                            let e = match &f {
+                                Failure::Store(e) => e.clone(),
+                                Failure::Rules(_) => StoreError::Aborted,
+                            };
+                            failed = Some(f);
+                            Err(e)
+                        }
+                    }
+                },
                 Some(key),
-            )?;
+            );
+            let rec = match (rec, failed) {
+                (_, Some(f)) => return Err(f),
+                (Ok(r), None) => r,
+                (Err(e), None) => return Err(e.into()),
+            };
             refresh_parents(tx, env, entity, None, rec.data.as_object(), 0)?;
             Ok(Some(rec))
         }

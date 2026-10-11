@@ -80,38 +80,27 @@ pub trait Store {
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError>;
 
-    /// Like `insert`, for a body whose `derived` fields were computed by the host from the
-    /// store's current contents (so they can differ between two identical requests). The
-    /// idempotency check compares only `caller`, the body as the client sent it; the record
-    /// stored is `caller` with `derived` merged over it. A store that cannot compare that way
-    /// returns `Unsupported` when there are derived fields, rather than reporting a retry as a
-    /// reused key; with none it is `insert`.
-    fn insert_derived(
+    /// Like `insert`, for a body that also gets fields the host computes from the store's
+    /// current contents (`derive`). Those can differ between two identical requests, so with a
+    /// key the store claims the key, comparing only `caller` (the body as the client sent it),
+    /// before calling `derive`; a retry gets the first result back and `derive` is not called.
+    /// The record stored is `caller` with the derived fields merged over it.
+    ///
+    /// The default calls `derive` first and then `insert`, which is correct only when it gives
+    /// no fields; with any it returns `Unsupported` rather than risk reporting a retry as a
+    /// reused key.
+    fn insert_with(
         &self,
         scope: &TenantScope,
         entity: &str,
         caller: Value,
-        derived: Map<String, Value>,
+        derive: &mut dyn FnMut() -> Result<Map<String, Value>, StoreError>,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
-        if !derived.is_empty() {
+        if !derive()?.is_empty() {
             return Err(StoreError::Unsupported);
         }
         self.insert(scope, entity, caller, idempotency_key)
-    }
-
-    /// The first result stored for `idempotency_key` when it was used to create `entity` from
-    /// this same `caller` body, or `None` if the key is unused. A key used for a different
-    /// request is `IdempotencyKeyReused`. Lets the host replay a retry without recomputing
-    /// derived fields, which may no longer compute. The default never finds one.
-    fn replay_insert(
-        &self,
-        _scope: &TenantScope,
-        _entity: &str,
-        _caller: &Value,
-        _idempotency_key: &str,
-    ) -> Result<Option<Record>, StoreError> {
-        Ok(None)
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError>;
