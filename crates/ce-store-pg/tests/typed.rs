@@ -564,6 +564,22 @@ fn pooled_writers_taking_turns_on_one_row_lose_no_update() {
 }
 
 #[test]
+fn an_unbounded_wait_does_not_overflow() {
+    let Some(url) = url() else { return };
+    let cfg = ce_store_pg::PoolConfig {
+        max: 1,
+        wait: std::time::Duration::MAX,
+    };
+    let s = pooled(&url, cfg);
+    let sc = scope();
+    assert!(matches!(
+        s.get(&sc, "parent", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaab"),
+        Err(StoreError::NotFound)
+    ));
+    s.drop_schema().unwrap();
+}
+
+#[test]
 fn an_exhausted_pool_is_an_error_not_a_hang() {
     let Some(url) = url() else { return };
     let cfg = ce_store_pg::PoolConfig {

@@ -67,7 +67,8 @@ impl Pool {
     }
 
     pub(crate) fn get(&self) -> Result<Conn<'_>, StoreError> {
-        let deadline = Instant::now() + self.cfg.wait;
+        // A wait too long to represent as a deadline means wait without limit.
+        let deadline = Instant::now().checked_add(self.cfg.wait);
         let mut st = self.state();
         loop {
             while let Some(c) = st.idle.pop() {
@@ -95,17 +96,21 @@ impl Pool {
                     }
                 };
             }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(StoreError::Backend(
-                    "no database connection became free in time".to_string(),
-                ));
-            }
-            st = self
-                .freed
-                .wait_timeout(st, left)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            st = match deadline {
+                Some(d) => {
+                    let left = d.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(StoreError::Backend(
+                            "no database connection became free in time".to_string(),
+                        ));
+                    }
+                    self.freed
+                        .wait_timeout(st, left)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+                None => self.freed.wait(st).unwrap_or_else(|e| e.into_inner()),
+            };
         }
     }
 }
