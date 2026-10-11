@@ -335,11 +335,20 @@ dependencies = [
  "ce-migrate",
  "ce-query",
  "ce-store",
+ "ce-tools",
  "ce-validate",
  "hmac 0.12.1",
  "postgres",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "ce-tools"
+version = "0.0.1"
+dependencies = [
+ "ce-manifest",
+ "serde_json",
 ]
 
 [[package]]

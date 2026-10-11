@@ -1,0 +1,13 @@
+[package]
+name = "ce-tools"
+description = "CEngine built-in tools: domain-neutral entity fragments (customers, tasks, notifications) a template composes into its manifest (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+ce-manifest = { path = "../ce-manifest" }

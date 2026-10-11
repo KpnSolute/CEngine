@@ -1,0 +1,35 @@
+{
+  "tool": "tasks",
+  "version": "0.1.0",
+  "title": "Tasks with an assignee, a due date and a lifecycle",
+  "entities": {
+    "task": {
+      "fields": {
+        "title": {"type": "string", "required": true, "max_length": 200, "indexed": true},
+        "description": {"type": "text"},
+        "assignee": {"type": "string", "max_length": 120, "indexed": true},
+        "due_date": {"type": "date", "indexed": true},
+        "priority": {"type": "enum", "values": ["low", "normal", "high", "urgent"], "default": "normal", "indexed": true},
+        "status": {"type": "enum", "values": ["open", "in_progress", "done", "cancelled"], "indexed": true},
+        "related_entity": {"type": "string", "max_length": 64},
+        "related_id": {"type": "string", "max_length": 64}
+      },
+      "state": {
+        "field": "status",
+        "initial": "open",
+        "states": {
+          "open": {"code": 100, "to": ["in_progress", "done", "cancelled"]},
+          "in_progress": {"code": 200, "to": ["open", "done", "cancelled"]},
+          "done": {"code": 600},
+          "cancelled": {"code": 610}
+        }
+      },
+      "sort_keys": ["due_date", "priority", "title"]
+    }
+  },
+  "actions": {
+    "start_task": {"entity": "task", "requires_state": ["open"], "effect": [{"transition": "in_progress"}, {"emit": "task.started"}]},
+    "complete_task": {"entity": "task", "requires_state": ["open", "in_progress"], "effect": [{"transition": "done"}, {"emit": "task.completed"}]},
+    "cancel_task": {"entity": "task", "requires_state": ["open", "in_progress"], "effect": [{"transition": "cancelled"}, {"emit": "task.cancelled"}]}
+  }
+}
