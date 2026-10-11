@@ -32,9 +32,10 @@ fn manifest() -> ce_manifest::Manifest {
             "name": {"type": "string", "required": true, "max_length": 20, "unique": true, "indexed": true},
             "price": {"type": "decimal", "precision": 10, "scale": 2, "default": 0, "indexed": true},
             "kind": {"type": "enum", "values": ["a", "b"], "default": "a"},
-            "owner": {"type": "ref", "ref": "item"}
+            "owner": {"type": "ref", "ref": "item"},
+            "rank": {"type": "integer", "indexed": true}
           },
-          "sort_keys": ["name", "price"]
+          "sort_keys": ["name", "price", "rank"]
         },
         "ticket": {
           "fields": {"title": {"type": "string"}},
@@ -281,5 +282,107 @@ fn list_pages_sorts_filters_and_isolates_tenants() {
         ),
         Err(StoreError::Query(QueryError::UnindexedSort(_)))
     ));
+    s.drop_schema().unwrap();
+}
+
+#[test]
+fn paging_handles_null_sort_values_mixed_directions_and_hidden_sort_fields() {
+    use ce_store::{ListRequest, SortDir, SortKey};
+    let Some(url) = url() else { return };
+    let s = fresh(&url);
+    let sc = scope();
+    // `owner` is optional; no item exists for it, so use `part.kind` (default a) and price.
+    // Prices: a=1, b=1, c=2, d=2, e=3. Two rows have no name filter issue: names are unique.
+    for (n, p) in [("a", "1"), ("b", "1"), ("c", "2"), ("d", "2"), ("e", "3")] {
+        s.insert(&sc, "part", json!({"name": n, "price": p}), None)
+            .unwrap();
+    }
+    let key = |f: &str, dir| SortKey {
+        field: f.into(),
+        dir,
+    };
+    // price DESC, name ASC, two per page: e, then c d, then a b.
+    let mut req = ListRequest {
+        sort: vec![key("price", SortDir::Desc), key("name", SortDir::Asc)],
+        select: Some(vec!["name".into()]),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let mut seen = Vec::new();
+    loop {
+        let page = s.list(&sc, "part", &req).unwrap();
+        for r in &page.records {
+            // `price` was read for the cursor only and is not returned.
+            assert!(r.data.get("price").is_none());
+            seen.push(r.data["name"].as_str().unwrap().to_string());
+        }
+        match page.next {
+            Some(c) => req.after = Some(c),
+            None => break,
+        }
+    }
+    assert_eq!(seen, ["e", "c", "d", "a", "b"]);
+    s.drop_schema().unwrap();
+}
+
+#[test]
+fn paging_through_null_sort_values_loses_and_repeats_nothing() {
+    use ce_store::{ListRequest, SortDir, SortKey};
+    let Some(url) = url() else { return };
+    let s = fresh(&url);
+    let sc = scope();
+    // rank: a=2, b=null, c=1, d=null, e=2, f=null. Nulls sort last in both directions.
+    for (n, r) in [
+        ("a", Some(2)),
+        ("b", None),
+        ("c", Some(1)),
+        ("d", None),
+        ("e", Some(2)),
+        ("f", None),
+    ] {
+        let mut d = json!({"name": n});
+        if let Some(r) = r {
+            d["rank"] = json!(r);
+        }
+        s.insert(&sc, "part", d, None).unwrap();
+    }
+    for (dir, _) in [
+        (SortDir::Asc, ["c", "a", "e"]),
+        (SortDir::Desc, ["a", "e", "c"]),
+    ] {
+        let mut req = ListRequest {
+            sort: vec![SortKey {
+                field: "rank".into(),
+                dir,
+            }],
+            select: Some(vec!["name".into()]),
+            limit: Some(2),
+            ..Default::default()
+        };
+        let mut seen = Vec::new();
+        loop {
+            let page = s.list(&sc, "part", &req).unwrap();
+            seen.extend(
+                page.records
+                    .iter()
+                    .map(|r| r.data["name"].as_str().unwrap().to_string()),
+            );
+            match page.next {
+                Some(c) => req.after = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 6, "{seen:?}");
+        let mut all = seen.clone();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 6, "{seen:?}");
+        // The three ranked rows come first (ties on rank 2 break by id), then the unranked.
+        let mut head = seen[..3].to_vec();
+        head.sort();
+        assert_eq!(head, ["a", "c", "e"], "{seen:?}");
+        let c_at = seen.iter().position(|n| n == "c").unwrap();
+        assert_eq!(c_at, if dir == SortDir::Asc { 0 } else { 2 }, "{seen:?}");
+    }
     s.drop_schema().unwrap();
 }

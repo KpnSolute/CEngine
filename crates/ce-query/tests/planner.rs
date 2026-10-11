@@ -215,7 +215,9 @@ fn only_indexed_sort_keys_are_allowed_and_limit_is_capped() {
         },
     )
     .unwrap();
-    assert!(ok.sql.contains("ORDER BY \"starts_at\" DESC, \"id\" DESC"));
+    assert!(ok
+        .sql
+        .contains("ORDER BY \"starts_at\" DESC NULLS LAST, \"id\" DESC NULLS LAST"));
     assert!(ok.sql.ends_with(&format!("LIMIT {}", MAX_LIMIT + 1)));
     let bad = plan(
         &m,
@@ -246,7 +248,7 @@ fn keyset_cursor_uses_row_comparison_with_bound_values() {
     assert_tenant_scoped(&p);
     assert!(
         p.sql
-            .contains("(ROW(\"starts_at\", \"id\") > ROW($2::text::timestamptz, $3::text::uuid))"),
+            .contains("(((\"starts_at\" > $2::text::timestamptz OR \"starts_at\" IS NULL)) OR (\"starts_at\" IS NOT DISTINCT FROM $2::text::timestamptz AND (\"id\" > $3::text::uuid OR \"id\" IS NULL)))"),
         "{}",
         p.sql
     );
@@ -272,10 +274,36 @@ fn keyset_cursor_uses_row_comparison_with_bound_values() {
         ]),
         ..Default::default()
     };
-    assert_eq!(
-        plan(&m, "booking", &mixed),
-        Err(QueryError::MixedSortCursor)
+    // Mixed directions page too: each key keeps its own comparison.
+    let p = plan(&m, "booking", &mixed).unwrap();
+    assert!(p.sql.contains("\"id\" < $3::text::uuid"), "{}", p.sql);
+    assert!(
+        p.sql.contains("\"starts_at\" > $2::text::timestamptz"),
+        "{}",
+        p.sql
     );
+    // A null sort value in the cursor has nothing after it; ties go to the next key.
+    let null_cursor = ListRequest {
+        after: Some(vec![
+            serde_json::Value::Null,
+            json!("22222222-2222-2222-2222-222222222222"),
+        ]),
+        ..req.clone()
+    };
+    let p = plan(&m, "booking", &null_cursor).unwrap();
+    assert!(
+        p.sql
+            .contains("(\"starts_at\" IS NULL AND (\"id\" > $2::text::uuid OR \"id\" IS NULL))"),
+        "{}",
+        p.sql
+    );
+    assert_eq!(placeholders(&p.sql), p.params.len());
+    // The id can never be null.
+    let bad = ListRequest {
+        after: Some(vec![json!("2026-10-10T12:00:00Z"), serde_json::Value::Null]),
+        ..req.clone()
+    };
+    assert_eq!(plan(&m, "booking", &bad), Err(QueryError::BadCursor));
 }
 
 #[test]

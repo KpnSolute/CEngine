@@ -322,10 +322,12 @@ impl Store for TypedPgStore {
             .clamp(1, ce_query::MAX_LIMIT);
         // The cursor is built from the last row's sort values, so sort fields are always read.
         let mut req = req.clone();
+        let mut hidden: Vec<String> = Vec::new();
         if let Some(sel) = req.select.as_mut() {
             for k in &req.sort {
                 if k.field != "id" && !sel.contains(&k.field) {
                     sel.push(k.field.clone());
+                    hidden.push(k.field.clone());
                 }
             }
         }
@@ -385,9 +387,8 @@ impl Store for TypedPgStore {
                 cursor.push(if k.field == "id" {
                     Value::String(last.id.clone())
                 } else {
-                    last.data.get(&k.field).cloned().ok_or(StoreError::BadData(
-                        "cannot page past a row whose sort field is empty",
-                    ))?
+                    // Null columns are omitted from the record; the cursor says null.
+                    last.data.get(&k.field).cloned().unwrap_or(Value::Null)
                 });
             }
             if !req.sort.iter().any(|k| k.field == "id") {
@@ -397,6 +398,14 @@ impl Store for TypedPgStore {
         } else {
             None
         };
+        // Sort fields read only for the cursor are not part of what the caller asked for.
+        for r in &mut records {
+            if let Value::Object(d) = &mut r.data {
+                for h in &hidden {
+                    d.remove(h);
+                }
+            }
+        }
         Ok(Page { records, next })
     }
 

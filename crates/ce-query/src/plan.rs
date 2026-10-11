@@ -24,7 +24,6 @@ pub enum QueryError {
     BadFilter(&'static str),
     FilterTooLarge,
     UnindexedSort(String),
-    MixedSortCursor,
     BadCursor,
     BadSchema,
 }
@@ -240,29 +239,50 @@ pub fn plan_list(
         order.push(("id".into(), dir));
     }
 
-    // Keyset cursor: ROW(sort fields..., id) > ROW($..) when all directions agree.
+    // Keyset cursor, expanded lexicographically so each key keeps its own direction and nulls
+    // sort last in both directions (`NULLS LAST`): the page after (c1..cn) is the OR over i of
+    // "keys before i equal their cursor value, and key i comes after c_i". A null cursor value
+    // has nothing after it, only ties to break on the next key.
     if let Some(after) = &req.after {
         if after.len() != order.len() {
             return Err(QueryError::BadCursor);
         }
-        let dir = order[0].1;
-        if order.iter().any(|(_, d)| *d != dir) {
-            return Err(QueryError::MixedSortCursor);
+        // (column, direction, bound placeholder with cast, or None for a null cursor value)
+        let mut keys: Vec<(String, SortDir, Option<String>)> = Vec::new();
+        for ((f, d), v) in order.iter().zip(after) {
+            let col = ctx.column(f)?;
+            if v.is_null() {
+                if f == "id" {
+                    return Err(QueryError::BadCursor);
+                }
+                keys.push((col, *d, None));
+            } else {
+                let (p, cast) = ctx.value(f, v)?;
+                let n = ctx.bind(p);
+                keys.push((col, *d, Some(format!("${n}{cast}"))));
+            }
         }
-        let mut left = Vec::new();
-        let mut right = Vec::new();
-        for ((f, _), v) in order.iter().zip(after) {
-            left.push(ctx.column(f)?);
-            let (p, cast) = ctx.value(f, v)?;
-            let n = ctx.bind(p);
-            right.push(format!("${n}{cast}"));
+        let mut alts = Vec::new();
+        for i in 0..keys.len() {
+            let mut parts: Vec<String> = keys[..i]
+                .iter()
+                .map(|(col, _, ph)| match ph {
+                    Some(ph) => format!("{col} IS NOT DISTINCT FROM {ph}"),
+                    None => format!("{col} IS NULL"),
+                })
+                .collect();
+            let (col, dir, ph) = &keys[i];
+            let Some(ph) = ph else { continue };
+            let cmp = if *dir == SortDir::Asc { ">" } else { "<" };
+            parts.push(format!("({col} {cmp} {ph} OR {col} IS NULL)"));
+            alts.push(format!("({})", parts.join(" AND ")));
         }
-        let cmp = if dir == SortDir::Asc { ">" } else { "<" };
-        wheres.push(format!(
-            "(ROW({}) {cmp} ROW({}))",
-            left.join(", "),
-            right.join(", ")
-        ));
+        // Every key null (only the id can't be) leaves no later row: match nothing.
+        wheres.push(if alts.is_empty() {
+            "FALSE".to_string()
+        } else {
+            format!("({})", alts.join(" OR "))
+        });
     }
 
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
@@ -270,7 +290,7 @@ pub fn plan_list(
         .iter()
         .map(|(f, d)| {
             format!(
-                "\"{f}\" {}",
+                "\"{f}\" {} NULLS LAST",
                 if *d == SortDir::Asc { "ASC" } else { "DESC" }
             )
         })

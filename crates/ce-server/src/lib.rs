@@ -471,11 +471,6 @@ fn query_problem(e: QueryError) -> Problem {
         QueryError::UnindexedSort(f) => {
             ("sort", "unindexed_sort", format!("{f} is not a sort key"))
         }
-        QueryError::MixedSortCursor => (
-            "after",
-            "mixed_sort",
-            "paging needs one sort direction".to_string(),
-        ),
         QueryError::BadCursor => (
             "after",
             "bad_cursor",
