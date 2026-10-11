@@ -18,9 +18,9 @@ use ce_manifest::Manifest;
 use ce_query::{plan_list, ListRequest, Param, Target};
 use ce_store::{Page, Record, Store, StoreError, TenantScope};
 use ce_validate::{validate, Mode};
-use postgres::{types::ToSql, Client, NoTls};
+use postgres::{types::ToSql, Client, GenericClient, NoTls};
 use serde_json::{json, Map, Value};
-use std::{collections::HashMap, sync::Mutex};
+use std::{cell::RefCell, collections::HashMap, sync::Mutex};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -306,9 +306,10 @@ fn replay(result: Option<Value>) -> Result<Record, StoreError> {
     })
 }
 
-impl Store for TypedPgStore {
-    fn list(
+impl TypedPgStore {
+    fn list_on(
         &self,
+        c: &mut impl GenericClient,
         scope: &TenantScope,
         entity: &str,
         req: &ListRequest,
@@ -347,12 +348,7 @@ impl Store for TypedPgStore {
             })
             .collect();
         let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|b| b.as_ref()).collect();
-        let rows = self
-            .client
-            .lock()
-            .map_err(|_| StoreError::Backend("poisoned".into()))?
-            .query(planned.sql.as_str(), &refs)
-            .map_err(db)?;
+        let rows = c.query(planned.sql.as_str(), &refs).map_err(db)?;
         let mut records: Vec<Record> = rows
             .iter()
             .map(|row| {
@@ -410,8 +406,9 @@ impl Store for TypedPgStore {
         Ok(Page { records, next })
     }
 
-    fn insert(
+    fn insert_on(
         &self,
+        c: &mut impl GenericClient,
         scope: &TenantScope,
         entity: &str,
         data: Value,
@@ -464,10 +461,8 @@ impl Store for TypedPgStore {
         }
 
         let sch = &self.schema;
-        let mut c = self.lock();
-        let mut tx = c.transaction().map_err(db)?;
         if let Some(key) = idempotency_key {
-            let claimed = tx
+            let claimed = c
                 .query_opt(
                     &format!(
                         r#"INSERT INTO "{sch}"."_ce_idempotency" (tenant_id, key, entity, payload)
@@ -479,7 +474,7 @@ impl Store for TypedPgStore {
                 )
                 .map_err(db)?;
             if claimed.is_none() {
-                let row = tx
+                let row = c
                     .query_one(
                         &format!(
                             r#"SELECT entity, payload, result FROM "{sch}"."_ce_idempotency"
@@ -502,12 +497,12 @@ impl Store for TypedPgStore {
             vals.join(", "),
             ent.select_list()
         );
-        let row = tx.query_one(&sql, &refs(&params)).map_err(db)?;
+        let row = c.query_one(&sql, &refs(&params)).map_err(db)?;
         let record = ent.record(entity, &row);
         if let Some(key) = idempotency_key {
             let stored = json!({"id": record.id, "entity": record.entity,
                                 "version": record.version, "data": record.data});
-            tx.execute(
+            c.execute(
                 &format!(
                     r#"UPDATE "{sch}"."_ce_idempotency" SET result = $3
                        WHERE tenant_id = $1::text::uuid AND key = $2"#
@@ -516,11 +511,17 @@ impl Store for TypedPgStore {
             )
             .map_err(db)?;
         }
-        tx.commit().map_err(db)?;
         Ok(record)
     }
 
-    fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
+    fn get_on(
+        &self,
+        c: &mut impl GenericClient,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        lock: bool,
+    ) -> Result<Record, StoreError> {
         let ent = self.ent(entity)?;
         let (tenant, id) = Self::tenant_and_id(scope, id).ok_or(StoreError::NotFound)?;
         let live = if ent.soft {
@@ -529,20 +530,21 @@ impl Store for TypedPgStore {
             ""
         };
         let sql = format!(
-            r#"SELECT {} FROM "{}"."{entity}" WHERE "tenant_id" = $1::text::uuid AND "id" = $2::text::uuid{live}"#,
+            r#"SELECT {} FROM "{}"."{entity}" WHERE "tenant_id" = $1::text::uuid AND "id" = $2::text::uuid{live}{}"#,
             ent.select_list(),
-            self.schema
+            self.schema,
+            if lock { " FOR UPDATE" } else { "" }
         );
-        let row = self
-            .lock()
+        let row = c
             .query_opt(&sql, &[&tenant, &id])
             .map_err(db)?
             .ok_or(StoreError::NotFound)?;
         Ok(ent.record(entity, &row))
     }
 
-    fn update(
+    fn update_on(
         &self,
+        c: &mut impl GenericClient,
         scope: &TenantScope,
         entity: &str,
         id: &str,
@@ -603,15 +605,15 @@ impl Store for TypedPgStore {
             sets.join(", "),
             ent.select_list()
         );
-        let mut c = self.lock();
         match c.query_opt(&sql, &refs(&params)).map_err(db)? {
             Some(row) => Ok(ent.record(entity, &row)),
-            None => Err(self.missed(&mut c, ent, entity, tenant, id)?),
+            None => Err(self.missed(c, ent, entity, tenant, id)?),
         }
     }
 
-    fn delete(
+    fn delete_on(
         &self,
+        c: &mut impl GenericClient,
         scope: &TenantScope,
         entity: &str,
         id: &str,
@@ -634,13 +636,255 @@ impl Store for TypedPgStore {
                    AND "id" = $2::text::uuid AND "version" = $3::text::bigint"#
             )
         };
-        let mut c = self.lock();
         let n = c.execute(&sql, &[&tenant, &id, &version]).map_err(db)?;
         if n == 1 {
             Ok(())
         } else {
-            Err(self.missed(&mut c, ent, entity, tenant, id)?)
+            Err(self.missed(c, ent, entity, tenant, id)?)
         }
+    }
+
+    fn child_values_on(
+        &self,
+        c: &mut impl GenericClient,
+        scope: &TenantScope,
+        entity: &str,
+        ref_field: &str,
+        parent_id: &str,
+        attr: Option<&str>,
+    ) -> Result<Vec<Value>, StoreError> {
+        let ent = self
+            .ents
+            .get(entity)
+            .ok_or(StoreError::BadData("unknown entity"))?;
+        if !ent
+            .cols
+            .iter()
+            .any(|c| c.name == ref_field && c.ty == "ref")
+        {
+            return Err(StoreError::BadData("not a ref field of this entity"));
+        }
+        if attr.is_some_and(|a| !ent.cols.iter().any(|c| c.name == a)) {
+            return Err(StoreError::BadData("unknown field"));
+        }
+        // An id that is not a UUID points at nothing.
+        let Some((tenant, parent)) = Self::tenant_and_id(scope, parent_id) else {
+            return Ok(Vec::new());
+        };
+        let live = if ent.soft {
+            r#" AND "deleted_at" IS NULL"#
+        } else {
+            ""
+        };
+        let sql = format!(
+            r#"SELECT {} FROM "{}"."{entity}" WHERE "tenant_id" = $1::text::uuid
+               AND "{ref_field}" = $2::text::uuid{live}"#,
+            ent.select_list(),
+            self.schema
+        );
+        let rows = c.query(&sql, &[&tenant, &parent]).map_err(db)?;
+        Ok(rows
+            .iter()
+            .map(|row| match attr {
+                Some(a) => ent
+                    .record(entity, row)
+                    .data
+                    .get(a)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                None => Value::Bool(true),
+            })
+            .collect())
+    }
+}
+
+impl Store for TypedPgStore {
+    fn list(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        req: &ListRequest,
+    ) -> Result<Page, StoreError> {
+        let mut c = self.lock();
+        self.list_on(&mut *c, scope, entity, req)
+    }
+
+    fn insert(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        data: Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        let mut c = self.lock();
+        let mut tx = c.transaction().map_err(db)?;
+        let record = self.insert_on(&mut tx, scope, entity, data, idempotency_key)?;
+        tx.commit().map_err(db)?;
+        Ok(record)
+    }
+
+    fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
+        let mut c = self.lock();
+        self.get_on(&mut *c, scope, entity, id, false)
+    }
+
+    fn update(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+        data: Value,
+    ) -> Result<Record, StoreError> {
+        let mut c = self.lock();
+        self.update_on(&mut *c, scope, entity, id, expected_version, data)
+    }
+
+    fn delete(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+    ) -> Result<(), StoreError> {
+        let mut c = self.lock();
+        self.delete_on(&mut *c, scope, entity, id, expected_version)
+    }
+
+    fn child_values(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        ref_field: &str,
+        parent_id: &str,
+        attr: Option<&str>,
+    ) -> Result<Vec<Value>, StoreError> {
+        let mut c = self.lock();
+        self.child_values_on(&mut *c, scope, entity, ref_field, parent_id, attr)
+    }
+
+    /// One database transaction on the store's connection, held for the whole closure.
+    fn atomic(
+        &self,
+        f: &mut dyn FnMut(&dyn Store) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let mut c = self.lock();
+        let tx = TypedTx {
+            store: self,
+            tx: RefCell::new(c.transaction().map_err(db)?),
+        };
+        // An error drops the transaction, which rolls it back.
+        f(&tx)?;
+        tx.tx.into_inner().commit().map_err(db)
+    }
+}
+
+/// The store a closure sees inside `TypedPgStore::atomic`: every call runs in the one open
+/// transaction. `get_locked` takes a row lock, held until the transaction ends.
+struct TypedTx<'a> {
+    store: &'a TypedPgStore,
+    tx: RefCell<postgres::Transaction<'a>>,
+}
+
+impl Store for TypedTx<'_> {
+    fn list(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        req: &ListRequest,
+    ) -> Result<Page, StoreError> {
+        self.store
+            .list_on(&mut *self.tx.borrow_mut(), scope, entity, req)
+    }
+
+    fn insert(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        data: Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        self.store.insert_on(
+            &mut *self.tx.borrow_mut(),
+            scope,
+            entity,
+            data,
+            idempotency_key,
+        )
+    }
+
+    fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
+        self.store
+            .get_on(&mut *self.tx.borrow_mut(), scope, entity, id, false)
+    }
+
+    fn get_locked(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+    ) -> Result<Record, StoreError> {
+        self.store
+            .get_on(&mut *self.tx.borrow_mut(), scope, entity, id, true)
+    }
+
+    fn update(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+        data: Value,
+    ) -> Result<Record, StoreError> {
+        self.store.update_on(
+            &mut *self.tx.borrow_mut(),
+            scope,
+            entity,
+            id,
+            expected_version,
+            data,
+        )
+    }
+
+    fn delete(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+    ) -> Result<(), StoreError> {
+        self.store.delete_on(
+            &mut *self.tx.borrow_mut(),
+            scope,
+            entity,
+            id,
+            expected_version,
+        )
+    }
+
+    fn child_values(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        ref_field: &str,
+        parent_id: &str,
+        attr: Option<&str>,
+    ) -> Result<Vec<Value>, StoreError> {
+        self.store.child_values_on(
+            &mut *self.tx.borrow_mut(),
+            scope,
+            entity,
+            ref_field,
+            parent_id,
+            attr,
+        )
+    }
+
+    fn atomic(
+        &self,
+        f: &mut dyn FnMut(&dyn Store) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        f(self)
     }
 }
 
@@ -648,7 +892,7 @@ impl TypedPgStore {
     /// After a guarded write matched nothing: missing, or at another version?
     fn missed(
         &self,
-        c: &mut Client,
+        c: &mut impl GenericClient,
         ent: &Ent,
         entity: &str,
         tenant: &str,

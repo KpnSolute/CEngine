@@ -157,3 +157,124 @@ pub fn run_all<S: Store>(make: &dyn Fn() -> S) {
     non_object_data_is_refused(&make());
     idempotent_replay_returns_the_original_result_after_changes(&make());
 }
+
+// ---- Transactions and child reads. Only for backends whose `atomic` is supported. ----
+//
+// Entities: `parent` (field `n`, integer) and `line` (fields `parent`, a ref to a parent, and
+// `n`, integer). A backend with a schema must declare both.
+
+fn line(parent: &str, n: i64) -> Value {
+    json!({"parent": parent, "n": n})
+}
+
+fn sorted_ints(mut v: Vec<Value>) -> Vec<i64> {
+    let mut out: Vec<i64> = v.drain(..).filter_map(|x| x.as_i64()).collect();
+    out.sort();
+    out
+}
+
+fn atomic_commits_everything_and_sees_its_own_writes<S: Store>(s: &S) {
+    let (mut pid, mut lid) = (String::new(), String::new());
+    s.atomic(&mut |tx| {
+        let p = tx.insert(&scope(A), "parent", json!({"n": 0}), None)?;
+        let l = tx.insert(&scope(A), "line", line(&p.id, 5), None)?;
+        // Reads inside see the writes made so far.
+        assert_eq!(tx.get(&scope(A), "line", &l.id)?, l);
+        assert_eq!(
+            sorted_ints(tx.child_values(&scope(A), "line", "parent", &p.id, Some("n"))?),
+            vec![5]
+        );
+        tx.update(&scope(A), "parent", &p.id, 1, json!({"n": 5}))?;
+        assert_eq!(tx.get_locked(&scope(A), "parent", &p.id)?.version, 2);
+        pid = p.id;
+        lid = l.id;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(s.get(&scope(A), "parent", &pid).unwrap().data["n"], 5);
+    assert_eq!(s.get(&scope(A), "line", &lid).unwrap().version, 1);
+}
+
+fn atomic_rolls_back_everything_on_error<S: Store>(s: &S) {
+    let keep = s
+        .insert(&scope(A), "parent", json!({"n": 1}), None)
+        .unwrap();
+    let mut made = String::new();
+    let out = s.atomic(&mut |tx| {
+        let l = tx.insert(&scope(A), "line", line(&keep.id, 9), None)?;
+        made = l.id;
+        tx.update(&scope(A), "parent", &keep.id, 1, json!({"n": 99}))?;
+        tx.delete(&scope(A), "parent", &keep.id, 2)?;
+        Err(StoreError::Aborted)
+    });
+    assert_eq!(out, Err(StoreError::Aborted));
+    // Nothing the closure did is visible: not the insert, the update or the delete.
+    assert_eq!(s.get(&scope(A), "line", &made), Err(StoreError::NotFound));
+    assert_eq!(s.get(&scope(A), "parent", &keep.id).unwrap(), keep);
+    assert!(s
+        .child_values(&scope(A), "line", "parent", &keep.id, None)
+        .unwrap()
+        .is_empty());
+    // A store error from a statement inside also rolls everything back.
+    let out = s.atomic(&mut |tx| {
+        tx.insert(&scope(A), "line", line(&keep.id, 1), None)?;
+        tx.update(&scope(A), "parent", &keep.id, 7, json!({"n": 2}))?;
+        Ok(())
+    });
+    assert_eq!(out, Err(StoreError::VersionConflict { current: 1 }));
+    assert!(s
+        .child_values(&scope(A), "line", "parent", &keep.id, None)
+        .unwrap()
+        .is_empty());
+}
+
+fn nested_atomic_joins_the_outer_transaction<S: Store>(s: &S) {
+    let p = s
+        .insert(&scope(A), "parent", json!({"n": 0}), None)
+        .unwrap();
+    let out = s.atomic(&mut |tx| {
+        tx.atomic(&mut |inner| {
+            inner.insert(&scope(A), "line", line(&p.id, 1), None)?;
+            Ok(())
+        })?;
+        // The inner closure succeeded, but the outer one still decides.
+        Err(StoreError::Aborted)
+    });
+    assert_eq!(out, Err(StoreError::Aborted));
+    assert!(s
+        .child_values(&scope(A), "line", "parent", &p.id, None)
+        .unwrap()
+        .is_empty());
+}
+
+fn child_values_read_live_children_of_one_parent_and_tenant<S: Store>(s: &S) {
+    let p1 = s.insert(&scope(A), "parent", json!({}), None).unwrap();
+    let p2 = s.insert(&scope(A), "parent", json!({}), None).unwrap();
+    let q = s.insert(&scope(B), "parent", json!({}), None).unwrap();
+    s.insert(&scope(A), "line", line(&p1.id, 1), None).unwrap();
+    s.insert(&scope(A), "line", line(&p1.id, 2), None).unwrap();
+    let gone = s.insert(&scope(A), "line", line(&p1.id, 4), None).unwrap();
+    s.insert(&scope(A), "line", line(&p2.id, 8), None).unwrap();
+    s.insert(&scope(B), "line", line(&q.id, 16), None).unwrap();
+    s.delete(&scope(A), "line", &gone.id, 1).unwrap();
+    let vals = |scope: &TenantScope, p: &str, attr| {
+        s.child_values(scope, "line", "parent", p, attr).unwrap()
+    };
+    assert_eq!(sorted_ints(vals(&scope(A), &p1.id, Some("n"))), vec![1, 2]);
+    assert_eq!(
+        vals(&scope(A), &p1.id, None),
+        vec![json!(true), json!(true)]
+    );
+    assert_eq!(sorted_ints(vals(&scope(A), &p2.id, Some("n"))), vec![8]);
+    // Another tenant's parent id finds nothing, and its own children stay its own.
+    assert!(vals(&scope(B), &p1.id, Some("n")).is_empty());
+    assert_eq!(sorted_ints(vals(&scope(B), &q.id, Some("n"))), vec![16]);
+}
+
+/// Runs the transaction and child-read cases. `make` must return an empty store on each call.
+pub fn run_atomic<S: Store>(make: &dyn Fn() -> S) {
+    atomic_commits_everything_and_sees_its_own_writes(&make());
+    atomic_rolls_back_everything_on_error(&make());
+    nested_atomic_joins_the_outer_transaction(&make());
+    child_values_read_live_children_of_one_parent_and_tenant(&make());
+}
