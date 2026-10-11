@@ -1,0 +1,12 @@
+[package]
+name = "ce-io"
+description = "CEngine import and export: CSV in and out of an entity's records, validated against the manifest (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ce-manifest = { path = "../ce-manifest" }
+ce-validate = { path = "../ce-validate" }
+serde_json = "1"
