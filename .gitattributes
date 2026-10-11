@@ -1,0 +1,3 @@
+# Append-only test files: when two branches both add tests at the end, keep both sides.
+# scripts/sync-branch.sh relies on this; the merged result is still fmt/clippy/test checked.
+crates/*/tests/*.rs merge=union
