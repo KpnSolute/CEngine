@@ -86,9 +86,9 @@ pub trait Store {
     /// before calling `derive`; a retry gets the first result back and `derive` is not called.
     /// The record stored is `caller` with the derived fields merged over it.
     ///
-    /// The default calls `derive` first and then `insert`, which is correct only when it gives
-    /// no fields; with any it returns `Unsupported` rather than risk reporting a retry as a
-    /// reused key.
+    /// The default cannot claim a key before deriving, so with a key it returns `Unsupported`
+    /// rather than derive for a retry; without one it calls `derive` and then `insert`, which is
+    /// correct only when `derive` gives no fields (otherwise `Unsupported` too).
     fn insert_with(
         &self,
         scope: &TenantScope,
@@ -97,7 +97,7 @@ pub trait Store {
         derive: &mut dyn FnMut() -> Result<Map<String, Value>, StoreError>,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
-        if !derive()?.is_empty() {
+        if idempotency_key.is_some() || !derive()?.is_empty() {
             return Err(StoreError::Unsupported);
         }
         self.insert(scope, entity, caller, idempotency_key)

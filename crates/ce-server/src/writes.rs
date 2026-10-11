@@ -203,11 +203,13 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             // retry of the same request replays the first result even when the records they
             // read have changed since (or would now break a rule).
             let mut failed = None;
+            let mut derived = false;
             let rec = tx.insert_with(
                 env.scope,
                 entity,
                 Value::Object(data.clone()),
                 &mut || {
+                    derived = true;
                     let mut obj = data.clone();
                     match settle(tx, env, entity, None, &mut obj, None) {
                         Ok(()) => {
@@ -231,7 +233,10 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
                 (Ok(r), None) => r,
                 (Err(e), None) => return Err(e.into()),
             };
-            refresh_parents(tx, env, entity, None, rec.data.as_object(), 0)?;
+            // A replayed create changed nothing, so the parents are already right.
+            if derived {
+                refresh_parents(tx, env, entity, None, rec.data.as_object(), 0)?;
+            }
             Ok(Some(rec))
         }
         Op::Patch {
