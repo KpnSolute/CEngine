@@ -15,12 +15,14 @@ use std::{
 };
 
 /// Pool limits. The defaults suit one server process.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PoolConfig {
     /// Most connections open at once (at least 1).
     pub max: usize,
     /// Longest a caller waits for a free connection.
     pub wait: Duration,
+    /// How connections are secured.
+    pub tls: crate::Tls,
 }
 
 impl Default for PoolConfig {
@@ -28,6 +30,7 @@ impl Default for PoolConfig {
         PoolConfig {
             max: 8,
             wait: Duration::from_secs(30),
+            tls: crate::Tls::Off,
         }
     }
 }

@@ -14,6 +14,10 @@ ce-migrate = { path = "../ce-migrate" }
 ce-validate = { path = "../ce-validate" }
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 serde_json = "1"
+tokio-postgres-rustls = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 
 [dev-dependencies]
 ce-store = { path = "../ce-store", features = ["contract-tests"] }

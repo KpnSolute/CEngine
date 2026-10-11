@@ -19,7 +19,7 @@ use ce_manifest::Manifest;
 use ce_query::{plan_list, ListRequest, Param, Target};
 use ce_store::{Page, Record, Store, StoreError, TenantScope};
 use ce_validate::{validate, Mode};
-use postgres::{types::ToSql, Client, GenericClient, NoTls};
+use postgres::{types::ToSql, GenericClient};
 use serde_json::{json, Map, Value};
 use std::{cell::RefCell, collections::HashMap};
 
@@ -179,7 +179,7 @@ impl TypedPgStore {
     ) -> Result<Self, StoreError> {
         let ddl = ce_migrate::generate(m, schema)
             .map_err(|_| StoreError::BadData("manifest cannot be installed"))?;
-        let pool = Self::pool(url, cfg);
+        let pool = Self::pool(url, cfg)?;
         let mut client = pool.get()?;
         let mut tx = client.transaction().map_err(db)?;
         for stmt in &ddl {
@@ -214,17 +214,18 @@ impl TypedPgStore {
         schema: &str,
         cfg: PoolConfig,
     ) -> Result<Self, StoreError> {
-        let pool = Self::pool(url, cfg);
+        let pool = Self::pool(url, cfg)?;
         drop(pool.get()?);
         Self::build(pool, m, schema)
     }
 
-    fn pool(url: &str, cfg: PoolConfig) -> Pool {
+    fn pool(url: &str, cfg: PoolConfig) -> Result<Pool, StoreError> {
         let url = url.to_string();
-        Pool::new(
-            Box::new(move || Client::connect(&url, NoTls).map_err(db)),
+        let connector = crate::tls::Connector::new(&cfg.tls)?;
+        Ok(Pool::new(
+            Box::new(move || connector.connect(&url).map_err(db)),
             cfg,
-        )
+        ))
     }
 
     fn build(pool: Pool, m: &Manifest, schema: &str) -> Result<Self, StoreError> {

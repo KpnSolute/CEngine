@@ -569,6 +569,7 @@ fn an_unbounded_wait_does_not_overflow() {
     let cfg = ce_store_pg::PoolConfig {
         max: 1,
         wait: std::time::Duration::MAX,
+        ..Default::default()
     };
     let s = pooled(&url, cfg);
     let sc = scope();
@@ -585,6 +586,7 @@ fn an_exhausted_pool_is_an_error_not_a_hang() {
     let cfg = ce_store_pg::PoolConfig {
         max: 1,
         wait: std::time::Duration::from_millis(200),
+        ..Default::default()
     };
     let s = pooled(&url, cfg);
     let sc = scope();
@@ -602,4 +604,37 @@ fn an_exhausted_pool_is_an_error_not_a_hang() {
         Err(StoreError::NotFound)
     ));
     s.drop_schema().unwrap();
+}
+
+/// Needs a Postgres with TLS whose certificate is valid for the host in `CE_TEST_DATABASE_URL`
+/// and signed by the CA in the PEM file named by `CE_TEST_TLS_CA`; skipped otherwise.
+#[test]
+fn tls_connections_are_encrypted_and_verified() {
+    let (Some(url), Ok(ca_path)) = (url(), std::env::var("CE_TEST_TLS_CA")) else {
+        eprintln!("skipping: CE_TEST_TLS_CA not set");
+        return;
+    };
+    let ca = std::fs::read(ca_path).unwrap();
+    let with = |tls| ce_store_pg::PoolConfig {
+        tls,
+        ..Default::default()
+    };
+    // The trusted CA: connects, and the server reports the session as encrypted.
+    let mut c = ce_store_pg::connect(&url, &ce_store_pg::Tls::Ca(ca.clone())).unwrap();
+    let row = c
+        .query_one(
+            "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+            &[],
+        )
+        .unwrap();
+    assert!(row.get::<_, bool>(0));
+    // The store works over it.
+    let name = format!("ce_tls_{}", std::process::id());
+    let s = TypedPgStore::install_with(&url, &manifest(), &name, with(ce_store_pg::Tls::Ca(ca)))
+        .unwrap();
+    s.insert(&scope(), "item", json!({"n": 1}), None).unwrap();
+    s.drop_schema().unwrap();
+    // A CA that did not sign the server's certificate is refused, and so are bad CA files.
+    assert!(ce_store_pg::connect(&url, &ce_store_pg::Tls::WebPki).is_err());
+    assert!(ce_store_pg::connect(&url, &ce_store_pg::Tls::Ca(b"not pem".to_vec())).is_err());
 }
