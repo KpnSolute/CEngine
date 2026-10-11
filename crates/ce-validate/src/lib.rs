@@ -19,7 +19,7 @@
 //! values, uniqueness and reference existence (the store enforces those).
 
 mod invariants;
-pub use invariants::check_invariants;
+pub use invariants::{check_invariants, unenforced_invariants, Context, Unenforced};
 
 use ce_manifest::Manifest;
 use chrono::{DateTime, NaiveDate};

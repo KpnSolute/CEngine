@@ -73,3 +73,16 @@ fn errors_not_panics() {
     assert!(run("9223372036854775807 + 1", &env).is_err());
     assert_eq!(run("5 % 0", &env).map(|v| v.canonical()), Ok(None));
 }
+
+#[test]
+fn trim_floor_and_ceil() {
+    use ce_expr::{run, Env, Value};
+    let env = Env::new();
+    assert_eq!(run("trim('  a b ')", &env), Ok(Value::Str("a b".into())));
+    assert_eq!(run("trim(null)", &env), Ok(Value::Null));
+    assert_eq!(run("floor(2)", &env), Ok(Value::Int(2)));
+    assert_eq!(run("floor(2.5)", &env).unwrap().canonical().unwrap(), "2");
+    assert_eq!(run("floor(-2.5)", &env).unwrap().canonical().unwrap(), "-3");
+    assert_eq!(run("ceil(2.1)", &env).unwrap().canonical().unwrap(), "3");
+    assert_eq!(run("ceil(-2.1)", &env).unwrap().canonical().unwrap(), "-2");
+}
