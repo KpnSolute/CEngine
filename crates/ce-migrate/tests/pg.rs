@@ -347,14 +347,7 @@ fn two_tenants_may_use_the_same_record_id_and_big_limits_install() {
     let id = "aaaaaaaa-0000-0000-0000-000000000001";
     insert_period(&mut c, &m, &schema, id, A);
     insert_period(&mut c, &m, &schema, id, B);
-    // and an oversized value is still refused by the CHECK
-    insert_period(
-        &mut c,
-        &m,
-        &schema,
-        "aaaaaaaa-0000-0000-0000-000000000002",
-        A,
-    );
+    // an oversized value is still refused by the CHECK
     let long = "x".repeat(10_485_762);
     let res = c.execute(
         format!(
