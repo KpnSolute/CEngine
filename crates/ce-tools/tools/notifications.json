@@ -1,0 +1,34 @@
+{
+  "tool": "notifications",
+  "version": "0.1.0",
+  "title": "Notifications to people, recorded here and delivered by Infajn",
+  "entities": {
+    "notification": {
+      "fields": {
+        "recipient": {"type": "string", "required": true, "max_length": 120, "pii": true, "indexed": true},
+        "channel": {"type": "enum", "values": ["in_app", "email", "sms"], "default": "in_app", "indexed": true},
+        "subject": {"type": "string", "max_length": 200},
+        "body": {"type": "text", "required": true},
+        "status": {"type": "enum", "values": ["pending", "sent", "read", "failed"], "indexed": true},
+        "related_entity": {"type": "string", "max_length": 64},
+        "related_id": {"type": "string", "max_length": 64}
+      },
+      "state": {
+        "field": "status",
+        "initial": "pending",
+        "states": {
+          "pending": {"code": 100, "to": ["sent", "failed"]},
+          "sent": {"code": 200, "to": ["read"]},
+          "failed": {"code": 400, "to": ["pending"]},
+          "read": {"code": 610}
+        }
+      },
+      "sort_keys": ["recipient", "status"]
+    }
+  },
+  "actions": {
+    "mark_notification_sent": {"entity": "notification", "requires_state": ["pending"], "effect": [{"transition": "sent"}, {"emit": "notification.sent"}]},
+    "mark_notification_failed": {"entity": "notification", "requires_state": ["pending"], "effect": [{"transition": "failed"}, {"emit": "notification.failed"}]},
+    "mark_notification_read": {"entity": "notification", "requires_state": ["sent"], "effect": [{"transition": "read"}, {"emit": "notification.read"}]}
+  }
+}

@@ -189,3 +189,61 @@ fn required_computed_fields_are_refused_at_install() {
         Err(StoreError::BadData(_))
     ));
 }
+
+#[test]
+fn built_in_tools_install_and_run_on_the_typed_store() {
+    let Some(url) = url() else { return };
+    let shell = json!({
+        "manifest_version": 1,
+        "template": {"name": "shop", "version": "0.1.0"},
+        "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}}
+    });
+    let composed = ce_tools::compose(&shell, &["customers", "tasks", "notifications"]).unwrap();
+    let m = ce_manifest::validate(composed.to_string().as_bytes()).unwrap();
+    let name = format!(
+        "ce_typed_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    );
+    let s = TypedPgStore::install(&url, &m, &name).unwrap();
+    let sc = scope();
+    let c = s
+        .insert(
+            &sc,
+            "customer",
+            json!({"name": "Ada", "email": "ada@example.com"}),
+            None,
+        )
+        .unwrap();
+    assert_eq!(c.data["kind"], "person");
+    s.insert(
+        &sc,
+        "customer_contact",
+        json!({"customer": c.id, "name": "Bo"}),
+        None,
+    )
+    .unwrap();
+    let t = s
+        .insert(
+            &sc,
+            "task",
+            json!({"title": "call", "due_date": "2026-11-01"}),
+            None,
+        )
+        .unwrap();
+    assert_eq!(t.data["status"], "open");
+    assert_eq!(t.data["priority"], "normal");
+    let n = s
+        .insert(
+            &sc,
+            "notification",
+            json!({"recipient": "u1", "body": "hi"}),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        (n.data["status"].as_str(), n.data["channel"].as_str()),
+        (Some("pending"), Some("in_app"))
+    );
+    s.drop_schema().unwrap();
+}
