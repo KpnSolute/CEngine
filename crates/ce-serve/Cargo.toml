@@ -1,0 +1,20 @@
+[package]
+name = "ce-serve"
+description = "CEngine server binary: loads a manifest, opens its Postgres schema and serves the HTTP API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ce-serve"
+path = "src/main.rs"
+
+[dependencies]
+ce-auth = { path = "../ce-auth" }
+ce-manifest = { path = "../ce-manifest" }
+ce-server = { path = "../ce-server" }
+ce-store-pg = { path = "../ce-store-pg" }
+postgres = "0.19"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
