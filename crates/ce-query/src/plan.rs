@@ -4,6 +4,7 @@ use serde_json::Value;
 
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 200;
+pub const MAX_SEARCH_LEN: usize = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Param {
@@ -25,6 +26,10 @@ pub enum QueryError {
     FilterTooLarge,
     UnindexedSort(String),
     BadCursor,
+    /// The entity declares no `searchable` field.
+    NotSearchable(String),
+    /// The search text is empty or too long.
+    BadSearch,
     BadSchema,
 }
 
@@ -51,6 +56,9 @@ pub struct Target {
 pub struct ListRequest {
     pub select: Option<Vec<String>>,
     pub filter: Option<Value>,
+    /// Text to find in the entity's `searchable` fields (case-insensitive, anywhere in the
+    /// field). At most [`MAX_SEARCH_LEN`] characters.
+    pub search: Option<String>,
     pub sort: Vec<SortKey>,
     pub limit: Option<usize>,
     /// Values of the last row's sort keys, then its `id`, from the previous page.
@@ -219,6 +227,35 @@ pub fn plan_list(
     if let Some(f) = &req.filter {
         let mut nodes = 0;
         wheres.push(filter::compile(&mut ctx, f, 0, &mut nodes)?);
+    }
+
+    if let Some(text) = &req.search {
+        let text = text.trim();
+        if text.is_empty() || text.chars().count() > MAX_SEARCH_LEN {
+            return Err(QueryError::BadSearch);
+        }
+        let mut fields: Vec<&String> = entity["fields"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, f)| f["searchable"] == true)
+            .map(|(k, _)| k)
+            .collect();
+        if fields.is_empty() {
+            return Err(QueryError::NotSearchable(t.entity.clone()));
+        }
+        fields.sort();
+        // `%`, `_` and the escape character are literal in the user's text.
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let n = ctx.bind(Param::Text(format!("%{escaped}%")));
+        let any: Vec<String> = fields
+            .iter()
+            .map(|f| format!("\"{f}\" ILIKE ${n} ESCAPE '\\'"))
+            .collect();
+        wheres.push(format!("({})", any.join(" OR ")));
     }
 
     // Sorting: declared sort_keys only; id is always the final tiebreak.

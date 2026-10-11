@@ -104,6 +104,18 @@ pub fn check(m: &Value) -> Vec<Issue> {
                 Site::Plain,
             );
         }
+        for (fname, f) in fields {
+            let ty = f["type"].as_str().unwrap_or("");
+            if f["searchable"] == true && ty != "string" && ty != "text" {
+                out.push(issue(
+                    format!("{base}/fields/{fname}/searchable"),
+                    "not_searchable",
+                    format!(
+                        "`{fname}` is a {ty} field; only string and text fields can be searchable"
+                    ),
+                ));
+            }
+        }
         for (i, k) in ent
             .get("sort_keys")
             .and_then(Value::as_array)

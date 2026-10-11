@@ -23,4 +23,4 @@ First wave in 0.1, status:
 
 Invariants (such as a booking's end after its start) are enforced by the server on create and patch (`ce_validate::check_invariants`). Computed fields are evaluated first (`ce_validate::evaluate_computed`: dependency order, decimals rounded half-up to the field's scale), so rules can read them. Rules that use `ref()` or read a computed sum over other records are skipped for now; `unenforced_invariants` lists them.
 
-Second wave: invoicing is built; `ce-io` does CSV import and export (see its crate docs). Search and the rest are not started.
+Second wave: invoicing is built; `ce-io` does CSV import and export (see its crate docs). Search is a list parameter, not an entity tool: mark string or text fields `"searchable": true` and `GET /v1/{inst}/{entity}?q=text` returns the records where any of them contains the text (case-insensitive, 1 to 100 characters, `%` and `_` literal), still tenant-scoped and combinable with `filter`, `sort` and paging. It scans one entity's rows (no full-text index yet); a cross-entity search endpoint comes later.
