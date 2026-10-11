@@ -334,6 +334,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-validate"
+version = "0.0.1"
+dependencies = [
+ "ce-manifest",
+ "chrono",
+ "serde_json",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
