@@ -8,9 +8,9 @@
 //! default fills them first, on patch it does not (a removed field is null).
 //!
 //! Bindings besides fields: `old.field` (null on create), `actor.id`, `actor.role`, `now`,
-//! `today`. `ref(...)` and computed fields cannot be resolved here yet, so an invariant that
-//! reads one is skipped rather than failing every write; `unenforced_invariants` lists them
-//! so a host can warn.
+//! `today`. Computed fields are available once `evaluate_computed` has run. `ref(...)` and
+//! computed sums over other records cannot be resolved here yet, so an invariant that reads
+//! one is skipped rather than failing every write; `unenforced_invariants` lists them.
 
 use crate::FieldError;
 use bigdecimal::BigDecimal;
@@ -61,38 +61,19 @@ pub struct Unenforced {
     pub reason: &'static str,
 }
 
-fn idents(src: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quoted = false;
-    for c in src.chars() {
-        if c == '\'' {
-            quoted = !quoted;
-            cur.clear();
-        } else if !quoted
-            && (c.is_ascii_lowercase() || c == '_' || (!cur.is_empty() && c.is_ascii_digit()))
-        {
-            cur.push(c);
-        } else {
-            if !cur.is_empty() {
-                out.push(std::mem::take(&mut cur));
-            }
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
 fn unenforceable(ent: &Value, src: &str) -> Option<&'static str> {
-    let words = idents(src);
-    if words.iter().any(|w| w == "ref") {
+    let Some(u) = crate::computed::uses(src) else {
+        return Some("does not parse");
+    };
+    if u.calls.iter().any(|c| c == "ref") {
         return Some("reads another record with ref()");
     }
-    let computed = |w: &String| ent["fields"][w.as_str()]["computed"].is_string();
-    if words.iter().any(computed) {
-        return Some("reads a computed field");
+    if crate::computed::needs_other_records(&u) {
+        return Some("sums other records");
+    }
+    let skip = crate::computed::unsupported_fields(ent);
+    if u.names.iter().any(|n| skip.contains(n)) {
+        return Some("reads a computed field that is a sum over other records");
     }
     None
 }
@@ -117,21 +98,12 @@ pub fn unenforced_invariants(m: &Manifest) -> Vec<Unenforced> {
     out
 }
 
-/// Checks every enforceable invariant of `entity` against `record` (the whole record as it
-/// would be stored). `old` is the stored record on patch and `None` on create. Returns one
-/// error per failed invariant, path `""`, code `invariant_failed`, detail the invariant's
-/// `message_code` (or its name).
-pub fn check_invariants(
-    m: &Manifest,
-    entity: &str,
+pub(crate) fn build_env(
+    ent: &Value,
     record: &Map<String, Value>,
     old: Option<&Map<String, Value>>,
     ctx: &Context,
-) -> Result<(), Vec<FieldError>> {
-    let ent = &m.value["entities"][entity];
-    let Some(list) = ent["invariants"].as_array() else {
-        return Ok(());
-    };
+) -> Env {
     let mut env = Env::new();
     if let Some(fields) = ent["fields"].as_object() {
         for (name, f) in fields {
@@ -158,6 +130,25 @@ pub fn check_invariants(
         );
         env.insert("today".into(), Ev::Str(t.format("%Y-%m-%d").to_string()));
     }
+    env
+}
+
+/// Checks every enforceable invariant of `entity` against `record` (the whole record as it
+/// would be stored). `old` is the stored record on patch and `None` on create. Returns one
+/// error per failed invariant, path `""`, code `invariant_failed`, detail the invariant's
+/// `message_code` (or its name).
+pub fn check_invariants(
+    m: &Manifest,
+    entity: &str,
+    record: &Map<String, Value>,
+    old: Option<&Map<String, Value>>,
+    ctx: &Context,
+) -> Result<(), Vec<FieldError>> {
+    let ent = &m.value["entities"][entity];
+    let Some(list) = ent["invariants"].as_array() else {
+        return Ok(());
+    };
+    let env = build_env(ent, record, old, ctx);
     let mut errors = Vec::new();
     for inv in list {
         let Some(src) = inv["expr"].as_str() else {

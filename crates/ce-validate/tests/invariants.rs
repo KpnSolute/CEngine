@@ -21,7 +21,7 @@ fn manifest() -> ce_manifest::Manifest {
                 {"name": "seats", "expr": "seats >= 1"},
                 {"name": "price", "expr": "price >= 0"},
                 {"name": "grows", "expr": "is_null(old.seats) or seats >= old.seats"},
-                {"name": "double", "expr": "total > 0"},
+                {"name": "double", "expr": "is_null(total) or total >= 0"},
                 {"name": "owner", "expr": "ref(owner).state == 'open'"},
                 {"name": "text", "expr": "trim(note) != '' and floor(2.5) == 2 and ceil(2.5) == 3"}
             ]
@@ -45,12 +45,16 @@ fn map(v: Value) -> Map<String, Value> {
 }
 
 fn run(v: Value) -> Result<(), Vec<String>> {
-    check_invariants(&manifest(), "booking", &map(v), None, &ctx())
+    let mut rec = map(v);
+    ce_validate::evaluate_computed(&manifest(), "booking", &mut rec, None, &ctx()).unwrap();
+    check_invariants(&manifest(), "booking", &rec, None, &ctx())
         .map_err(|e| e.into_iter().map(|x| x.detail).collect())
 }
 
 fn patch(old: Value, new: Value) -> Result<(), Vec<String>> {
-    check_invariants(&manifest(), "booking", &map(new), Some(&map(old)), &ctx())
+    let (old, mut new) = (map(old), map(new));
+    ce_validate::evaluate_computed(&manifest(), "booking", &mut new, Some(&old), &ctx()).unwrap();
+    check_invariants(&manifest(), "booking", &new, Some(&old), &ctx())
         .map_err(|e| e.into_iter().map(|x| x.detail).collect())
 }
 
@@ -94,7 +98,8 @@ fn every_failed_rule_is_reported() {
         Err(vec![
             "booking.invalid_window".into(),
             "seats".into(),
-            "price".into()
+            "price".into(),
+            "double".into()
         ])
     );
 }
@@ -123,10 +128,137 @@ fn nanosecond_differences_are_kept() {
 }
 
 #[test]
-fn computed_and_ref_invariants_are_skipped_and_listed() {
+fn ref_invariants_are_skipped_and_listed() {
     let names: Vec<String> = unenforced_invariants(&manifest())
         .into_iter()
         .map(|u| u.name)
         .collect();
-    assert_eq!(names, ["double", "owner"]);
+    assert_eq!(names, ["owner"]);
+}
+
+#[test]
+fn computed_fields_are_evaluated_rounded_and_chained() {
+    let m = validate_manifest(
+        json!({
+            "manifest_version": 1,
+            "template": {"name": "t", "version": "0.1.0", "title": "T"},
+            "entities": {"line": {"fields": {
+                "qty": {"type": "decimal", "precision": 10, "scale": 3},
+                "price": {"type": "decimal", "precision": 10, "scale": 2},
+                "net": {"type": "decimal", "precision": 10, "scale": 2, "computed": "round(qty * price, 2)"},
+                "gross": {"type": "decimal", "precision": 4, "scale": 2, "computed": "net * 2"},
+                "label": {"type": "string", "computed": "concat('n=', 'x')"},
+                "units": {"type": "integer", "computed": "5 % 3"}
+            }}},
+            "roles": {"admin": {"read": ["*"], "write": ["*"]}},
+            "runtime": {"storage": {"relational": true}}
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .expect("valid");
+    let mut rec = map(json!({"qty": "0.125", "price": "0.20"}));
+    let r = ce_validate::evaluate_computed(&m, "line", &mut rec, None, &ctx());
+    // net = round(0.025, 2) = 0.03; gross = 0.06 fits numeric(4,2)
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(rec["net"], "0.03");
+    assert_eq!(rec["gross"], "0.06");
+    assert_eq!(rec["label"], "n=x");
+    assert_eq!(rec["units"], 2);
+}
+
+#[test]
+fn computed_results_that_do_not_fit_are_reported() {
+    let m = validate_manifest(
+        json!({
+            "manifest_version": 1,
+            "template": {"name": "t", "version": "0.1.0", "title": "T"},
+            "entities": {"line": {"fields": {
+                "a": {"type": "decimal", "precision": 10, "scale": 2},
+                "big": {"type": "decimal", "precision": 4, "scale": 2, "computed": "a * 1000"}
+            }}},
+            "roles": {"admin": {"read": ["*"], "write": ["*"]}},
+            "runtime": {"storage": {"relational": true}}
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .expect("valid");
+    let mut rec = map(json!({"a": "50.00"}));
+    let e = ce_validate::evaluate_computed(&m, "line", &mut rec, None, &ctx()).unwrap_err();
+    assert_eq!(e[0].path, "/big");
+    assert_eq!(e[0].code, "computed_failed");
+}
+
+fn computed_manifest(extra: Value) -> ce_manifest::Manifest {
+    let mut fields = json!({
+        "label": {"type": "string"},
+        "qty": {"type": "decimal", "precision": 10, "scale": 2},
+        "rate": {"type": "decimal", "precision": 10, "scale": 2}
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        fields[k] = v.clone();
+    }
+    validate_manifest(
+        json!({
+            "manifest_version": 1,
+            "template": {"name": "t", "version": "0.1.0", "title": "T"},
+            "entities": {"line": {"fields": fields}},
+            "roles": {"admin": {"read": ["*"], "write": ["*"]}},
+            "runtime": {"storage": {"relational": true}}
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"))
+}
+
+#[test]
+fn a_string_literal_that_looks_like_a_call_is_still_computed() {
+    let m = computed_manifest(json!({
+        "tag": {"type": "string", "computed": "concat('sum(', label)"}
+    }));
+    let mut rec = map(json!({"label": "x"}));
+    ce_validate::evaluate_computed(&m, "line", &mut rec, None, &ctx()).unwrap();
+    assert_eq!(rec["tag"], "sum(x");
+}
+
+#[test]
+fn required_computed_fields_cannot_come_out_null() {
+    let m = computed_manifest(json!({
+        "amount": {"type": "decimal", "precision": 10, "scale": 2, "required": true, "computed": "qty * rate"}
+    }));
+    let mut rec = map(json!({"qty": "2.00"}));
+    let e = ce_validate::evaluate_computed(&m, "line", &mut rec, None, &ctx()).unwrap_err();
+    assert_eq!(
+        (e[0].path.as_str(), e[0].code),
+        ("/amount", "computed_failed")
+    );
+    let mut ok = map(json!({"qty": "2.00", "rate": "1.50"}));
+    ce_validate::evaluate_computed(&m, "line", &mut ok, None, &ctx()).unwrap();
+    assert_eq!(ok["amount"], "3.00");
+}
+
+#[test]
+fn computed_strings_must_satisfy_the_field_definition() {
+    let m = computed_manifest(json!({
+        "kind": {"type": "enum", "values": ["a", "b"], "computed": "when(qty > 1, 'a', 'nope')"},
+        "short": {"type": "string", "max_length": 3, "computed": "concat(label, label)"}
+    }));
+    let mut rec = map(json!({"qty": "0.50", "label": "xy"}));
+    let e = ce_validate::evaluate_computed(&m, "line", &mut rec, None, &ctx()).unwrap_err();
+    let paths: Vec<&str> = e.iter().map(|x| x.path.as_str()).collect();
+    assert_eq!(paths, ["/kind", "/short"]);
+}
+
+#[test]
+fn unsupported_status_spreads_to_fields_that_read_the_unsupported_one() {
+    let m = computed_manifest(json!({
+        "subtotal": {"type": "decimal", "precision": 10, "scale": 2, "computed": "ref (parent).rate * 2"},
+        "tax": {"type": "decimal", "precision": 10, "scale": 2, "computed": "subtotal * rate"},
+        "parent": {"type": "ref", "ref": "line"}
+    }));
+    let mut rec = map(json!({"rate": "0.10"}));
+    ce_validate::evaluate_computed(&m, "line", &mut rec, None, &ctx()).unwrap();
+    assert!(!rec.contains_key("subtotal") && !rec.contains_key("tax"));
 }

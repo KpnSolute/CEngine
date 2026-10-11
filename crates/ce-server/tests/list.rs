@@ -136,7 +136,14 @@ async fn list_pages_in_order_and_is_tenant_scoped() {
             ))
             .unwrap();
         let res = a.clone().oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::CREATED);
+        let status = res.status();
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
     }
     // Another tenant's data never shows up.
     let (st, other) = call(&a, "GET", &format!("/v1/{INST}/item"), &t2, None).await;

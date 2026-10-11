@@ -8,9 +8,11 @@
 //!
 //! Reading: absent and null are the same (null columns are omitted). Decimals come back as
 //! strings so no digit is lost to floating point; dates and datetimes as ISO strings.
-//! Computed columns are read but never written yet (no evaluator); they stay null.
-//! On update the state field and computed fields in the incoming data are ignored, so a
-//! read-merge-write cycle cannot move state.
+//! Computed columns are stored like any other: the host evaluates them first
+//! (`ce_validate::evaluate_computed`) and passes them in the data. A direct caller that leaves a
+//! required computed field out gets a `required` constraint error.
+//! On update the state field in the incoming data is ignored, so a read-merge-write cycle
+//! cannot move state.
 
 use ce_manifest::Manifest;
 use ce_query::{plan_list, ListRequest, Param, Target};
@@ -32,7 +34,8 @@ struct Col {
     ty: String,
     kind: Kind,
     default: Option<Value>,
-    /// Declared state field or computed: never written from caller data.
+    /// The declared state field: never written from caller data. Computed values arrive in the
+    /// data already evaluated by the host (callers cannot set them; validation refuses that).
     managed: bool,
 }
 
@@ -216,12 +219,6 @@ impl TypedPgStore {
                 let (true, Some(cast)) = (ident_ok(fname), cast_of(ty)) else {
                     return Err(bad);
                 };
-                // No evaluator exists yet, so a required computed column could never be filled.
-                if f["computed"].is_string() && f["required"] == true {
-                    return Err(StoreError::BadData(
-                        "a computed field cannot be required until computed fields are evaluated",
-                    ));
-                }
                 cols.push(Col {
                     name: fname.clone(),
                     cast,
@@ -232,8 +229,7 @@ impl TypedPgStore {
                         Kind::Plain
                     },
                     default: f.get("default").filter(|d| !d.is_null()).cloned(),
-                    managed: f["computed"].is_string()
-                        || state.as_ref().is_some_and(|s| s.field == *fname),
+                    managed: state.as_ref().is_some_and(|s| s.field == *fname),
                 });
             }
             if let Some(s) = &state {
@@ -290,7 +286,12 @@ impl TypedPgStore {
         data: &Map<String, Value>,
         mode: Mode,
     ) -> Result<(), StoreError> {
-        validate(&self.manifest, entity, data, mode)
+        // Computed values come from the host's evaluator, not a caller, so they are not
+        // re-checked as caller input (validation refuses callers that set them).
+        let fields = &self.manifest.value["entities"][entity]["fields"];
+        let mut caller = data.clone();
+        caller.retain(|k, _| !fields[k.as_str()]["computed"].is_string());
+        validate(&self.manifest, entity, &caller, mode)
             .map_err(|_| StoreError::BadData("the record does not match the manifest"))
     }
 }

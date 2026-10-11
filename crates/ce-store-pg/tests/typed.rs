@@ -178,7 +178,7 @@ fn hard_delete_when_soft_delete_is_off() {
 }
 
 #[test]
-fn required_computed_fields_are_refused_at_install() {
+fn computed_values_are_stored_as_given_and_required_ones_must_be_supplied() {
     let Some(url) = url() else { return };
     let mut m = serde_json::to_value(&manifest().value).unwrap();
     m["entities"]["item"]["fields"]["total"] =
@@ -189,10 +189,23 @@ fn required_computed_fields_are_refused_at_install() {
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     );
-    assert!(matches!(
-        TypedPgStore::install(&url, &m, &name),
-        Err(StoreError::BadData(_))
-    ));
+    let s = TypedPgStore::install(&url, &m, &name).unwrap();
+    let sc = scope();
+    // The host evaluates computed fields; the store writes what it is given.
+    let r = s
+        .insert(&sc, "item", json!({"n": 2, "total": 4}), None)
+        .unwrap();
+    assert_eq!(r.data["total"], 4);
+    let r2 = s
+        .update(&sc, "item", &r.id, 1, json!({"n": 5, "total": 10}))
+        .unwrap();
+    assert_eq!(r2.data["total"], 10);
+    // A required computed field left out is a required-field error.
+    assert_eq!(
+        s.insert(&sc, "item", json!({"n": 1}), None),
+        Err(StoreError::Constraint("required"))
+    );
+    s.drop_schema().unwrap();
 }
 
 #[test]

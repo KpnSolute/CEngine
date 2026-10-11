@@ -709,3 +709,42 @@ async fn invariants_refuse_bad_creates_and_patches() {
     let r = call(&a, "GET", &uri, Some(&tok), &[], None).await;
     assert_eq!(r.body["data"]["version"], 1);
 }
+
+#[tokio::test]
+async fn computed_fields_are_filled_on_create_and_refreshed_on_patch() {
+    let a = app();
+    let tok = manager(T1);
+    let made = create(
+        &a,
+        &tok,
+        "c1",
+        json!({"name": "flour", "unit_cost": "2.5", "on_hand": "4"}),
+    )
+    .await;
+    assert_eq!(made.status, StatusCode::CREATED);
+    assert_eq!(made.body["data"]["value"], "10.00");
+    let uri = format!(
+        "/v1/{INST}/item/{}",
+        made.body["data"]["id"].as_str().unwrap()
+    );
+    let r = call(
+        &a,
+        "PATCH",
+        &uri,
+        Some(&tok),
+        &[("if-match", "\"1\"")],
+        Some(json!({"on_hand": "10"})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.body["data"]["value"], "25.00");
+    // Callers still cannot set a computed field themselves.
+    let r = create(
+        &a,
+        &tok,
+        "c2",
+        json!({"name": "x", "unit_cost": "1", "value": "9.00"}),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+}
