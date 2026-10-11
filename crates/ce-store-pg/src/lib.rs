@@ -12,11 +12,14 @@
 //!   concurrent retry waits on the unique index, then replays the stored first result.
 //! - **Soft delete:** `deleted_at` is set; reads skip it.
 //!
-//! The connection is synchronous and held behind a mutex; a pool and TLS come before any
-//! production use. Schema names are validated, never spliced from user input.
+//! The connection is synchronous and held behind a mutex (the typed store has a pool and TLS;
+//! this generic store is the contract reference). Schema names are validated, never spliced
+//! from user input.
 
 mod pool;
+mod tls;
 mod typed;
+pub use tls::{connect, Tls};
 pub use typed::{PoolConfig, TypedPgStore};
 
 use ce_store::{Record, Store, StoreError, TenantScope};
