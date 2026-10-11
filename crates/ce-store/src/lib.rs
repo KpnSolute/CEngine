@@ -9,6 +9,7 @@
 //! 3. Delete is soft: the record disappears from reads and keeps its version history.
 //! 4. An idempotency key replays the first result for the same payload and is refused
 //!    for a different payload. Keys are scoped per tenant.
+//! 5. `atomic` commits all of a closure's writes or none of them.
 //!
 //! The trait is synchronous for now; the Postgres backend will move it to async before 0.1.
 
@@ -47,6 +48,9 @@ pub enum StoreError {
     Unsupported,
     /// The backend failed (connection, SQL). The message is for logs, not for callers.
     Backend(String),
+    /// A transaction was rolled back because its closure asked to stop; the caller already
+    /// holds the reason. Never shown to users.
+    Aborted,
 }
 
 /// One page of a list. `next` is the cursor for the following page (the last row's sort-key
@@ -96,4 +100,40 @@ pub trait Store {
         id: &str,
         expected_version: u64,
     ) -> Result<(), StoreError>;
+
+    /// Runs `f` as one transaction: every write made through the store handed to `f` commits
+    /// together when `f` returns `Ok`, and none is kept when it returns `Err`. Reads inside `f`
+    /// see its own writes. Nested calls join the running transaction. Stores that cannot do this
+    /// return `Unsupported` without calling `f`.
+    fn atomic(
+        &self,
+        _f: &mut dyn FnMut(&dyn Store) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported)
+    }
+
+    /// Like `get`, and inside `atomic` also locks the record until the transaction ends, so two
+    /// transactions that recompute the same parent take turns. Outside a transaction it is `get`.
+    fn get_locked(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+    ) -> Result<Record, StoreError> {
+        self.get(scope, entity, id)
+    }
+
+    /// `attr` of every live record of `entity` whose `ref_field` equals `parent_id`, in any
+    /// order; a missing value is `null`. With no `attr`, one `true` per record. Used for sums
+    /// and counts over child records, so it reads all of them, not a page.
+    fn child_values(
+        &self,
+        _scope: &TenantScope,
+        _entity: &str,
+        _ref_field: &str,
+        _parent_id: &str,
+        _attr: Option<&str>,
+    ) -> Result<Vec<Value>, StoreError> {
+        Err(StoreError::Unsupported)
+    }
 }

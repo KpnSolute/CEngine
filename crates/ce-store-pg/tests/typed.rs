@@ -27,6 +27,8 @@ fn manifest() -> ce_manifest::Manifest {
       "entities": {
         "item": {"fields": {"n": {"type": "integer"}}},
         "order": {"fields": {"n": {"type": "integer"}}},
+        "parent": {"fields": {"n": {"type": "integer"}}},
+        "line": {"fields": {"parent": {"type": "ref", "ref": "parent", "required": true}, "n": {"type": "integer"}}},
         "part": {
           "fields": {
             "name": {"type": "string", "required": true, "max_length": 20, "unique": true, "indexed": true},
@@ -502,4 +504,20 @@ fn built_in_tools_install_and_run_on_the_typed_store() {
     )
     .unwrap();
     s.drop_schema().unwrap();
+}
+
+#[test]
+fn typed_store_passes_the_transaction_contract() {
+    let Some(url) = url() else { return };
+    let stores = std::cell::RefCell::new(Vec::new());
+    contract::run_atomic(&|| {
+        let s = fresh(&url);
+        stores.borrow_mut().push(s.schema_name().to_string());
+        s
+    });
+    // Each case got its own schema; drop them.
+    for name in stores.into_inner() {
+        let s = TypedPgStore::open(&url, &manifest(), &name).unwrap();
+        s.drop_schema().unwrap();
+    }
 }

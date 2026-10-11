@@ -1,16 +1,18 @@
 use crate::{Record, Store, StoreError, TenantScope};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 type RecordKey = (String, String, String); // tenant, entity, id
 
+#[derive(Clone)]
 struct Stored {
     record: Record,
     deleted: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Inner {
     next_id: u64,
     records: HashMap<RecordKey, Stored>,
@@ -38,9 +40,9 @@ fn key(scope: &TenantScope, entity: &str, id: &str) -> RecordKey {
     (scope.tenant_id().into(), entity.into(), id.into())
 }
 
-impl Store for MemoryStore {
+impl Inner {
     fn insert(
-        &self,
+        &mut self,
         scope: &TenantScope,
         entity: &str,
         data: Value,
@@ -49,25 +51,24 @@ impl Store for MemoryStore {
         if !data.is_object() {
             return Err(StoreError::BadData("data must be a JSON object"));
         }
-        let mut g = self.lock();
         let idem = idempotency_key.map(|k| (scope.tenant_id().to_string(), k.to_string()));
         if let Some(k) = &idem {
-            if let Some((payload, original)) = g.keys.get(k) {
+            if let Some((payload, original)) = self.keys.get(k) {
                 if original.entity != entity || payload != &data {
                     return Err(StoreError::IdempotencyKeyReused);
                 }
                 return Ok(original.clone());
             }
         }
-        g.next_id += 1;
-        let id = format!("rec-{}", g.next_id);
+        self.next_id += 1;
+        let id = format!("rec-{}", self.next_id);
         let record = Record {
             id: id.clone(),
             entity: entity.into(),
             version: 1,
             data: data.clone(),
         };
-        g.records.insert(
+        self.records.insert(
             key(scope, entity, &id),
             Stored {
                 record: record.clone(),
@@ -75,21 +76,20 @@ impl Store for MemoryStore {
             },
         );
         if let Some(k) = idem {
-            g.keys.insert(k, (data, record.clone()));
+            self.keys.insert(k, (data, record.clone()));
         }
         Ok(record)
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
-        let g = self.lock();
-        match g.records.get(&key(scope, entity, id)) {
+        match self.records.get(&key(scope, entity, id)) {
             Some(s) if !s.deleted => Ok(s.record.clone()),
             _ => Err(StoreError::NotFound),
         }
     }
 
     fn update(
-        &self,
+        &mut self,
         scope: &TenantScope,
         entity: &str,
         id: &str,
@@ -99,8 +99,7 @@ impl Store for MemoryStore {
         if !data.is_object() {
             return Err(StoreError::BadData("data must be a JSON object"));
         }
-        let mut g = self.lock();
-        match g.records.get_mut(&key(scope, entity, id)) {
+        match self.records.get_mut(&key(scope, entity, id)) {
             Some(s) if !s.deleted => {
                 if s.record.version != expected_version {
                     return Err(StoreError::VersionConflict {
@@ -116,14 +115,13 @@ impl Store for MemoryStore {
     }
 
     fn delete(
-        &self,
+        &mut self,
         scope: &TenantScope,
         entity: &str,
         id: &str,
         expected_version: u64,
     ) -> Result<(), StoreError> {
-        let mut g = self.lock();
-        match g.records.get_mut(&key(scope, entity, id)) {
+        match self.records.get_mut(&key(scope, entity, id)) {
             Some(s) if !s.deleted => {
                 if s.record.version != expected_version {
                     return Err(StoreError::VersionConflict {
@@ -136,5 +134,163 @@ impl Store for MemoryStore {
             }
             _ => Err(StoreError::NotFound),
         }
+    }
+
+    fn child_values(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        ref_field: &str,
+        parent_id: &str,
+        attr: Option<&str>,
+    ) -> Vec<Value> {
+        self.records
+            .iter()
+            .filter(|((tenant, ent, _), s)| {
+                tenant == scope.tenant_id()
+                    && ent == entity
+                    && !s.deleted
+                    && s.record.data[ref_field].as_str() == Some(parent_id)
+            })
+            .map(|(_, s)| match attr {
+                Some(a) => s.record.data.get(a).cloned().unwrap_or(Value::Null),
+                None => Value::Bool(true),
+            })
+            .collect()
+    }
+}
+
+impl Store for MemoryStore {
+    fn insert(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        data: Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        self.lock().insert(scope, entity, data, idempotency_key)
+    }
+
+    fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
+        self.lock().get(scope, entity, id)
+    }
+
+    fn update(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+        data: Value,
+    ) -> Result<Record, StoreError> {
+        self.lock()
+            .update(scope, entity, id, expected_version, data)
+    }
+
+    fn delete(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+    ) -> Result<(), StoreError> {
+        self.lock().delete(scope, entity, id, expected_version)
+    }
+
+    fn child_values(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        ref_field: &str,
+        parent_id: &str,
+        attr: Option<&str>,
+    ) -> Result<Vec<Value>, StoreError> {
+        Ok(self
+            .lock()
+            .child_values(scope, entity, ref_field, parent_id, attr))
+    }
+
+    /// Holds the store's lock for the whole closure and works on a copy, which replaces the
+    /// real state only if the closure succeeds.
+    fn atomic(
+        &self,
+        f: &mut dyn FnMut(&dyn Store) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let mut g = self.lock();
+        let tx = MemoryTx {
+            inner: RefCell::new(g.clone()),
+        };
+        f(&tx)?;
+        *g = tx.inner.into_inner();
+        Ok(())
+    }
+}
+
+/// The store a closure sees inside `MemoryStore::atomic`.
+struct MemoryTx {
+    inner: RefCell<Inner>,
+}
+
+impl Store for MemoryTx {
+    fn insert(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        data: Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        self.inner
+            .borrow_mut()
+            .insert(scope, entity, data, idempotency_key)
+    }
+
+    fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
+        self.inner.borrow().get(scope, entity, id)
+    }
+
+    fn update(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+        data: Value,
+    ) -> Result<Record, StoreError> {
+        self.inner
+            .borrow_mut()
+            .update(scope, entity, id, expected_version, data)
+    }
+
+    fn delete(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .borrow_mut()
+            .delete(scope, entity, id, expected_version)
+    }
+
+    fn child_values(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        ref_field: &str,
+        parent_id: &str,
+        attr: Option<&str>,
+    ) -> Result<Vec<Value>, StoreError> {
+        Ok(self
+            .inner
+            .borrow()
+            .child_values(scope, entity, ref_field, parent_id, attr))
+    }
+
+    fn atomic(
+        &self,
+        f: &mut dyn FnMut(&dyn Store) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        f(self)
     }
 }
