@@ -296,7 +296,7 @@ fn store_problem(e: StoreError) -> Problem {
             "not_implemented",
             "this installation's store cannot do that yet",
         ),
-        StoreError::Backend(_) => Problem::new(
+        StoreError::Backend(_) | StoreError::Aborted => Problem::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
             "something went wrong on our side",
