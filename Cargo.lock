@@ -157,6 +157,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-policy"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "ce-auth",
+ "ce-manifest",
+ "hmac",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ce-query"
 version = "0.0.1"
 dependencies = [
@@ -166,6 +178,14 @@ dependencies = [
  "hmac",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "ce-state"
+version = "0.0.1"
+dependencies = [
+ "ce-manifest",
+ "serde_json",
 ]
 
 [[package]]
