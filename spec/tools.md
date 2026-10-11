@@ -17,7 +17,9 @@ First wave in 0.1, status:
 - `customers`: `customer`, `customer_contact` (built).
 - `tasks`: `task` with open, in_progress, done, cancelled and start/complete/cancel actions (built).
 - `notifications`: `notification` records with pending, sent, read, failed; delivery is Infajn's (built).
-- calendar and booking: logic in `ce-calendar` (built); its booking entity fragment is still to do.
+- `bookings`: `resource` and `booking` (requested, confirmed, cancelled, completed, no_show) with confirm/cancel/complete/no-show actions (built). The scheduling logic (recurrence, conflicts, free slots) is `ce-calendar`; wiring it to the server endpoints is still to do.
 - barcodes: logic in `ce-barcode` (built).
+
+Invariants (such as a booking's end after its start) are declared in the fragments, but the server and stores do not evaluate them yet; that is the next milestone after the tools (it reuses `ce-expr`). Until then the declaration is the contract, not a guarantee.
 
 Second wave (invoicing, search, import/export) and the rest are not started.

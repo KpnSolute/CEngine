@@ -198,7 +198,8 @@ fn built_in_tools_install_and_run_on_the_typed_store() {
         "template": {"name": "shop", "version": "0.1.0"},
         "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}}
     });
-    let composed = ce_tools::compose(&shell, &["customers", "tasks", "notifications"]).unwrap();
+    let composed =
+        ce_tools::compose(&shell, &["customers", "tasks", "notifications", "bookings"]).unwrap();
     let m = ce_manifest::validate(composed.to_string().as_bytes()).unwrap();
     let name = format!(
         "ce_typed_{}_{}",
@@ -245,5 +246,24 @@ fn built_in_tools_install_and_run_on_the_typed_store() {
         (n.data["status"].as_str(), n.data["channel"].as_str()),
         (Some("pending"), Some("in_app"))
     );
+    let r = s
+        .insert(
+            &sc,
+            "resource",
+            json!({"name": "Room 1", "timezone": "America/New_York"}),
+            None,
+        )
+        .unwrap();
+    assert_eq!(r.data["buffer_minutes"], 0);
+    let b = s
+        .insert(
+            &sc,
+            "booking",
+            json!({"resource": r.id, "contact_name": "Ada",
+                   "starts_at": "2026-11-01T14:00:00Z", "ends_at": "2026-11-01T15:00:00Z"}),
+            None,
+        )
+        .unwrap();
+    assert_eq!(b.data["status"], "requested");
     s.drop_schema().unwrap();
 }

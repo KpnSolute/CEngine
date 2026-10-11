@@ -1,0 +1,48 @@
+{
+  "tool": "bookings",
+  "version": "0.1.0",
+  "title": "Bookable resources and their bookings",
+  "entities": {
+    "resource": {
+      "fields": {
+        "name": {"type": "string", "required": true, "max_length": 160, "unique": true, "indexed": true},
+        "timezone": {"type": "string", "required": true, "max_length": 64},
+        "buffer_minutes": {"type": "integer", "default": 0},
+        "notes": {"type": "text"}
+      },
+      "sort_keys": ["name"]
+    },
+    "booking": {
+      "fields": {
+        "resource": {"type": "ref", "ref": "resource", "required": true, "indexed": true},
+        "contact_name": {"type": "string", "required": true, "max_length": 160, "pii": true},
+        "contact_email": {"type": "string", "max_length": 254, "pii": true},
+        "contact_phone": {"type": "string", "max_length": 40, "pii": true},
+        "starts_at": {"type": "datetime", "required": true, "indexed": true},
+        "ends_at": {"type": "datetime", "required": true},
+        "recurrence": {"type": "string", "max_length": 400},
+        "status": {"type": "enum", "values": ["requested", "confirmed", "cancelled", "completed", "no_show"], "indexed": true},
+        "notes": {"type": "text"}
+      },
+      "state": {
+        "field": "status",
+        "initial": "requested",
+        "states": {
+          "requested": {"code": 100, "to": ["confirmed", "cancelled"]},
+          "confirmed": {"code": 200, "to": ["cancelled", "completed", "no_show"]},
+          "cancelled": {"code": 600},
+          "completed": {"code": 610},
+          "no_show": {"code": 620}
+        }
+      },
+      "invariants": [{"name": "valid_window", "expr": "ends_at > starts_at", "message_code": "booking.invalid_window"}],
+      "sort_keys": ["starts_at"]
+    }
+  },
+  "actions": {
+    "confirm_booking": {"entity": "booking", "requires_state": ["requested"], "effect": [{"transition": "confirmed"}, {"emit": "booking.confirmed"}]},
+    "cancel_booking": {"entity": "booking", "requires_state": ["requested", "confirmed"], "effect": [{"transition": "cancelled"}, {"emit": "booking.cancelled"}]},
+    "complete_booking": {"entity": "booking", "requires_state": ["confirmed"], "effect": [{"transition": "completed"}, {"emit": "booking.completed"}]},
+    "mark_booking_no_show": {"entity": "booking", "requires_state": ["confirmed"], "effect": [{"transition": "no_show"}, {"emit": "booking.no_show"}]}
+  }
+}

@@ -22,7 +22,7 @@ fn every_tool_composes_into_a_valid_manifest_alone_and_together() {
         .iter()
         .map(|t| t["tool"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names, ["customers", "tasks", "notifications"]);
+    assert_eq!(names, ["customers", "tasks", "notifications", "bookings"]);
     for n in &names {
         valid(&compose(&shell(), &[n.as_str()]).unwrap());
     }
@@ -81,7 +81,7 @@ fn composition_never_overrides_and_naming_twice_adds_once() {
 
 #[test]
 fn personal_data_is_marked_and_tools_name_no_provider() {
-    let m = compose(&shell(), &["customers", "notifications"]).unwrap();
+    let m = compose(&shell(), &["customers", "notifications", "bookings"]).unwrap();
     for (e, f) in [
         ("customer", "name"),
         ("customer", "email"),
@@ -89,6 +89,9 @@ fn personal_data_is_marked_and_tools_name_no_provider() {
         ("customer", "address"),
         ("customer_contact", "email"),
         ("notification", "recipient"),
+        ("booking", "contact_name"),
+        ("booking", "contact_email"),
+        ("booking", "contact_phone"),
     ] {
         assert_eq!(m["entities"][e]["fields"][f]["pii"], true, "{e}.{f}");
     }
