@@ -136,5 +136,7 @@ fn children_sums_are_checked_against_the_entities() {
     assert!(sum("sum(children(item, name).value)").contains(&"bad_children"));
     assert!(sum("sum(children(item, period).ghost)").contains(&"unknown_field"));
     assert!(sum("sum(children(item))").contains(&"bad_children"));
+    assert!(sum("sum(children(item, 0, period))").contains(&"bad_children"));
+    assert!(sum("sum(children(item, period, 0))").contains(&"bad_children"));
     assert!(sum("sum(children(item, period).value.ghost)").contains(&"bad_children"));
 }

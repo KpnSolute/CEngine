@@ -437,21 +437,25 @@ fn check_children(out: &mut Vec<Issue>, path: &str, e: &Expr, entities: &Obj, ow
     match e {
         Expr::Call(f, args) => {
             if f == "children" {
-                let names: Vec<&str> = args
-                    .iter()
-                    .filter_map(|a| match a {
-                        Expr::Path(p) if p.len() == 1 => Some(p[0].as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                let [child, field] = names[..] else {
+                let name_of = |a: &Expr| match a {
+                    Expr::Path(p) if p.len() == 1 => Some(p[0].as_str()),
+                    _ => None,
+                };
+                let (child, field) = match &args[..] {
+                    [a, b] => match (name_of(a), name_of(b)) {
+                        (Some(c), Some(f)) => (c, f),
+                        _ => ("", ""),
+                    },
+                    _ => ("", ""),
+                };
+                if child.is_empty() {
                     out.push(issue(
                         path,
                         "bad_children",
-                        "children(entity, ref_field) takes two plain names",
+                        "children(entity, ref_field) takes exactly two plain names",
                     ));
                     return;
-                };
+                }
                 let Some(ce) = entities.get(child) else {
                     out.push(issue(
                         path,
