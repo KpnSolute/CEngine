@@ -15,8 +15,11 @@
 //!    zone, enums must be one of the declared values, refs must be UUIDs.
 //! 5. `max_length` counts characters, not bytes. A NUL character is never allowed in text.
 //!
-//! Not here: invariants and computed values (they need the expression evaluator and the
-//! stored record), uniqueness and reference existence (the store enforces those).
+//! Invariants are checked by `check_invariants` against the whole record. Not here: computed
+//! values, uniqueness and reference existence (the store enforces those).
+
+mod invariants;
+pub use invariants::{check_invariants, unenforced_invariants, Context, Unenforced};
 
 use ce_manifest::Manifest;
 use chrono::{DateTime, NaiveDate};

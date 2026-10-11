@@ -215,6 +215,36 @@ fn validate_body<S>(
     })
 }
 
+/// Invariants of the manifest against the whole record, as a validation problem.
+fn check_invariants<S>(
+    st: &AppState<S>,
+    who: &Principal,
+    entity: &str,
+    rec: &Map<String, Value>,
+    old: Option<&Map<String, Value>>,
+) -> Result<(), Problem> {
+    ce_validate::check_invariants(&st.manifest, entity, rec, old, &invariant_context(st, who))
+        .map_err(invariant_problem)
+}
+
+fn invariant_context<S>(st: &AppState<S>, who: &Principal) -> ce_validate::Context {
+    ce_validate::Context {
+        actor_id: who.user_id.clone(),
+        actor_role: who.roles.first().cloned(),
+        now_unix: i64::try_from((st.now)()).unwrap_or(0),
+    }
+}
+
+fn invariant_problem(errors: Vec<ce_validate::FieldError>) -> Problem {
+    Problem::validation(
+        "the record breaks a rule of the template",
+        errors
+            .into_iter()
+            .map(|e| json!({"path": e.path, "code": e.code, "detail": e.detail}))
+            .collect(),
+    )
+}
+
 /// RFC 7396 JSON Merge Patch.
 fn merge_patch(target: &mut Value, patch: &Value) {
     if let Value::Object(p) = patch {
@@ -351,6 +381,14 @@ async fn create<S: Store + Send + Sync + 'static>(
         if let (Some(f), Some(i)) = (sm["field"].as_str(), sm["initial"].as_str()) {
             obj.insert(f.to_string(), Value::String(i.to_string()));
         }
+        // Defaults are written with the record, so later patches see them like any stored value.
+        let fields = &st.manifest.value["entities"][entity.as_str()]["fields"];
+        for (name, f) in fields.as_object().into_iter().flatten() {
+            if !obj.contains_key(name) && !f["computed"].is_string() && !f["default"].is_null() {
+                obj.insert(name.clone(), f["default"].clone());
+            }
+        }
+        check_invariants(&st, &who, &entity, &obj, None)?;
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
         let ent = entity.clone();
@@ -402,6 +440,9 @@ async fn update<S: Store + Send + Sync + 'static>(
         let expected = if_match(&headers)?;
         let patch = parse_object(&body.map_err(body_problem)?)?;
         validate_body(&st, &entity, &patch, ce_validate::Mode::Patch)?;
+        let manifest = st.manifest.clone();
+        let ent = entity.clone();
+        let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
         let rec = blocking(&st, move |s| {
@@ -413,9 +454,16 @@ async fn update<S: Store + Send + Sync + 'static>(
             }
             let mut data = current.data.clone();
             merge_patch(&mut data, &Value::Object(patch));
-            s.update(&scope, &entity, &id, expected, data)
+            if let Some(rec) = data.as_object() {
+                let old = current.data.as_object();
+                if let Err(e) = ce_validate::check_invariants(&manifest, &ent, rec, old, &ctx) {
+                    return Ok(Err(e));
+                }
+            }
+            s.update(&scope, &entity, &id, expected, data).map(Ok)
         })
-        .await?;
+        .await?
+        .map_err(invariant_problem)?;
         Ok(record_response(StatusCode::OK, &rec, &rid, readable))
     };
     finish(&rid, run.await)

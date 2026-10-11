@@ -276,6 +276,30 @@ fn call(name: &str, raw: &[Expr], env: &Env) -> R {
                 _ => Err(ty("expected a string")),
             }
         }
+        "trim" => {
+            arity(name, &args, 1)?;
+            match &args[0] {
+                Value::Null => Ok(Value::Null),
+                Value::Str(s) => Ok(Value::Str(s.trim().to_string())),
+                _ => Err(ty("expected a string")),
+            }
+        }
+        "floor" | "ceil" => {
+            arity(name, &args, 1)?;
+            match &args[0] {
+                Value::Null => Ok(Value::Null),
+                Value::Int(i) => Ok(Value::Int(*i)),
+                Value::Dec(d) => {
+                    let mode = if name == "floor" {
+                        RoundingMode::Floor
+                    } else {
+                        RoundingMode::Ceiling
+                    };
+                    check(d.with_scale_round(0, mode))
+                }
+                _ => Err(ty("expected a number")),
+            }
+        }
         "concat" => {
             let mut out = String::new();
             for a in &args {
