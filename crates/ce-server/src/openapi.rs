@@ -7,7 +7,9 @@ fn field_schema(f: &Value) -> Value {
     let mut s = match f["type"].as_str().unwrap_or("") {
         "string" | "text" => json!({"type": "string"}),
         "integer" => json!({"type": "integer"}),
-        "decimal" => json!({"type": "number"}),
+        "decimal" => {
+            json!({"type": ["number", "string"], "description": "plain decimal digits; no exponent"})
+        }
         "boolean" => json!({"type": "boolean"}),
         "date" => json!({"type": "string", "format": "date"}),
         "datetime" => json!({"type": "string", "format": "date-time"}),

@@ -290,6 +290,7 @@ dependencies = [
  "ce-manifest",
  "ce-policy",
  "ce-store",
+ "ce-validate",
  "hmac 0.12.1",
  "http-body-util",
  "serde",
@@ -331,6 +332,15 @@ dependencies = [
  "postgres",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "ce-validate"
+version = "0.0.1"
+dependencies = [
+ "ce-manifest",
+ "chrono",
+ "serde_json",
 ]
 
 [[package]]

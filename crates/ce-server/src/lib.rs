@@ -8,7 +8,8 @@
 //! Endpoints: `POST /v1/{inst}/{entity}` (Idempotency-Key required), `GET|PATCH|DELETE
 //! /v1/{inst}/{entity}/{id}` (If-Match required on writes; PATCH is JSON Merge Patch),
 //! `GET /_meta/health/{live,ready}`, `GET /_meta/manifest`, `GET /_meta/openapi`.
-//! Not yet: list/query, batch, actions, changesets, events, files; field type validation.
+//! Field types and limits are checked by `ce-validate`. Not yet: list/query, batch, actions,
+//! changesets, events, files, invariants.
 
 mod openapi;
 mod problem;
@@ -30,15 +31,6 @@ use ce_store::{Record, Store, StoreError};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
-/// Names the engine owns on every record; callers may never set them.
-const RESERVED: [&str; 6] = [
-    "id",
-    "tenant_id",
-    "version",
-    "created_at",
-    "updated_at",
-    "deleted_at",
-];
 const MAX_BODY: usize = 1024 * 1024;
 
 pub struct AppState<S> {
@@ -205,59 +197,22 @@ fn parse_object(body: &Bytes) -> Result<Map<String, Value>, Problem> {
     }
 }
 
-/// Rejects names the engine owns, fields the template does not declare, and computed
-/// fields. `null` is allowed only when `allow_null` (merge patch removes a field).
-fn check_fields<S>(
+/// Field-level validation against the manifest, shared with every other host.
+fn validate_body<S>(
     st: &AppState<S>,
     entity: &str,
     body: &Map<String, Value>,
-    allow_null: bool,
+    mode: ce_validate::Mode,
 ) -> Result<(), Problem> {
-    let fields = &st.manifest.value["entities"][entity]["fields"];
-    let mut errors = Vec::new();
-    for (k, v) in body {
-        let path = format!("/{k}");
-        if RESERVED.contains(&k.as_str()) {
-            errors.push(json!({"path": path, "code": "reserved_field"}));
-        } else if !fields[k].is_object() {
-            errors.push(json!({"path": path, "code": "unknown_field"}));
-        } else if fields[k]["computed"].is_string() {
-            errors.push(json!({"path": path, "code": "computed_field"}));
-        } else if v.is_null() && (!allow_null || fields[k]["required"] == true) {
-            let code = if allow_null {
-                "required"
-            } else {
-                "null_not_allowed"
-            };
-            errors.push(json!({"path": path, "code": code}));
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(Problem::validation("the body has invalid fields", errors))
-    }
-}
-
-fn missing_required<S>(
-    st: &AppState<S>,
-    entity: &str,
-    body: &Map<String, Value>,
-) -> Result<(), Problem> {
-    let errors: Vec<Value> = st.manifest.value["entities"][entity]["fields"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(k, f)| {
-            f["required"] == true && !f["computed"].is_string() && !body.contains_key(k.as_str())
-        })
-        .map(|(k, _)| json!({"path": format!("/{k}"), "code": "required"}))
-        .collect();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(Problem::validation("required fields are missing", errors))
-    }
+    ce_validate::validate(&st.manifest, entity, body, mode).map_err(|errors| {
+        Problem::validation(
+            "the body has invalid fields",
+            errors
+                .into_iter()
+                .map(|e| json!({"path": e.path, "code": e.code, "detail": e.detail}))
+                .collect(),
+        )
+    })
 }
 
 /// RFC 7396 JSON Merge Patch.
@@ -385,8 +340,7 @@ async fn create<S: Store + Send + Sync + 'static>(
         let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
         let key = idempotency_key(&headers)?;
         let obj = parse_object(&body.map_err(body_problem)?)?;
-        check_fields(&st, &entity, &obj, false)?;
-        missing_required(&st, &entity, &obj)?;
+        validate_body(&st, &entity, &obj, ce_validate::Mode::Create)?;
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
         let ent = entity.clone();
@@ -437,7 +391,7 @@ async fn update<S: Store + Send + Sync + 'static>(
         let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
         let expected = if_match(&headers)?;
         let patch = parse_object(&body.map_err(body_problem)?)?;
-        check_fields(&st, &entity, &patch, true)?;
+        validate_body(&st, &entity, &patch, ce_validate::Mode::Patch)?;
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
         let rec = blocking(&st, move |s| {

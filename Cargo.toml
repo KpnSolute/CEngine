@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ce-expr", "crates/ce-manifest", "crates/ce-query", "crates/ce-auth", "crates/ce-store", "crates/ce-calendar", "crates/ce-barcode", "crates/ce-state", "crates/ce-policy", "crates/ce-events", "crates/ce-store-pg", "crates/ce-migrate", "crates/ce-server"]
+members = ["crates/ce-expr", "crates/ce-manifest", "crates/ce-query", "crates/ce-auth", "crates/ce-store", "crates/ce-calendar", "crates/ce-barcode", "crates/ce-state", "crates/ce-policy", "crates/ce-events", "crates/ce-store-pg", "crates/ce-migrate", "crates/ce-server", "crates/ce-validate"]
 
 [workspace.package]
 version = "0.0.1"
