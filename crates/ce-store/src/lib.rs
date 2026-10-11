@@ -100,6 +100,20 @@ pub trait Store {
         self.insert(scope, entity, caller, idempotency_key)
     }
 
+    /// The first result stored for `idempotency_key` when it was used to create `entity` from
+    /// this same `caller` body, or `None` if the key is unused. A key used for a different
+    /// request is `IdempotencyKeyReused`. Lets the host replay a retry without recomputing
+    /// derived fields, which may no longer compute. The default never finds one.
+    fn replay_insert(
+        &self,
+        _scope: &TenantScope,
+        _entity: &str,
+        _caller: &Value,
+        _idempotency_key: &str,
+    ) -> Result<Option<Record>, StoreError> {
+        Ok(None)
+    }
+
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError>;
 
     /// Replaces `data` when `expected_version` matches the stored version.

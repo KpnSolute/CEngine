@@ -428,3 +428,82 @@ async fn a_retry_replays_even_when_a_referenced_record_changed_meanwhile() {
     assert_ne!(s, StatusCode::CREATED);
     close(api.app).await;
 }
+
+fn rated() -> Value {
+    json!({
+        "manifest_version": 1,
+        "template": {"name": "rated", "version": "0.1.0"},
+        "entities": {
+            "customer": {"fields": {"rating": {"type": "integer"}}},
+            "order": {"fields": {
+                "customer": {"type": "ref", "ref": "customer", "required": true},
+                "rating": {"type": "integer", "computed": "ref(customer).rating"}
+            }, "invariants": [{"name": "good", "expr": "rating > 0", "message_code": "order.bad_rating"}]}
+        },
+        "roles": {"owner": {"read": ["*"], "write": ["*"]}}
+    })
+}
+
+#[tokio::test]
+async fn a_retry_replays_even_when_the_rules_would_now_fail() {
+    let Some(url) = url() else { return };
+    let mut api = Api {
+        app: app(&url, rated()).await,
+        n: 0,
+    };
+    let (_, c) = api.post("customer", json!({"rating": 1})).await;
+    let cid = id(&c);
+    let uri = format!("/v1/{INST}/order");
+    let body = json!({"customer": cid});
+    let (s, first) = api
+        .call_keyed("POST", &uri, None, Some(body.clone()), "r1")
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{first}");
+    let (s, _) = api
+        .patch(
+            "customer",
+            &cid,
+            c["data"]["version"].as_u64().unwrap(),
+            json!({"rating": -1}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    // A new order is refused now, but the retry of the first one replays.
+    let (s, _) = api.post("order", body.clone()).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (s, again) = api.call_keyed("POST", &uri, None, Some(body), "r1").await;
+    assert_eq!(s, StatusCode::CREATED, "{again}");
+    assert_eq!(again["data"], first["data"]);
+    close(api.app).await;
+}
+
+#[tokio::test]
+async fn concurrent_children_of_one_parent_all_land_and_the_total_is_exact() {
+    let Some(url) = url() else { return };
+    let mut api = Api {
+        app: app(&url, capped()).await,
+        n: 0,
+    };
+    let (_, c) = api.post("customer", json!({"name": "Ada"})).await;
+    let (_, o) = api.post("order", json!({"customer": id(&c)})).await;
+    let oid = id(&o);
+    let mut tasks = Vec::new();
+    for i in 0..12 {
+        let mut a = Api {
+            app: api.app.clone(),
+            n: 1000 * (i + 1),
+        };
+        let oid = oid.clone();
+        tasks.push(tokio::spawn(async move {
+            a.post("item", json!({"order": oid, "price": "1.00"}))
+                .await
+                .0
+        }));
+    }
+    for t in tasks {
+        assert_eq!(t.await.unwrap(), StatusCode::CREATED);
+    }
+    assert_eq!(api.get("order", &oid).await["data"]["total"], "12.00");
+    assert_eq!(api.get("customer", &id(&c)).await["data"]["owed"], "12.00");
+    close(api.app).await;
+}

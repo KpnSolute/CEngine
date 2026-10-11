@@ -331,6 +331,37 @@ impl TypedPgStore {
     }
 }
 
+impl TypedPgStore {
+    /// The stored first result for an idempotency key, if the key was used for this same
+    /// request. A key used for a different request is an error.
+    fn replay_on(
+        &self,
+        c: &mut impl GenericClient,
+        scope: &TenantScope,
+        entity: &str,
+        caller: &Value,
+        key: &str,
+    ) -> Result<Option<Record>, StoreError> {
+        let sch = &self.schema;
+        let row = c
+            .query_opt(
+                &format!(
+                    r#"SELECT entity, payload, result FROM "{sch}"."_ce_idempotency"
+                       WHERE tenant_id = $1::text::uuid AND key = $2"#
+                ),
+                &[&scope.tenant_id(), &key],
+            )
+            .map_err(db)?;
+        let Some(row) = row else { return Ok(None) };
+        let (e, payload, result): (String, Value, Option<Value>) =
+            (row.get(0), row.get(1), row.get(2));
+        if e != entity || &payload != caller {
+            return Err(StoreError::IdempotencyKeyReused);
+        }
+        result.map(|r| replay(Some(r))).transpose()
+    }
+}
+
 fn replay(result: Option<Value>) -> Result<Record, StoreError> {
     let v = result.ok_or(StoreError::NotFound)?;
     Ok(Record {
@@ -571,7 +602,7 @@ impl TypedPgStore {
             r#"SELECT {} FROM "{}"."{entity}" WHERE "tenant_id" = $1::text::uuid AND "id" = $2::text::uuid{live}{}"#,
             ent.select_list(),
             self.schema,
-            if lock { " FOR UPDATE" } else { "" }
+            if lock { " FOR NO KEY UPDATE" } else { "" }
         );
         let row = c
             .query_opt(&sql, &[&tenant, &id])
@@ -761,6 +792,17 @@ impl Store for TypedPgStore {
         Ok(record)
     }
 
+    fn replay_insert(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: &Value,
+        idempotency_key: &str,
+    ) -> Result<Option<Record>, StoreError> {
+        let mut c = self.lock()?;
+        self.replay_on(&mut *c, scope, entity, caller, idempotency_key)
+    }
+
     fn insert_derived(
         &self,
         scope: &TenantScope,
@@ -868,6 +910,22 @@ impl Store for TypedTx<'_> {
             entity,
             data,
             None,
+            idempotency_key,
+        )
+    }
+
+    fn replay_insert(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: &Value,
+        idempotency_key: &str,
+    ) -> Result<Option<Record>, StoreError> {
+        self.store.replay_on(
+            &mut *self.tx.borrow_mut(),
+            scope,
+            entity,
+            caller,
             idempotency_key,
         )
     }

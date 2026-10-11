@@ -199,6 +199,13 @@ fn refresh_parents(
 fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Record>, Failure> {
     match op {
         Op::Create { data, key } => {
+            // A retry replays the first result even if the derived fields would no longer
+            // compute (the records they read may have changed since).
+            if let Some(rec) =
+                tx.replay_insert(env.scope, entity, &Value::Object(data.clone()), key)?
+            {
+                return Ok(Some(rec));
+            }
             let mut obj = data.clone();
             settle(tx, env, entity, None, &mut obj, None)?;
             // Retries are matched on the body as sent, not on values derived from other records.

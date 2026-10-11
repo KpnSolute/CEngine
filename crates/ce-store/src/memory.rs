@@ -83,6 +83,25 @@ impl Inner {
         Ok(record)
     }
 
+    fn replay(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: &Value,
+        key: &str,
+    ) -> Result<Option<Record>, StoreError> {
+        match self
+            .keys
+            .get(&(scope.tenant_id().to_string(), key.to_string()))
+        {
+            None => Ok(None),
+            Some((payload, original)) if original.entity == entity && payload == caller => {
+                Ok(Some(original.clone()))
+            }
+            Some(_) => Err(StoreError::IdempotencyKeyReused),
+        }
+    }
+
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
         match self.records.get(&key(scope, entity, id)) {
             Some(s) if !s.deleted => Ok(s.record.clone()),
@@ -174,6 +193,16 @@ impl Store for MemoryStore {
             .insert(scope, entity, data, None, idempotency_key)
     }
 
+    fn replay_insert(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: &Value,
+        key: &str,
+    ) -> Result<Option<Record>, StoreError> {
+        self.lock().replay(scope, entity, caller, key)
+    }
+
     fn insert_derived(
         &self,
         scope: &TenantScope,
@@ -261,6 +290,16 @@ impl Store for MemoryTx {
         self.inner
             .borrow_mut()
             .insert(scope, entity, data, None, idempotency_key)
+    }
+
+    fn replay_insert(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: &Value,
+        key: &str,
+    ) -> Result<Option<Record>, StoreError> {
+        self.inner.borrow().replay(scope, entity, caller, key)
     }
 
     fn insert_derived(
