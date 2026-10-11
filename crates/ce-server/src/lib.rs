@@ -9,11 +9,14 @@
 //! /v1/{inst}/{entity}/{id}` (If-Match required on writes; PATCH is JSON Merge Patch),
 //! `GET /_meta/health/{live,ready}`, `GET /_meta/manifest`, `GET /_meta/openapi`.
 //! Field types and limits are checked by `ce-validate`. `GET /v1/{inst}/{entity}` lists by
-//! keyset cursor on stores that support it (the typed Postgres store). Not yet: batch, actions,
-//! changesets, events, files, invariants.
+//! keyset cursor on stores that support it (the typed Postgres store). Every write runs as one
+//! store transaction with the parents whose totals it changes (see `writes`): computed fields
+//! (including sums over child records) and invariants (including `ref()`) are enforced there.
+//! Not yet: batch, actions, changesets, events, files.
 
 mod openapi;
 mod problem;
+mod writes;
 
 pub use problem::Problem;
 
@@ -216,18 +219,6 @@ fn validate_body<S>(
     })
 }
 
-/// Invariants of the manifest against the whole record, as a validation problem.
-fn check_invariants<S>(
-    st: &AppState<S>,
-    who: &Principal,
-    entity: &str,
-    rec: &Map<String, Value>,
-    old: Option<&Map<String, Value>>,
-) -> Result<(), Problem> {
-    ce_validate::check_invariants(&st.manifest, entity, rec, old, &invariant_context(st, who))
-        .map_err(invariant_problem)
-}
-
 fn invariant_context<S>(st: &AppState<S>, who: &Principal) -> ce_validate::Context {
     ce_validate::Context {
         actor_id: who.user_id.clone(),
@@ -247,7 +238,7 @@ fn invariant_problem(errors: Vec<ce_validate::FieldError>) -> Problem {
 }
 
 /// RFC 7396 JSON Merge Patch.
-fn merge_patch(target: &mut Value, patch: &Value) {
+pub(crate) fn merge_patch(target: &mut Value, patch: &Value) {
     if let Value::Object(p) = patch {
         if !target.is_object() {
             *target = Value::Object(Map::new());
@@ -317,6 +308,35 @@ where
         .await
         .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
         .map_err(store_problem)
+}
+
+/// Runs a create, patch or delete with everything it changes as one transaction.
+async fn write<S>(
+    st: &AppState<S>,
+    scope: ce_auth::TenantScope,
+    ctx: ce_validate::Context,
+    entity: String,
+    op: writes::Op,
+) -> Result<Option<Record>, Problem>
+where
+    S: Store + Send + Sync + 'static,
+{
+    let store = st.store.clone();
+    let manifest = st.manifest.clone();
+    tokio::task::spawn_blocking(move || {
+        let env = writes::Env {
+            manifest: &manifest,
+            scope: &scope,
+            ctx: &ctx,
+        };
+        writes::execute(&*store, &env, &entity, &op)
+    })
+    .await
+    .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+    .map_err(|f| match f {
+        writes::Failure::Store(e) => store_problem(e),
+        writes::Failure::Rules(errors) => invariant_problem(errors),
+    })
 }
 
 fn etag(version: u64) -> HeaderValue {
@@ -396,16 +416,17 @@ async fn create<S: Store + Send + Sync + 'static>(
             }
         }
         let ctx = invariant_context(&st, &who);
-        ce_validate::evaluate_computed(&st.manifest, &entity, &mut obj, None, &ctx)
-            .map_err(invariant_problem)?;
-        check_invariants(&st, &who, &entity, &obj, None)?;
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
-        let ent = entity.clone();
-        let rec = blocking(&st, move |s| {
-            s.insert(&scope, &ent, Value::Object(obj), Some(&key))
-        })
-        .await?;
+        let rec = write(
+            &st,
+            scope,
+            ctx,
+            entity.clone(),
+            writes::Op::Create { data: obj, key },
+        )
+        .await?
+        .ok_or_else(|| store_problem(StoreError::Backend("no record".into())))?;
         let mut res = record_response(StatusCode::CREATED, &rec, &rid, readable);
         if let Ok(loc) = HeaderValue::from_str(&format!("/v1/{inst}/{entity}/{}", rec.id)) {
             res.headers_mut().insert(header::LOCATION, loc);
@@ -450,32 +471,22 @@ async fn update<S: Store + Send + Sync + 'static>(
         let expected = if_match(&headers)?;
         let patch = parse_object(&body.map_err(body_problem)?)?;
         validate_body(&st, &entity, &patch, ce_validate::Mode::Patch)?;
-        let manifest = st.manifest.clone();
-        let ent = entity.clone();
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
-        let rec = blocking(&st, move |s| {
-            let current = s.get(&scope, &entity, &id)?;
-            if current.version != expected {
-                return Err(StoreError::VersionConflict {
-                    current: current.version,
-                });
-            }
-            let mut data = current.data.clone();
-            merge_patch(&mut data, &Value::Object(patch));
-            if let Some(rec) = data.as_object_mut() {
-                let old = current.data.as_object();
-                let checked = ce_validate::evaluate_computed(&manifest, &ent, rec, old, &ctx)
-                    .and_then(|()| ce_validate::check_invariants(&manifest, &ent, rec, old, &ctx));
-                if let Err(e) = checked {
-                    return Ok(Err(e));
-                }
-            }
-            s.update(&scope, &entity, &id, expected, data).map(Ok)
-        })
+        let rec = write(
+            &st,
+            scope,
+            ctx,
+            entity,
+            writes::Op::Patch {
+                id,
+                expected,
+                patch,
+            },
+        )
         .await?
-        .map_err(invariant_problem)?;
+        .ok_or_else(|| store_problem(StoreError::Backend("no record".into())))?;
         Ok(record_response(StatusCode::OK, &rec, &rid, readable))
     };
     finish(&rid, run.await)
@@ -490,8 +501,9 @@ async fn remove<S: Store + Send + Sync + 'static>(
     let run = async {
         let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
         let expected = if_match(&headers)?;
+        let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
-        blocking(&st, move |s| s.delete(&scope, &entity, &id, expected)).await?;
+        write(&st, scope, ctx, entity, writes::Op::Delete { id, expected }).await?;
         Ok(StatusCode::NO_CONTENT.into_response())
     };
     finish(&rid, run.await)

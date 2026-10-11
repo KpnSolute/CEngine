@@ -20,6 +20,11 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
 use std::str::FromStr;
 
+/// A stored JSON value as an expression value, by the field type it belongs to.
+pub fn json_to_expr(ty: &str, v: &Value) -> Ev {
+    to_expr(ty, v)
+}
+
 fn to_expr(ty: &str, v: &Value) -> Ev {
     match v {
         Value::Null => Ev::Null,
