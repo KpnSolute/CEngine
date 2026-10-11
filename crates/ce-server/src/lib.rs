@@ -17,7 +17,7 @@ pub use problem::Problem;
 
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{rejection::BytesRejection, DefaultBodyLimit, Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -176,6 +176,21 @@ fn idempotency_key(headers: &HeaderMap) -> Result<String, Problem> {
     Ok(k.to_string())
 }
 
+fn body_problem(e: BytesRejection) -> Problem {
+    if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        Problem::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            format!("the body may be at most {MAX_BODY} bytes"),
+        )
+    } else {
+        Problem::validation(
+            "the body could not be read",
+            vec![json!({"path": "", "code": "unreadable_body"})],
+        )
+    }
+}
+
 fn parse_object(body: &Bytes) -> Result<Map<String, Value>, Problem> {
     match serde_json::from_slice::<Value>(body) {
         Ok(Value::Object(m)) => Ok(m),
@@ -208,8 +223,13 @@ fn check_fields<S>(
             errors.push(json!({"path": path, "code": "unknown_field"}));
         } else if fields[k]["computed"].is_string() {
             errors.push(json!({"path": path, "code": "computed_field"}));
-        } else if v.is_null() && !allow_null {
-            errors.push(json!({"path": path, "code": "null_not_allowed"}));
+        } else if v.is_null() && (!allow_null || fields[k]["required"] == true) {
+            let code = if allow_null {
+                "required"
+            } else {
+                "null_not_allowed"
+            };
+            errors.push(json!({"path": path, "code": code}));
         }
     }
     if errors.is_empty() {
@@ -228,7 +248,9 @@ fn missing_required<S>(
         .as_object()
         .into_iter()
         .flatten()
-        .filter(|(k, f)| f["required"] == true && !body.contains_key(k.as_str()))
+        .filter(|(k, f)| {
+            f["required"] == true && !f["computed"].is_string() && !body.contains_key(k.as_str())
+        })
         .map(|(k, _)| json!({"path": format!("/{k}"), "code": "required"}))
         .collect();
     if errors.is_empty() {
@@ -266,6 +288,7 @@ fn store_problem(e: StoreError) -> Problem {
                 "version_conflict",
                 "the record changed since you read it",
             );
+            p.retryable = true;
             p.extra.push(("current_version", json!(current)));
             p
         }
@@ -310,8 +333,15 @@ fn record_json(r: &Record) -> Value {
     Value::Object(obj)
 }
 
-fn record_response(status: StatusCode, r: &Record, rid: &str) -> Response {
-    let body = json!({"data": record_json(r), "meta": {"request_id": rid, "version": r.version}});
+/// Callers without read access to the entity get only the id and version back, so a
+/// write grant never discloses stored fields.
+fn record_response(status: StatusCode, r: &Record, rid: &str, can_read: bool) -> Response {
+    let data = if can_read {
+        record_json(r)
+    } else {
+        json!({"id": r.id, "version": r.version})
+    };
+    let body = json!({"data": data, "meta": {"request_id": rid, "version": r.version}});
     let mut res = (status, Json(body)).into_response();
     res.headers_mut().insert(header::ETAG, etag(r.version));
     res
@@ -348,22 +378,23 @@ async fn create<S: Store + Send + Sync + 'static>(
     State(st): State<AppState<S>>,
     Path((inst, entity)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let rid = request_id();
     let run = async {
         let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
         let key = idempotency_key(&headers)?;
-        let obj = parse_object(&body)?;
+        let obj = parse_object(&body.map_err(body_problem)?)?;
         check_fields(&st, &entity, &obj, false)?;
         missing_required(&st, &entity, &obj)?;
         let scope = who.scope().clone();
+        let readable = st.policy.can_read(&who.roles, &entity);
         let ent = entity.clone();
         let rec = blocking(&st, move |s| {
             s.insert(&scope, &ent, Value::Object(obj), Some(&key))
         })
         .await?;
-        let mut res = record_response(StatusCode::CREATED, &rec, &rid);
+        let mut res = record_response(StatusCode::CREATED, &rec, &rid, readable);
         if let Ok(loc) = HeaderValue::from_str(&format!("/v1/{inst}/{entity}/{}", rec.id)) {
             res.headers_mut().insert(header::LOCATION, loc);
         }
@@ -390,7 +421,7 @@ async fn read<S: Store + Send + Sync + 'static>(
             res.headers_mut().insert(header::ETAG, etag(rec.version));
             return Ok(res);
         }
-        Ok(record_response(StatusCode::OK, &rec, &rid))
+        Ok(record_response(StatusCode::OK, &rec, &rid, true))
     };
     finish(&rid, run.await)
 }
@@ -399,15 +430,16 @@ async fn update<S: Store + Send + Sync + 'static>(
     State(st): State<AppState<S>>,
     Path((inst, entity, id)): Path<(String, String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let rid = request_id();
     let run = async {
         let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
         let expected = if_match(&headers)?;
-        let patch = parse_object(&body)?;
+        let patch = parse_object(&body.map_err(body_problem)?)?;
         check_fields(&st, &entity, &patch, true)?;
         let scope = who.scope().clone();
+        let readable = st.policy.can_read(&who.roles, &entity);
         let rec = blocking(&st, move |s| {
             let current = s.get(&scope, &entity, &id)?;
             if current.version != expected {
@@ -420,7 +452,7 @@ async fn update<S: Store + Send + Sync + 'static>(
             s.update(&scope, &entity, &id, expected, data)
         })
         .await?;
-        Ok(record_response(StatusCode::OK, &rec, &rid))
+        Ok(record_response(StatusCode::OK, &rec, &rid, readable))
     };
     finish(&rid, run.await)
 }

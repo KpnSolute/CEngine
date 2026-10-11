@@ -39,11 +39,17 @@ fn manager(tenant: &str) -> String {
 }
 
 fn app() -> Router {
+    app_with(|_| {})
+}
+
+fn app_with(edit: impl FnOnce(&mut Value)) -> Router {
     let path = format!(
         "{}/../../spec/examples/inventory.json",
         env!("CARGO_MANIFEST_DIR")
     );
-    let m = validate(std::fs::read_to_string(path).unwrap().as_bytes()).unwrap();
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    edit(&mut v);
+    let m = validate(v.to_string().as_bytes()).expect("edited manifest is still valid");
     let mut st = AppState::new(MemoryStore::new(), Verifier::new(KEY).unwrap(), m, INST);
     st.now = std::sync::Arc::new(|| 1000);
     router(st)
@@ -362,6 +368,7 @@ async fn patch_needs_if_match_and_merges() {
     assert_eq!(r.status, StatusCode::CONFLICT);
     assert_eq!(r.body["code"], "version_conflict");
     assert_eq!(r.body["current_version"], 1);
+    assert_eq!(r.body["retryable"], true);
     let r = call(
         &a,
         "PATCH",
@@ -466,6 +473,96 @@ async fn oversized_bodies_are_refused() {
     let big = "x".repeat(2 * 1024 * 1024);
     let r = create(&a, &manager(T1), "k1", json!({"name": big, "unit_cost": 1})).await;
     assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(r.headers[header::CONTENT_TYPE], "application/problem+json");
+    assert_eq!(r.body["code"], "payload_too_large");
+    assert!(!r.body["request_id"].as_str().unwrap().is_empty());
+    // token check still comes first for an oversized body
+    let r = call(
+        &a,
+        "POST",
+        &format!("/v1/{INST}/item"),
+        None,
+        &[("idempotency-key", "k2")],
+        Some(json!({"name": big, "unit_cost": 1})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn write_only_roles_never_get_stored_fields_back() {
+    let a = app_with(|m| {
+        m["roles"]["dropbox"] = json!({"read": [], "write": ["item"]});
+    });
+    let drop = token(T1, &["dropbox"], 2000);
+    let made = create(&a, &drop, "k1", item()).await;
+    assert_eq!(made.status, StatusCode::CREATED);
+    assert_eq!(
+        made.body["data"],
+        json!({"id": made.body["data"]["id"], "version": 1})
+    );
+    let uri = format!(
+        "/v1/{INST}/item/{}",
+        made.body["data"]["id"].as_str().unwrap()
+    );
+    // an empty patch must not reveal the record either
+    let r = call(
+        &a,
+        "PATCH",
+        &uri,
+        Some(&drop),
+        &[("if-match", "\"1\"")],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        r.body["data"],
+        json!({"id": made.body["data"]["id"], "version": 2})
+    );
+    // and it cannot read
+    let r = call(&a, "GET", &uri, Some(&drop), &[], None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    // a reader still gets the full record
+    let r = call(&a, "GET", &uri, Some(&manager(T1)), &[], None).await;
+    assert_eq!(r.body["data"]["name"], "flour");
+}
+
+#[tokio::test]
+async fn patch_cannot_remove_required_fields() {
+    let a = app();
+    let tok = manager(T1);
+    let made = create(&a, &tok, "k1", item()).await;
+    let uri = format!(
+        "/v1/{INST}/item/{}",
+        made.body["data"]["id"].as_str().unwrap()
+    );
+    let r = call(
+        &a,
+        "PATCH",
+        &uri,
+        Some(&tok),
+        &[("if-match", "\"1\"")],
+        Some(json!({"name": null})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        r.body["errors"][0],
+        json!({"path": "/name", "code": "required"})
+    );
+    let r = call(&a, "GET", &uri, Some(&tok), &[], None).await;
+    assert_eq!(r.body["data"]["name"], "flour");
+    assert_eq!(r.body["data"]["version"], 1);
+}
+
+#[tokio::test]
+async fn required_computed_fields_are_not_asked_of_callers() {
+    let a = app_with(|m| {
+        m["entities"]["item"]["fields"]["value"]["required"] = json!(true);
+    });
+    let r = create(&a, &manager(T1), "k1", item()).await;
+    assert_eq!(r.status, StatusCode::CREATED);
 }
 
 #[tokio::test]
