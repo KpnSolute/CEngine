@@ -395,8 +395,17 @@ fn built_in_tools_install_and_run_on_the_typed_store() {
         "template": {"name": "shop", "version": "0.1.0"},
         "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}}
     });
-    let composed =
-        ce_tools::compose(&shell, &["customers", "tasks", "notifications", "bookings"]).unwrap();
+    let composed = ce_tools::compose(
+        &shell,
+        &[
+            "customers",
+            "tasks",
+            "notifications",
+            "bookings",
+            "invoicing",
+        ],
+    )
+    .unwrap();
     let m = ce_manifest::validate(composed.to_string().as_bytes()).unwrap();
     let name = format!(
         "ce_typed_{}_{}",
@@ -462,5 +471,22 @@ fn built_in_tools_install_and_run_on_the_typed_store() {
         )
         .unwrap();
     assert_eq!(b.data["status"], "requested");
+    let inv = s
+        .insert(
+            &sc,
+            "invoice",
+            json!({"number": "INV-1", "bill_to_name": "Ada", "currency": "USD", "issue_date": "2026-11-01"}),
+            None,
+        )
+        .unwrap();
+    assert_eq!(inv.data["status"], "draft");
+    assert_eq!(inv.data["total"], "0.00");
+    s.insert(
+        &sc,
+        "invoice_line",
+        json!({"invoice": inv.id, "description": "work", "quantity": "2.5", "unit_price": "10.00", "line_total": "25.00"}),
+        None,
+    )
+    .unwrap();
     s.drop_schema().unwrap();
 }

@@ -22,7 +22,16 @@ fn every_tool_composes_into_a_valid_manifest_alone_and_together() {
         .iter()
         .map(|t| t["tool"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names, ["customers", "tasks", "notifications", "bookings"]);
+    assert_eq!(
+        names,
+        [
+            "customers",
+            "tasks",
+            "notifications",
+            "bookings",
+            "invoicing"
+        ]
+    );
     for n in &names {
         valid(&compose(&shell(), &[n.as_str()]).unwrap());
     }
@@ -35,6 +44,8 @@ fn every_tool_composes_into_a_valid_manifest_alone_and_together() {
         "customer_contact",
         "task",
         "notification",
+        "invoice",
+        "invoice_line",
     ] {
         assert!(m["entities"][e].is_object(), "{e}");
     }
@@ -101,4 +112,61 @@ fn personal_data_is_marked_and_tools_name_no_provider() {
     ] {
         assert!(!text.to_lowercase().contains(word), "{word}");
     }
+}
+
+#[test]
+fn invoicing_checks_totals_with_invariants() {
+    let m = compose(&shell(), &["invoicing"]).unwrap();
+    let inv = &m["entities"]["invoice"]["invariants"];
+    let names: Vec<&str> = inv
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["total_adds_up", "non_negative", "due_after_issue"]);
+    assert_eq!(
+        m["entities"]["invoice"]["fields"]["bill_to_email"]["pii"],
+        true
+    );
+}
+
+#[test]
+fn invoice_rules_are_enforced_by_the_checker() {
+    let m = ce_manifest::validate(
+        compose(&shell(), &["invoicing"])
+            .unwrap()
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let ctx = ce_validate::Context {
+        actor_id: "u".into(),
+        actor_role: None,
+        now_unix: 0,
+    };
+    let run = |entity: &str, v: Value| {
+        ce_validate::check_invariants(&m, entity, v.as_object().unwrap(), None, &ctx)
+            .map_err(|e| e.into_iter().map(|x| x.detail).collect::<Vec<_>>())
+    };
+    let inv = |sub: &str, tax: &str, total: &str, due: &str| json!({"subtotal": sub, "tax": tax, "total": total, "issue_date": "2026-11-01", "due_date": due});
+    assert_eq!(
+        run("invoice", inv("100.00", "8.25", "108.25", "2026-12-01")),
+        Ok(())
+    );
+    assert_eq!(
+        run("invoice", inv("100.00", "8.25", "108.00", "2026-12-01")),
+        Err(vec!["invoice.total_mismatch".to_string()])
+    );
+    assert_eq!(
+        run("invoice", inv("100.00", "8.25", "108.25", "2026-10-01")),
+        Err(vec!["invoice.due_before_issue".to_string()])
+    );
+    let line = |q: &str, p: &str, t: &str| json!({"quantity": q, "unit_price": p, "line_total": t});
+    assert_eq!(run("invoice_line", line("2.5", "10.00", "25.00")), Ok(()));
+    assert_eq!(run("invoice_line", line("3", "0.335", "1.01")), Ok(())); // 1.005 rounds half up
+    assert_eq!(
+        run("invoice_line", line("2.5", "10.00", "24.00")),
+        Err(vec!["invoice.line_mismatch".to_string()])
+    );
 }

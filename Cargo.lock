@@ -348,6 +348,7 @@ name = "ce-tools"
 version = "0.0.1"
 dependencies = [
  "ce-manifest",
+ "ce-validate",
  "serde_json",
 ]
 
