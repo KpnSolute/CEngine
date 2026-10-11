@@ -327,7 +327,10 @@ version = "0.0.1"
 dependencies = [
  "base64",
  "ce-auth",
+ "ce-manifest",
+ "ce-migrate",
  "ce-store",
+ "ce-validate",
  "hmac 0.12.1",
  "postgres",
  "serde_json",

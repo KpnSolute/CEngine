@@ -37,6 +37,9 @@ pub enum StoreError {
     },
     IdempotencyKeyReused,
     BadData(&'static str),
+    /// The write broke a rule the database enforces (unique, reference, check, not null).
+    /// The text names the kind, never the table or value, so it is safe to show callers.
+    Constraint(&'static str),
     /// The backend failed (connection, SQL). The message is for logs, not for callers.
     Backend(String),
 }

@@ -253,6 +253,11 @@ fn store_problem(e: StoreError) -> Problem {
             "this Idempotency-Key was already used for a different request",
         ),
         StoreError::BadData(why) => Problem::validation(why, Vec::new()),
+        StoreError::Constraint(kind) => Problem::new(
+            StatusCode::CONFLICT,
+            "constraint_violation",
+            format!("the write breaks a {kind} rule"),
+        ),
         // The cause goes to logs, never to the caller.
         StoreError::Backend(_) => Problem::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -339,8 +344,13 @@ async fn create<S: Store + Send + Sync + 'static>(
     let run = async {
         let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
         let key = idempotency_key(&headers)?;
-        let obj = parse_object(&body.map_err(body_problem)?)?;
+        let mut obj = parse_object(&body.map_err(body_problem)?)?;
         validate_body(&st, &entity, &obj, ce_validate::Mode::Create)?;
+        // Callers cannot choose the state; the server sets the initial one for every backend.
+        let sm = &st.manifest.value["entities"][entity.as_str()]["state"];
+        if let (Some(f), Some(i)) = (sm["field"].as_str(), sm["initial"].as_str()) {
+            obj.insert(f.to_string(), Value::String(i.to_string()));
+        }
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
         let ent = entity.clone();

@@ -649,3 +649,26 @@ async fn field_types_and_limits_come_from_the_manifest() {
     let g = call(&a, "GET", &uri, Some(&tok), &[], None).await;
     assert_eq!(g.body["data"]["version"], 1);
 }
+
+#[tokio::test]
+async fn create_sets_the_initial_state_and_refuses_a_caller_choice() {
+    let a = app();
+    let tok = manager(T1);
+    let path = format!("/v1/{INST}/period");
+    let h = [("idempotency-key", "p1")];
+    let r = call(
+        &a,
+        "POST",
+        &path,
+        Some(&tok),
+        &h,
+        Some(json!({"month": "2026-01-01"})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CREATED);
+    assert_eq!(r.body["data"]["state"], "open");
+    let h = [("idempotency-key", "p2")];
+    let body = json!({"month": "2026-02-01", "state": "published"});
+    let r = call(&a, "POST", &path, Some(&tok), &h, Some(body)).await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+}
