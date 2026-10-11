@@ -4,7 +4,8 @@
 //!
 //! Rules, each tested:
 //! 1. Callers may not set engine-owned names (`id`, `tenant_id`, `version`, timestamps),
-//!    fields the template does not declare, or computed fields.
+//!    fields the template does not declare, computed fields, or the state field (state moves
+//!    only through actions; the store sets the initial state on create).
 //! 2. Every non-computed required field must be present and not null on create. On patch a
 //!    required field may be omitted (it keeps its value) but never set to null.
 //! 3. `null` on an optional field means "remove" and is allowed only on patch.
@@ -68,6 +69,7 @@ pub fn validate(
             detail: format!("no entity {entity}"),
         }]);
     };
+    let state_field = ent["state"]["field"].as_str();
     let mut errors = Vec::new();
     let mut names: Vec<&String> = body.keys().collect();
     names.sort();
@@ -75,6 +77,10 @@ pub fn validate(
         let v = &body[k];
         if RESERVED.contains(&k.as_str()) {
             errors.push(err(k, "reserved_field", "set by the engine"));
+            continue;
+        }
+        if state_field == Some(k.as_str()) {
+            errors.push(err(k, "state_field", "changes only through actions"));
             continue;
         }
         let Some(f) = fields.get(k) else {
@@ -101,7 +107,10 @@ pub fn validate(
         let mut missing: Vec<&String> = fields
             .iter()
             .filter(|(k, f)| {
-                f["required"] == true && !f["computed"].is_string() && !body.contains_key(*k)
+                f["required"] == true
+                    && !f["computed"].is_string()
+                    && state_field != Some(k.as_str())
+                    && !body.contains_key(*k)
             })
             .map(|(k, _)| k)
             .collect();

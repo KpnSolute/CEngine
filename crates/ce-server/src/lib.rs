@@ -253,6 +253,11 @@ fn store_problem(e: StoreError) -> Problem {
             "this Idempotency-Key was already used for a different request",
         ),
         StoreError::BadData(why) => Problem::validation(why, Vec::new()),
+        StoreError::Constraint(kind) => Problem::new(
+            StatusCode::CONFLICT,
+            "constraint_violation",
+            format!("the write breaks a {kind} rule"),
+        ),
         // The cause goes to logs, never to the caller.
         StoreError::Backend(_) => Problem::new(
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -20,8 +20,10 @@ fn manifest() -> Manifest {
                 "extra":  {"type": "json"},
                 "doc":    {"type": "file"},
                 "total":  {"type": "decimal", "precision": 8, "scale": 2, "required": true,
-                           "computed": "price * 2"}
-            }}
+                           "computed": "price * 2"},
+                "phase":  {"type": "enum", "values": ["new", "done"], "required": true}
+            }, "state": {"field": "phase", "initial": "new", "states": {
+                "new": {"code": 100, "to": ["done"]}, "done": {"code": 600}}}}
         },
         "roles": {"admin": {"read": ["*"], "write": ["*"]}},
         "runtime": {"storage": {"relational": true}}
@@ -192,4 +194,21 @@ fn unknown_entity_is_one_body_level_error() {
     let e = validate(&manifest(), "ghost", &Map::new(), Mode::Create).unwrap_err();
     assert_eq!(e.len(), 1);
     assert_eq!((e[0].path.as_str(), e[0].code), ("", "unknown_entity"));
+}
+
+#[test]
+fn the_state_field_cannot_be_set_and_is_not_required_from_callers() {
+    // `phase` is declared and required, yet a create without it is fine
+    assert_eq!(check(json!({"name": "ok"}), Mode::Create), Ok(()));
+    for mode in [Mode::Create, Mode::Patch] {
+        assert_eq!(
+            check(json!({"name": "ok", "phase": "done"}), mode),
+            Err(vec![("/phase".to_string(), "state_field")])
+        );
+    }
+    // null cannot be used to clear it either
+    assert_eq!(
+        check(json!({"name": "ok", "phase": null}), Mode::Patch),
+        Err(vec![("/phase".to_string(), "state_field")])
+    );
 }

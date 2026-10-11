@@ -19,7 +19,7 @@ pub struct Issue {
     pub message: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Manifest {
     pub value: Value,
     /// Hex SHA-256 of the compact, key-sorted JSON.
