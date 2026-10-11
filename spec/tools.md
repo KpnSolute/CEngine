@@ -23,4 +23,4 @@ First wave in 0.1, status:
 
 Invariants (such as a booking's end after its start) are enforced by the server on create and patch (`ce_validate::check_invariants`). Computed fields are evaluated first (`ce_validate::evaluate_computed`: dependency order, decimals rounded half-up to the field's scale), so rules can read them. Rules that use `ref()` or read a computed sum over other records are skipped for now; `unenforced_invariants` lists them.
 
-Second wave (invoicing, search, import/export) and the rest are not started.
+Second wave: invoicing is built; `ce-io` does CSV import and export (see its crate docs). Search and the rest are not started.

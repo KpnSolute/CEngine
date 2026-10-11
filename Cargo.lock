@@ -235,6 +235,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-io"
+version = "0.0.1"
+dependencies = [
+ "ce-manifest",
+ "ce-validate",
+ "serde_json",
+]
+
+[[package]]
 name = "ce-manifest"
 version = "0.0.1"
 dependencies = [
