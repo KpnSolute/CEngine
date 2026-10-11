@@ -15,6 +15,8 @@
 //! | `CE_INSTALLATION` | installation id used in URLs, `/v1/{id}/...` (required) |
 //! | `CE_SCHEMA` | Postgres schema name (default `ce_` + the installation id) |
 //! | `CE_POOL_SIZE` | most database connections open at once (default 8) |
+//! | `CE_DB_TLS` | `off` (default), `webpki` (public roots) or `ca` (needs `CE_DB_CA`, a PEM file) |
+//! | `CE_DB_CA` | path to the CA certificate(s) the database's certificate must chain to |
 //! | `CE_BIND` | listen address (default `127.0.0.1:8080`) |
 
 use ce_auth::Verifier;
@@ -44,9 +46,24 @@ fn default_schema(installation: &str) -> String {
     format!("ce_{body}")
 }
 
-fn schema_exists(url: &str, schema: &str) -> Result<bool, String> {
-    let mut client = postgres::Client::connect(url, postgres::NoTls)
-        .map_err(|e| format!("cannot connect to the database: {e}"))?;
+fn db_tls() -> Result<ce_store_pg::Tls, String> {
+    let mode = std::env::var("CE_DB_TLS").unwrap_or_default();
+    match mode.as_str() {
+        "" | "off" => Ok(ce_store_pg::Tls::Off),
+        "webpki" => Ok(ce_store_pg::Tls::WebPki),
+        "ca" => {
+            let path = var("CE_DB_CA")?;
+            std::fs::read(&path)
+                .map(ce_store_pg::Tls::Ca)
+                .map_err(|e| format!("cannot read {path}: {e}"))
+        }
+        _ => Err("CE_DB_TLS must be off, webpki or ca".to_string()),
+    }
+}
+
+fn schema_exists(url: &str, tls: &ce_store_pg::Tls, schema: &str) -> Result<bool, String> {
+    let mut client = ce_store_pg::connect(url, tls)
+        .map_err(|e| format!("cannot connect to the database: {e:?}"))?;
     let rows = client
         .query(
             "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
@@ -71,7 +88,10 @@ fn run() -> Result<(), String> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_schema(&installation));
-    let mut pool = ce_store_pg::PoolConfig::default();
+    let mut pool = ce_store_pg::PoolConfig {
+        tls: db_tls()?,
+        ..Default::default()
+    };
     if let Ok(v) = std::env::var("CE_POOL_SIZE") {
         pool.max = v
             .parse::<usize>()
@@ -94,13 +114,13 @@ fn run() -> Result<(), String> {
 
     // Blocking Postgres work happens here, before and after the async runtime, never inside it.
     if cmd == "install" {
-        let store = TypedPgStore::install_with(&url, &manifest, &schema, pool)
+        let store = TypedPgStore::install_with(&url, &manifest, &schema, pool.clone())
             .map_err(|e| format!("install failed: {e:?}"))?;
         drop(store);
         println!("installed schema {schema}");
         return Ok(());
     }
-    if !schema_exists(&url, &schema)? {
+    if !schema_exists(&url, &pool.tls, &schema)? {
         return Err(format!(
             "schema {schema} does not exist (run `ce-serve install` first)"
         ));
