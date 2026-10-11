@@ -67,6 +67,13 @@ Three-valued logic. `null == null` is **true**; any other comparison with null i
 | `sum(list)`, `count(list)` | aggregates, **only inside `computed` on a parent over `children(entity, field)`** |
 | `children(entity, ref_field)` | rows of a child entity pointing here (aggregate source) |
 
+Aggregates take exactly `children(entity, field)` or `children(entity, field).attr`. `sum` skips
+nulls, and the sum of no rows is `0`; it is an int unless any value is a decimal. `count(children(e, f))`
+counts rows, `count(children(e, f).attr)` counts rows where `attr` is not null. Deleted rows are
+not children. `ref(field).attr` reads one attribute of the referenced row, and is null when the ref
+is null or the row is gone. Evaluation needs the store; the pure evaluator reports `Aggregate`.
+A failed lookup fails the write, it never counts as zero or passes a rule.
+
 Months are **1 to 12** everywhere. The 0-indexed month storage seen in MJCC is
 never exposed through the language.
 
