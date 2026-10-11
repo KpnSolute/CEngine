@@ -139,10 +139,10 @@ fn state_is_engine_managed() {
     let Some(url) = url() else { return };
     let s = fresh(&url);
     let sc = scope();
-    assert!(matches!(
-        s.insert(&sc, "ticket", json!({"state": "closed"}), None),
-        Err(StoreError::BadData(_))
-    ));
+    let c = s
+        .insert(&sc, "ticket", json!({"state": "closed"}), None)
+        .unwrap();
+    assert_eq!(c.data["state"], "open");
     let t = s
         .insert(&sc, "ticket", json!({"title": "a"}), None)
         .unwrap();
@@ -170,4 +170,22 @@ fn hard_delete_when_soft_delete_is_off() {
     s.delete(&sc, "ticket", &t.id, 1).unwrap();
     assert_eq!(s.get(&sc, "ticket", &t.id), Err(StoreError::NotFound));
     s.drop_schema().unwrap();
+}
+
+#[test]
+fn required_computed_fields_are_refused_at_install() {
+    let Some(url) = url() else { return };
+    let mut m = serde_json::to_value(&manifest().value).unwrap();
+    m["entities"]["item"]["fields"]["total"] =
+        json!({"type": "integer", "computed": "n * 2", "required": true});
+    let m = ce_manifest::validate(m.to_string().as_bytes()).unwrap_or_else(|e| panic!("{e:?}"));
+    let name = format!(
+        "ce_typed_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    );
+    assert!(matches!(
+        TypedPgStore::install(&url, &m, &name),
+        Err(StoreError::BadData(_))
+    ));
 }

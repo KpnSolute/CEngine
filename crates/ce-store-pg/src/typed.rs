@@ -215,6 +215,12 @@ impl TypedPgStore {
                 let (true, Some(cast)) = (ident_ok(fname), cast_of(ty)) else {
                     return Err(bad);
                 };
+                // No evaluator exists yet, so a required computed column could never be filled.
+                if f["computed"].is_string() && f["required"] == true {
+                    return Err(StoreError::BadData(
+                        "a computed field cannot be required until computed fields are evaluated",
+                    ));
+                }
                 cols.push(Col {
                     name: fname.clone(),
                     cast,
@@ -316,6 +322,12 @@ impl Store for TypedPgStore {
         if !is_uuid(scope.tenant_id()) {
             return Err(StoreError::BadData("tenant id is not a uuid"));
         }
+        // The store owns the state: any incoming value is ignored and the initial state is set.
+        let mut obj = obj.clone();
+        if let Some(s) = &ent.state {
+            obj.remove(&s.field);
+        }
+        let obj = &obj;
         self.check_body(entity, obj, Mode::Create)?;
 
         // Columns and values: engine-owned first, then caller fields, defaults, initial state.
