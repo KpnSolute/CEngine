@@ -12,16 +12,17 @@ ce-manifest = { path = "../ce-manifest" }
 ce-policy = { path = "../ce-policy" }
 ce-store = { path = "../ce-store" }
 ce-validate = { path = "../ce-validate" }
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
 
 [dev-dependencies]
+ce-store-pg = { path = "../ce-store-pg" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 hmac = "0.12"
 sha2 = "0.10"
-base64 = "0.22"

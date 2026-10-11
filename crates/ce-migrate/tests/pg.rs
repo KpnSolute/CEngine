@@ -86,6 +86,9 @@ fn run(
     entity: &str,
     req: &ListRequest,
 ) -> Vec<postgres::Row> {
+    let mut req = req.clone();
+    req.select.get_or_insert_with(|| vec!["name".to_string()]);
+    let req = &req;
     let planned = plan_list(
         m,
         &Target {
@@ -170,7 +173,7 @@ fn planner_sql_runs_and_isolates_tenants() {
         ..Default::default()
     };
     let rows = run(&mut c, &m, &schema, A, "item", &req);
-    let names: Vec<String> = rows.iter().map(|r| r.get("name")).collect();
+    let names: Vec<String> = rows.iter().map(name_of).collect();
     assert_eq!(names, ["Beans", "Oil", "Rice"]);
 
     // Tenant B sees only its own row.
@@ -190,7 +193,7 @@ fn planner_sql_runs_and_isolates_tenants() {
         ..Default::default()
     };
     let rows = run(&mut c, &m, &schema, A, "item", &req);
-    let names: Vec<String> = rows.iter().map(|r| r.get("name")).collect();
+    let names: Vec<String> = rows.iter().map(name_of).collect();
     assert_eq!(names, ["Beans", "Oil"]);
 
     // Keyset page: after "Beans" (with its id) comes "Oil".
@@ -211,8 +214,10 @@ fn planner_sql_runs_and_isolates_tenants() {
     );
     // limit + 1 rows come back; the extra one proves another page exists.
     assert_eq!(first.len(), 2);
-    let id: uuid_text::Text = first[0].get("id");
-    let after = vec![json!(first[0].get::<_, String>("name")), json!(id.0)];
+    let after = vec![
+        json!(name_of(&first[0])),
+        json!(first[0].get::<_, String>(0)),
+    ];
     let next = run(
         &mut c,
         &m,
@@ -229,7 +234,7 @@ fn planner_sql_runs_and_isolates_tenants() {
             ..Default::default()
         },
     );
-    assert_eq!(next[0].get::<_, String>("name"), "Oil");
+    assert_eq!(name_of(&next[0]), "Oil");
 
     drop_schema(&mut c, &schema);
 }
@@ -256,30 +261,13 @@ fn a_record_cannot_reference_another_tenants_record() {
     drop_schema(&mut c, &schema);
 }
 
-/// `uuid` columns read back as text by casting in SQL would change the planner's output, so
-/// the tests read them through this small wrapper instead.
-mod uuid_text {
-    use postgres::types::{FromSql, Type};
-    pub struct Text(pub String);
-    impl<'a> FromSql<'a> for Text {
-        fn from_sql(
-            _: &Type,
-            raw: &'a [u8],
-        ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-            let h: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-            Ok(Text(format!(
-                "{}-{}-{}-{}-{}",
-                &h[0..8],
-                &h[8..12],
-                &h[12..16],
-                &h[16..20],
-                &h[20..32]
-            )))
-        }
-        fn accepts(ty: &Type) -> bool {
-            *ty == Type::UUID
-        }
-    }
+/// The planner's result shape: column 0 is the id as text, 1 the version, 2.. the selected fields
+/// as `jsonb`. These tests always select `name`.
+fn name_of(r: &postgres::Row) -> String {
+    r.get::<_, serde_json::Value>(2)
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 fn insert_period(c: &mut Client, m: &Manifest, schema: &str, id: &str, tenant: &str) {

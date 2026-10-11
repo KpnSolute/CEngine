@@ -83,11 +83,28 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
         let if_match = json!({"name": "If-Match", "in": "header", "required": true, "schema": {"type": "string"}});
         let id_param =
             json!({"name": "id", "in": "path", "required": true, "schema": {"type": "string"}});
+        let list_params: Vec<Value> = ["select", "sort", "limit", "after", "filter"]
+            .iter()
+            .map(|p| json!({"name": p, "in": "query", "required": false, "schema": {"type": "string"}}))
+            .collect();
+        let mut list_responses = json!({"200": {"description": "one page",
+            "content": {"application/json": {"schema": {"type": "object", "properties": {
+                "data": {"type": "array", "items": reference},
+                "meta": {"type": "object", "properties": {"next": {"type": ["string", "null"]}}}}}}}}});
         let mut post_responses = json!({"201": single});
         let mut get_responses = json!({"200": single, "304": {"description": "not modified"}});
         let mut patch_responses = json!({"200": single});
         let mut delete_responses = json!({"204": {"description": "deleted"}});
         for (r, codes) in [
+            (
+                &mut list_responses,
+                &[
+                    ("401", "unauthenticated"),
+                    ("403", "forbidden"),
+                    ("404", "not_found"),
+                    ("422", "validation_failed"),
+                ][..],
+            ),
             (
                 &mut post_responses,
                 &[
@@ -134,7 +151,11 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
         }
         paths.insert(
             base.clone(),
-            json!({"post": {
+            json!({"get": {
+                "operationId": format!("list_{name}"),
+                "parameters": list_params,
+                "responses": list_responses
+            }, "post": {
                 "operationId": format!("create_{name}"),
                 "parameters": [{"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string"}}],
                 "requestBody": {"required": true, "content": {"application/json": {"schema": reference}}},

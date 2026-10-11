@@ -181,7 +181,10 @@ fn select_is_limited_to_declared_fields() {
         },
     )
     .unwrap();
-    assert!(ok.sql.starts_with("SELECT \"id\", \"starts_at\" FROM"));
+    assert_eq!(ok.columns, vec!["starts_at".to_string()]);
+    assert!(ok.sql.starts_with(
+        "SELECT \"id\"::text AS \"_c0\", \"version\" AS \"_c1\", to_jsonb(\"starts_at\") AS \"_c2\" FROM"
+    ));
     let bad = plan(
         &m,
         "booking",
@@ -389,4 +392,35 @@ fn fuzz_every_planned_statement_is_tenant_scoped() {
         ok > 100 && rejected > 100,
         "fuzz should hit both paths: ok={ok} rejected={rejected}"
     );
+}
+
+#[test]
+fn decimals_select_as_text_and_sort_as_numbers() {
+    let m = manifest("inventory");
+    let p = plan(
+        &m,
+        "item",
+        &ListRequest {
+            select: Some(vec!["unit_cost".into()]),
+            sort: vec![SortKey {
+                field: "unit_cost".into(),
+                dir: SortDir::Asc,
+            }],
+            ..Default::default()
+        },
+    );
+    // Whether or not unit_cost is a declared sort key, the select must alias the text cast.
+    let sql = match p {
+        Ok(p) => p.sql,
+        Err(QueryError::UnindexedSort(_)) => return,
+        Err(e) => panic!("{e:?}"),
+    };
+    assert!(sql.contains("\"unit_cost\"::text AS \"_c2\""), "{sql}");
+}
+
+#[test]
+fn engine_managed_state_is_selected_by_default() {
+    let m = manifest("approval_workflow");
+    let p = plan(&m, "request", &ListRequest::default()).unwrap();
+    assert!(p.columns.contains(&"state".to_string()));
 }

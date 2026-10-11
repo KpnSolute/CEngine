@@ -29,11 +29,12 @@ fn manifest() -> ce_manifest::Manifest {
         "order": {"fields": {"n": {"type": "integer"}}},
         "part": {
           "fields": {
-            "name": {"type": "string", "required": true, "max_length": 20, "unique": true},
-            "price": {"type": "decimal", "precision": 10, "scale": 2, "default": 0},
+            "name": {"type": "string", "required": true, "max_length": 20, "unique": true, "indexed": true},
+            "price": {"type": "decimal", "precision": 10, "scale": 2, "default": 0, "indexed": true},
             "kind": {"type": "enum", "values": ["a", "b"], "default": "a"},
             "owner": {"type": "ref", "ref": "item"}
-          }
+          },
+          "sort_keys": ["name", "price"]
         },
         "ticket": {
           "fields": {"title": {"type": "string"}},
@@ -55,13 +56,16 @@ fn fresh(url: &str) -> TypedPgStore {
 }
 
 fn scope() -> TenantScope {
+    scope_of("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+}
+
+fn scope_of(tenant: &str) -> TenantScope {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     let key = b"0123456789abcdef0123456789abcdef";
     let h = B64.encode(r#"{"alg":"HS256"}"#);
-    let p =
-        B64.encode(r#"{"sub":"u1","tenant":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","exp":2000}"#);
+    let p = B64.encode(format!(r#"{{"sub":"u1","tenant":"{tenant}","exp":2000}}"#));
     let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
     mac.update(format!("{h}.{p}").as_bytes());
     let token = format!("{h}.{p}.{}", B64.encode(mac.finalize().into_bytes()));
@@ -188,4 +192,94 @@ fn required_computed_fields_are_refused_at_install() {
         TypedPgStore::install(&url, &m, &name),
         Err(StoreError::BadData(_))
     ));
+}
+
+#[test]
+fn list_pages_sorts_filters_and_isolates_tenants() {
+    use ce_store::{ListRequest, QueryError, SortDir, SortKey};
+    let Some(url) = url() else { return };
+    let s = fresh(&url);
+    let sc = scope();
+    let other = scope_of("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+    for (n, p) in [
+        ("e", "5.50"),
+        ("a", "10.00"),
+        ("c", "2.25"),
+        ("b", "10.00"),
+        ("d", "7"),
+    ] {
+        s.insert(&sc, "part", json!({"name": n, "price": p}), None)
+            .unwrap();
+    }
+    s.insert(&other, "part", json!({"name": "zz"}), None)
+        .unwrap();
+    let by = |f: &str| {
+        vec![SortKey {
+            field: f.into(),
+            dir: SortDir::Asc,
+        }]
+    };
+
+    // Numeric (not text) order: 2.25, 5.50, 7.00, 10.00, 10.00. Ties break on id.
+    let mut req = ListRequest {
+        sort: by("price"),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let mut seen = Vec::new();
+    loop {
+        let page = s.list(&sc, "part", &req).unwrap();
+        seen.extend(
+            page.records
+                .iter()
+                .map(|r| r.data["price"].as_str().unwrap().to_string()),
+        );
+        match page.next {
+            Some(c) => req.after = Some(c),
+            None => break,
+        }
+    }
+    assert_eq!(seen, ["2.25", "5.50", "7.00", "10.00", "10.00"]);
+
+    // Filter, select, and tenant scoping.
+    let page = s
+        .list(
+            &sc,
+            "part",
+            &ListRequest {
+                select: Some(vec!["name".into()]),
+                filter: Some(json!({"field": "name", "op": "eq", "value": "c"})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].data["name"], "c");
+    assert!(page.records[0].data.get("price").is_none());
+    let all = s.list(&sc, "part", &ListRequest::default()).unwrap();
+    assert_eq!(all.records.len(), 5);
+    assert!(all.records.iter().all(|r| r.data["name"] != "zz"));
+
+    // Deleted rows disappear; bad queries are refused.
+    let id = all.records[0].id.clone();
+    s.delete(&sc, "part", &id, 1).unwrap();
+    assert_eq!(
+        s.list(&sc, "part", &ListRequest::default())
+            .unwrap()
+            .records
+            .len(),
+        4
+    );
+    assert!(matches!(
+        s.list(
+            &sc,
+            "part",
+            &ListRequest {
+                sort: by("kind"),
+                ..Default::default()
+            }
+        ),
+        Err(StoreError::Query(QueryError::UnindexedSort(_)))
+    ));
+    s.drop_schema().unwrap();
 }

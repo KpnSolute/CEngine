@@ -61,6 +61,9 @@ pub struct ListRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Planned {
     pub sql: String,
+    /// The fields behind result columns 2.., in order. Columns 0 and 1 are `id` (text) and
+    /// `version`. Decimal columns come back as text, every other column as `jsonb`.
+    pub columns: Vec<String>,
     /// `$1` is always the tenant id.
     pub params: Vec<Param>,
 }
@@ -173,21 +176,41 @@ pub fn plan_list(
         params: vec![Param::Text(scope.tenant_id().to_string())],
     };
 
-    // SELECT list: declared fields only, plus id.
-    let mut cols = vec!["\"id\"".to_string()];
+    // SELECT list: id and version, then declared fields (and an engine-managed state field).
+    let mut names: Vec<String> = Vec::new();
     match &req.select {
         Some(sel) => {
             for f in sel {
-                if f != "id" {
-                    cols.push(ctx.column(f)?);
+                if f != "id" && !names.contains(f) {
+                    ctx.column(f)?;
+                    names.push(f.clone());
                 }
             }
         }
         None => {
             if let Some(fields) = entity["fields"].as_object() {
-                cols.extend(fields.keys().map(|k| format!("\"{k}\"")));
+                names.extend(fields.keys().cloned());
+            }
+            if let Some(sf) = entity["state"]["field"].as_str() {
+                if !names.iter().any(|n| n == sf) {
+                    names.push(sf.to_string());
+                }
             }
         }
+    }
+    // Output columns get neutral aliases so `ORDER BY "col"` always means the table column,
+    // never a text-cast output of the same name.
+    let mut cols = vec![
+        "\"id\"::text AS \"_c0\"".to_string(),
+        "\"version\" AS \"_c1\"".to_string(),
+    ];
+    for (i, n) in names.iter().enumerate() {
+        let alias = i + 2;
+        cols.push(if ctx.field_type(n)? == "decimal" {
+            format!("\"{n}\"::text AS \"_c{alias}\"")
+        } else {
+            format!("to_jsonb(\"{n}\") AS \"_c{alias}\"")
+        });
     }
 
     let mut wheres = vec!["\"tenant_id\" = $1::text::uuid".to_string()];
@@ -263,6 +286,7 @@ pub fn plan_list(
     );
     Ok(Planned {
         sql,
+        columns: names,
         params: ctx.params,
     })
 }

@@ -17,6 +17,7 @@ pub mod contract;
 mod memory;
 
 pub use ce_auth::TenantScope;
+pub use ce_query::{ListRequest, QueryError, SortDir, SortKey};
 pub use memory::MemoryStore;
 use serde_json::Value;
 
@@ -40,11 +41,33 @@ pub enum StoreError {
     /// The write broke a rule the database enforces (unique, reference, check, not null).
     /// The text names the kind, never the table or value, so it is safe to show callers.
     Constraint(&'static str),
+    /// The list request broke a query rule (unknown field, unindexed sort, bad filter...).
+    Query(QueryError),
+    /// This store cannot do what was asked (for example, listing).
+    Unsupported,
     /// The backend failed (connection, SQL). The message is for logs, not for callers.
     Backend(String),
 }
 
+/// One page of a list. `next` is the cursor for the following page (the last row's sort-key
+/// values, then its id), or `None` on the last page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Page {
+    pub records: Vec<Record>,
+    pub next: Option<Vec<Value>>,
+}
+
 pub trait Store {
+    /// Lists one tenant's records of `entity`. Stores that cannot query return `Unsupported`.
+    fn list(
+        &self,
+        _scope: &TenantScope,
+        _entity: &str,
+        _req: &ListRequest,
+    ) -> Result<Page, StoreError> {
+        Err(StoreError::Unsupported)
+    }
+
     fn insert(
         &self,
         scope: &TenantScope,

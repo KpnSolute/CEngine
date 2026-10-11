@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 ce-store = { path = "../ce-store" }
 ce-manifest = { path = "../ce-manifest" }
+ce-query = { path = "../ce-query" }
 ce-migrate = { path = "../ce-migrate" }
 ce-validate = { path = "../ce-validate" }
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
