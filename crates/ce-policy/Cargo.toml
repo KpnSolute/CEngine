@@ -1,0 +1,17 @@
+[package]
+name = "ce-policy"
+description = "CEngine roles: entity-level read/write and action permissions from a validated manifest (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ce-auth = { path = "../ce-auth" }
+ce-manifest = { path = "../ce-manifest" }
+serde_json = "1"
+
+[dev-dependencies]
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
