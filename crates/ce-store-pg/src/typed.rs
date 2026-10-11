@@ -773,7 +773,7 @@ impl Store for TypedPgStore {
         if let Value::Object(o) = &mut data {
             o.extend(derived);
         }
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         let mut tx = c.transaction().map_err(db)?;
         let record =
             self.insert_on(&mut tx, scope, entity, data, Some(&caller), idempotency_key)?;
