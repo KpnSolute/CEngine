@@ -61,41 +61,18 @@ pub struct Unenforced {
     pub reason: &'static str,
 }
 
-fn idents(src: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quoted = false;
-    for c in src.chars() {
-        if c == '\'' {
-            quoted = !quoted;
-            cur.clear();
-        } else if !quoted
-            && (c.is_ascii_lowercase() || c == '_' || (!cur.is_empty() && c.is_ascii_digit()))
-        {
-            cur.push(c);
-        } else {
-            if !cur.is_empty() {
-                out.push(std::mem::take(&mut cur));
-            }
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
 fn unenforceable(ent: &Value, src: &str) -> Option<&'static str> {
-    let words = idents(src);
-    if words.iter().any(|w| w == "ref") {
+    let Some(u) = crate::computed::uses(src) else {
+        return Some("does not parse");
+    };
+    if u.calls.iter().any(|c| c == "ref") {
         return Some("reads another record with ref()");
     }
-    let uncomputable = |w: &String| {
-        ent["fields"][w.as_str()]["computed"]
-            .as_str()
-            .is_some_and(crate::computed::uncomputable)
-    };
-    if words.iter().any(uncomputable) {
+    if crate::computed::needs_other_records(&u) {
+        return Some("sums other records");
+    }
+    let skip = crate::computed::unsupported_fields(ent);
+    if u.names.iter().any(|n| skip.contains(n)) {
         return Some("reads a computed field that is a sum over other records");
     }
     None
