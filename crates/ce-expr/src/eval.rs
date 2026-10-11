@@ -92,27 +92,31 @@ fn lookup<T>(name: &str, r: Result<T, String>) -> Result<T, EvalError> {
     r.map_err(|_| EvalError::Aggregate(name.to_string()))
 }
 
+/// Sums in arbitrary precision, so the result does not depend on row order, and applies the
+/// limits once at the end: an int result must fit 64 bits, a decimal result 38 digits.
 fn sum(values: Vec<Value>) -> R {
-    let mut int: i64 = 0;
-    let mut dec: Option<BigDecimal> = None;
+    let mut total = BigDecimal::from(0);
+    let mut any_dec = false;
     for v in values {
         match v {
             Value::Null => {}
-            Value::Int(i) => match &mut dec {
-                Some(d) => *d += BigDecimal::from(i),
-                None => int = int.checked_add(i).ok_or(EvalError::Overflow)?,
-            },
+            Value::Int(i) => total += BigDecimal::from(i),
             Value::Dec(x) => {
-                let base = dec.take().unwrap_or_else(|| BigDecimal::from(int));
-                dec = Some(base + x);
+                any_dec = true;
+                total += x;
             }
             _ => return Err(ty("sum needs numbers")),
         }
     }
-    match dec {
-        Some(d) => check(d),
-        None => Ok(Value::Int(int)),
+    if any_dec {
+        return check(total);
     }
+    // Only ints went in, so the total is whole; it must fit an i64.
+    total
+        .to_string()
+        .parse::<i64>()
+        .map(Value::Int)
+        .map_err(|_| EvalError::Overflow)
 }
 
 pub fn eval_with(e: &Expr, env: &Env, r: &dyn Resolver) -> R {

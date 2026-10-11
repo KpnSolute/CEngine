@@ -39,6 +39,8 @@ impl Resolver for Fake {
             Some("qty") => vec![Value::Int(2), Value::Null],
             Some("mixed") => vec![Value::Int(1), dec("0.5"), Value::Int(2)],
             Some("big") => vec![Value::Int(i64::MAX), Value::Int(1)],
+            Some("wide") => vec![Value::Int(i64::MAX), Value::Int(1), dec("0.0")],
+            Some("back") => vec![Value::Int(i64::MAX), Value::Int(1), Value::Int(-1)],
             Some("name") => vec![Value::Str("a".into())],
             None => vec![Value::Bool(true), Value::Bool(true)],
             _ => vec![],
@@ -94,6 +96,15 @@ fn bad_aggregates_are_errors_not_zero() {
     assert_eq!(
         eval("sum(children(line, parent).big)", &env),
         Err(Error::Eval(EvalError::Overflow))
+    );
+    // The order of rows never changes the answer: the limits apply to the final sum.
+    assert_eq!(
+        eval("sum(children(line, parent).wide)", &env),
+        Ok(dec("9223372036854775808.0"))
+    );
+    assert_eq!(
+        eval("sum(children(line, parent).back)", &env),
+        Ok(Value::Int(i64::MAX))
     );
     assert!(matches!(
         eval("sum(children(line, parent).name)", &env),
