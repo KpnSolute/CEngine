@@ -66,7 +66,7 @@ fn placeholders(sql: &str) -> usize {
 
 fn assert_tenant_scoped(p: &Planned) {
     assert!(
-        p.sql.contains("WHERE \"tenant_id\" = $1::uuid"),
+        p.sql.contains("WHERE \"tenant_id\" = $1::text::uuid"),
         "missing tenant predicate: {}",
         p.sql
     );
@@ -243,7 +243,7 @@ fn keyset_cursor_uses_row_comparison_with_bound_values() {
     assert_tenant_scoped(&p);
     assert!(
         p.sql
-            .contains("(ROW(\"starts_at\", \"id\") > ROW($2::timestamptz, $3::uuid))"),
+            .contains("(ROW(\"starts_at\", \"id\") > ROW($2::text::timestamptz, $3::text::uuid))"),
         "{}",
         p.sql
     );
@@ -292,7 +292,7 @@ fn typed_values_are_checked() {
     assert!(run(f("unit_cost", "gte", json!("1.50")))
         .unwrap()
         .sql
-        .contains("\"unit_cost\" >= $2::numeric"));
+        .contains("\"unit_cost\" >= $2::text::numeric"));
     assert!(matches!(
         run(f("unit_cost", "gte", json!(1.5))),
         Err(QueryError::BadValue(_))

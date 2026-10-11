@@ -189,6 +189,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-migrate"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "ce-auth",
+ "ce-manifest",
+ "ce-query",
+ "hmac 0.12.1",
+ "postgres",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ce-policy"
 version = "0.0.1"
 dependencies = [
