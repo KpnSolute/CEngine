@@ -4,14 +4,14 @@
 //! Callers can never set a computed field (validation refuses it); the server fills it here.
 //! Decimals are rounded half-up to the field's declared scale and must fit its precision;
 //! integers must come out whole. A null result removes the field. Sums over other records
-//! (`sum`, `count`, `children`) and `ref()` are not evaluable yet: such a field is left alone
-//! (absent on create), and invariants that read it are skipped.
+//! (`sum`, `count`, `children`) and `ref()` need a [`Resolver`]; without one such a field is left
+//! alone (absent on create), and invariants that read it are skipped.
 
 use crate::invariants::{build_env, Context};
 use crate::FieldError;
 use bigdecimal::{BigDecimal, RoundingMode};
-use ce_expr::Expr;
 use ce_expr::Value as Ev;
+use ce_expr::{Expr, Resolver};
 use ce_manifest::Manifest;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -142,6 +142,8 @@ fn to_json(name: &str, f: &Value, v: Ev) -> Result<Option<Value>, String> {
 
 /// Evaluates every computed field of `entity` into `record`. Returns one error per field whose
 /// expression failed or gave a value that does not fit the field.
+///
+/// Without a resolver, fields that need other records are left alone (see the module docs).
 pub fn evaluate_computed(
     m: &Manifest,
     entity: &str,
@@ -149,11 +151,28 @@ pub fn evaluate_computed(
     old: Option<&Map<String, Value>>,
     ctx: &Context,
 ) -> Result<(), Vec<FieldError>> {
+    evaluate_computed_with(m, entity, record, old, ctx, None)
+}
+
+/// Like [`evaluate_computed`], and with a resolver also evaluates `ref()` and sums and counts
+/// over `children(...)`, so no computed field is skipped.
+pub fn evaluate_computed_with(
+    m: &Manifest,
+    entity: &str,
+    record: &mut Map<String, Value>,
+    old: Option<&Map<String, Value>>,
+    ctx: &Context,
+    resolver: Option<&dyn Resolver>,
+) -> Result<(), Vec<FieldError>> {
     let ent = &m.value["entities"][entity];
     let Some(fields) = ent["fields"].as_object() else {
         return Ok(());
     };
-    let skip = unsupported_fields(ent);
+    let skip = if resolver.is_some() {
+        HashSet::new()
+    } else {
+        unsupported_fields(ent)
+    };
     let mut todo: Vec<(&String, &str)> = fields
         .iter()
         .filter_map(|(k, f)| f["computed"].as_str().map(|e| (k, e)))
@@ -168,7 +187,11 @@ pub fn evaluate_computed(
         for (name, src) in &todo {
             let env = build_env(ent, record, old, ctx);
             let f = &fields[name.as_str()];
-            let out = match ce_expr::run(src, &env) {
+            let ran = match resolver {
+                Some(r) => ce_expr::run_with(src, &env, r),
+                None => ce_expr::run(src, &env),
+            };
+            let out = match ran {
                 Ok(v) => to_json(name, f, v).map_err(|d| fail(name, &d)),
                 Err(_) => Err(fail(name, "the expression could not be evaluated")),
             };

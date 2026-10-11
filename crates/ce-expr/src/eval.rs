@@ -35,7 +35,88 @@ fn check(d: BigDecimal) -> R {
     }
 }
 
+/// Reads other records for `ref(field).attr` and `sum`/`count` over `children(entity, field)`.
+/// The caller binds it to one record and one tenant, so expressions never name either.
+/// An `Err` is the reason the lookup failed; evaluation reports it as `EvalError::Aggregate`.
+pub trait Resolver {
+    /// The `attr` of the row that the ref field `field` points to (`id`), or null if there is none.
+    fn ref_attr(&self, field: &str, id: &str, attr: &str) -> Result<Value, String>;
+    /// `attr` of every live row of `entity` whose `ref_field` points at the current record.
+    /// With no `attr`, one non-null value per row. Nulls may be included; callers skip them.
+    fn children(
+        &self,
+        entity: &str,
+        ref_field: &str,
+        attr: Option<&str>,
+    ) -> Result<Vec<Value>, String>;
+}
+
+/// No store: every lookup fails, so `ref` and aggregates stay unsupported.
+pub struct NoResolver;
+
+impl Resolver for NoResolver {
+    fn ref_attr(&self, _: &str, _: &str, _: &str) -> Result<Value, String> {
+        Err("ref needs the store".into())
+    }
+    fn children(&self, _: &str, _: &str, _: Option<&str>) -> Result<Vec<Value>, String> {
+        Err("children needs the store".into())
+    }
+}
+
 pub fn eval(e: &Expr, env: &Env) -> R {
+    eval_with(e, env, &NoResolver)
+}
+
+fn plain(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Path(p) if p.len() == 1 => Some(p[0].as_str()),
+        _ => None,
+    }
+}
+
+/// `children(entity, field)` possibly followed by `.attr`.
+fn children_source(e: &Expr) -> Option<(&str, &str, Option<&str>)> {
+    let (call, attr) = match e {
+        Expr::Field(base, attr) => (&**base, Some(attr.as_str())),
+        other => (other, None),
+    };
+    match call {
+        Expr::Call(name, args) if name == "children" && args.len() == 2 => {
+            Some((plain(&args[0])?, plain(&args[1])?, attr))
+        }
+        _ => None,
+    }
+}
+
+fn lookup<T>(name: &str, r: Result<T, String>) -> Result<T, EvalError> {
+    r.map_err(|_| EvalError::Aggregate(name.to_string()))
+}
+
+fn sum(values: Vec<Value>) -> R {
+    let mut int: i64 = 0;
+    let mut dec: Option<BigDecimal> = None;
+    for v in values {
+        match v {
+            Value::Null => {}
+            Value::Int(i) => match &mut dec {
+                Some(d) => *d += BigDecimal::from(i),
+                None => int = int.checked_add(i).ok_or(EvalError::Overflow)?,
+            },
+            Value::Dec(x) => {
+                let base = dec.take().unwrap_or_else(|| BigDecimal::from(int));
+                dec = Some(base + x);
+            }
+            _ => return Err(ty("sum needs numbers")),
+        }
+    }
+    match dec {
+        Some(d) => check(d),
+        None => Ok(Value::Int(int)),
+    }
+}
+
+pub fn eval_with(e: &Expr, env: &Env, r: &dyn Resolver) -> R {
+    let eval = |x: &Expr, env: &Env| eval_with(x, env, r);
     match e {
         Expr::Null => Ok(Value::Null),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -57,14 +138,26 @@ pub fn eval(e: &Expr, env: &Env) -> R {
             Value::Bool(b) => Ok(Value::Bool(!b)),
             _ => Err(ty("not needs a bool")),
         },
-        Expr::Call(f, a) => call(f, a, env),
+        Expr::Call(f, a) => call(f, a, env, r),
+        Expr::Field(base, attr) if matches!(&**base, Expr::Call(n, a) if n == "ref" && a.len() == 1 && plain(&a[0]).is_some()) =>
+        {
+            let Expr::Call(_, a) = &**base else {
+                unreachable!()
+            };
+            let field = plain(&a[0]).unwrap_or_default();
+            match env.get(field) {
+                None | Some(Value::Null) => Ok(Value::Null),
+                Some(Value::Str(id)) => lookup("ref", r.ref_attr(field, id, attr)),
+                Some(_) => Err(ty("ref needs a ref field")),
+            }
+        }
         Expr::Field(base, _) => match eval(base, env)? {
             Value::Null => Ok(Value::Null),
             _ => Err(ty(
                 "field access on a value needs the store (not available here)",
             )),
         },
-        Expr::Bin(op, a, b) => bin(*op, a, b, env),
+        Expr::Bin(op, a, b) => bin(*op, a, b, env, r),
     }
 }
 
@@ -76,9 +169,9 @@ fn tri(v: &Value) -> Result<Option<bool>, EvalError> {
     }
 }
 
-fn bin(op: Op, a: &Expr, b: &Expr, env: &Env) -> R {
-    let av = eval(a, env)?;
-    let bv = eval(b, env)?;
+fn bin(op: Op, a: &Expr, b: &Expr, env: &Env, r: &dyn Resolver) -> R {
+    let av = eval_with(a, env, r)?;
+    let bv = eval_with(b, env, r)?;
     let boolv = |o: Option<bool>| o.map_or(Value::Null, Value::Bool);
     match op {
         Op::Or => {
@@ -204,11 +297,26 @@ fn arity(name: &str, args: &[Value], n: usize) -> Result<(), EvalError> {
     }
 }
 
-fn call(name: &str, raw: &[Expr], env: &Env) -> R {
+fn call(name: &str, raw: &[Expr], env: &Env, r: &dyn Resolver) -> R {
+    if matches!(name, "sum" | "count") && raw.len() == 1 {
+        if let Some((entity, field, attr)) = children_source(&raw[0]) {
+            let values = lookup(name, r.children(entity, field, attr))?;
+            return if name == "sum" {
+                sum(values)
+            } else {
+                Ok(Value::Int(
+                    values.iter().filter(|v| **v != Value::Null).count() as i64,
+                ))
+            };
+        }
+    }
     if matches!(name, "sum" | "count" | "children" | "ref") {
         return Err(EvalError::Aggregate(name.to_string()));
     }
-    let args: Vec<Value> = raw.iter().map(|x| eval(x, env)).collect::<Result<_, _>>()?;
+    let args: Vec<Value> = raw
+        .iter()
+        .map(|x| eval_with(x, env, r))
+        .collect::<Result<_, _>>()?;
     match name {
         "round" => {
             arity(name, &args, 2)?;
