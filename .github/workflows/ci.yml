@@ -16,6 +16,23 @@ env:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ce
+          POSTGRES_PASSWORD: ce
+          POSTGRES_DB: ce_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ce -d ce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CE_TEST_DATABASE_URL: postgresql://ce:ce@127.0.0.1:5432/ce_test
+      CE_REQUIRE_DB: '1'
     steps:
       - uses: actions/checkout@v4
       - run: rustup component add rustfmt clippy

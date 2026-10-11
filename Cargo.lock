@@ -158,6 +158,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-events"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "ce-auth",
+ "hmac 0.12.1",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+]
+
+[[package]]
 name = "ce-expr"
 version = "0.0.1"
 dependencies = [
@@ -191,6 +203,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-policy"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "ce-auth",
+ "ce-manifest",
+ "hmac 0.12.1",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ce-query"
 version = "0.0.1"
 dependencies = [
@@ -203,12 +227,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-state"
+version = "0.0.1"
+dependencies = [
+ "ce-manifest",
+ "serde_json",
+]
+
+[[package]]
 name = "ce-store"
 version = "0.0.1"
 dependencies = [
  "base64",
  "ce-auth",
+ "ce-store",
  "hmac 0.12.1",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "ce-store-pg"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "ce-auth",
+ "ce-store",
+ "hmac 0.12.1",
+ "postgres",
  "serde_json",
  "sha2 0.10.9",
 ]
