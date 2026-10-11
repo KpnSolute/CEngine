@@ -1,0 +1,11 @@
+[package]
+name = "ce-state"
+description = "CEngine state machines: transition checks and action planning from a validated manifest (draft v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ce-manifest = { path = "../ce-manifest" }
+serde_json = "1"
