@@ -66,6 +66,9 @@ pub fn check(m: &Value) -> Vec<Issue> {
                 }
             }
             if let Some(e) = f.get("computed").and_then(Value::as_str) {
+                if let Ok(ast) = parse(e) {
+                    check_children(&mut out, &format!("{fp}/computed"), &ast, entities, en);
+                }
                 expr(
                     &mut out,
                     &format!("{fp}/computed"),
@@ -402,8 +405,12 @@ fn walk(out: &mut Vec<Issue>, p: &str, e: &Expr, names: &BTreeSet<&str>, site: S
                     "`ref` is not allowed in a projection filter",
                 ));
             }
-            for a in args {
-                walk(out, p, a, names, site);
+            // `children(entity, field)` names an entity and a field of it, not fields of this
+            // entity; `check_children` validates those.
+            if f != "children" {
+                for a in args {
+                    walk(out, p, a, names, site);
+                }
             }
         }
         Expr::Field(b, _) | Expr::Neg(b) | Expr::Not(b) => walk(out, p, b, names, site),
@@ -412,6 +419,104 @@ fn walk(out: &mut Vec<Issue>, p: &str, e: &Expr, names: &BTreeSet<&str>, site: S
             walk(out, p, b, names, site);
         }
         Expr::List(v) => v.iter().for_each(|x| walk(out, p, x, names, site)),
+        _ => {}
+    }
+}
+
+fn name_of(a: &Expr) -> Option<&str> {
+    match a {
+        Expr::Path(p) if p.len() == 1 => Some(p[0].as_str()),
+        _ => None,
+    }
+}
+
+fn is_children_chain(e: &Expr) -> bool {
+    match e {
+        Expr::Call(f, _) => f == "children",
+        Expr::Field(b, _) => is_children_chain(b),
+        _ => false,
+    }
+}
+
+/// `children(entity, ref_field)`: the entity must exist and the field must be a `ref` from it
+/// back to the entity that holds the computed field.
+fn check_children(out: &mut Vec<Issue>, path: &str, e: &Expr, entities: &Obj, owner: &str) {
+    match e {
+        Expr::Call(f, args) => {
+            if f == "children" {
+                let (child, field) = match &args[..] {
+                    [a, b] => match (name_of(a), name_of(b)) {
+                        (Some(c), Some(f)) => (c, f),
+                        _ => ("", ""),
+                    },
+                    _ => ("", ""),
+                };
+                if child.is_empty() {
+                    out.push(issue(
+                        path,
+                        "bad_children",
+                        "children(entity, ref_field) takes exactly two plain names",
+                    ));
+                    return;
+                }
+                let Some(ce) = entities.get(child) else {
+                    out.push(issue(
+                        path,
+                        "unknown_entity",
+                        format!("no entity `{child}`"),
+                    ));
+                    return;
+                };
+                let target = ce["fields"][field]["ref"].as_str();
+                if ce["fields"][field]["type"] != "ref" || target != Some(owner) {
+                    out.push(issue(
+                        path,
+                        "bad_children",
+                        format!("`{child}.{field}` must be a ref to `{owner}`"),
+                    ));
+                }
+                return;
+            }
+            args.iter()
+                .for_each(|a| check_children(out, path, a, entities, owner));
+        }
+        Expr::List(v) => v
+            .iter()
+            .for_each(|a| check_children(out, path, a, entities, owner)),
+        Expr::Field(b, name) => {
+            // Only one field can be read off the child rows: `children(a, b).value.ghost` has
+            // nothing to read from `value`.
+            if let Expr::Field(inner, _) = &**b {
+                if is_children_chain(inner) {
+                    out.push(issue(
+                        path,
+                        "bad_children",
+                        format!("`.{name}` follows a field of the child rows; only one field can be read"),
+                    ));
+                }
+            }
+            // `children(line, invoice).line_total` reads a field of the child rows.
+            if let Expr::Call(f, args) = &**b {
+                if let (true, Some(Expr::Path(p))) = (f == "children", args.first()) {
+                    let missing = entities
+                        .get(&p[0])
+                        .is_some_and(|ce| !ce["fields"][name.as_str()].is_object());
+                    if missing {
+                        out.push(issue(
+                            path,
+                            "unknown_field",
+                            format!("`{}` has no field `{name}`", p[0]),
+                        ));
+                    }
+                }
+            }
+            check_children(out, path, b, entities, owner)
+        }
+        Expr::Neg(b) | Expr::Not(b) => check_children(out, path, b, entities, owner),
+        Expr::Bin(_, a, b) => {
+            check_children(out, path, a, entities, owner);
+            check_children(out, path, b, entities, owner);
+        }
         _ => {}
     }
 }
@@ -475,6 +580,7 @@ fn roots_of(e: &Expr, out: &mut BTreeSet<String>) {
         Expr::Path(p) => {
             out.insert(p[0].clone());
         }
+        Expr::Call(f, _) if f == "children" => {}
         Expr::Call(_, a) | Expr::List(a) => a.iter().for_each(|x| roots_of(x, out)),
         Expr::Field(b, _) | Expr::Neg(b) | Expr::Not(b) => roots_of(b, out),
         Expr::Bin(_, a, b) => {

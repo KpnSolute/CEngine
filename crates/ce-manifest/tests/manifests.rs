@@ -121,3 +121,22 @@ fn computed_cycles_are_rejected() {
         json!({"type": "decimal", "precision": 10, "scale": 2, "computed": "a + 1"});
     assert!(codes(&m).contains(&"computed_cycle"));
 }
+
+#[test]
+fn children_sums_are_checked_against_the_entities() {
+    let sum = |expr: &str| {
+        let mut m = example("inventory");
+        m["entities"]["period"]["fields"]["total"] =
+            json!({"type": "decimal", "precision": 16, "scale": 2, "computed": expr});
+        codes(&m)
+    };
+    assert!(sum("sum(children(item, period).value)").is_empty());
+    assert!(sum("count(children(item, period))").is_empty());
+    assert!(sum("sum(children(nope, period).value)").contains(&"unknown_entity"));
+    assert!(sum("sum(children(item, name).value)").contains(&"bad_children"));
+    assert!(sum("sum(children(item, period).ghost)").contains(&"unknown_field"));
+    assert!(sum("sum(children(item))").contains(&"bad_children"));
+    assert!(sum("sum(children(item, 0, period))").contains(&"bad_children"));
+    assert!(sum("sum(children(item, period, 0))").contains(&"bad_children"));
+    assert!(sum("sum(children(item, period).value.ghost)").contains(&"bad_children"));
+}
