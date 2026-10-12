@@ -181,6 +181,52 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
                     "responses": delete_responses}
             }),
         );
+        // CSV out and in for the entity (see ce-io).
+        let mut export_responses = json!({"200": {"description": "the records as CSV",
+            "content": {"text/csv": {"schema": {"type": "string"}}}}});
+        let mut import_responses = json!({"201": {"description": "rows created"},
+            "200": {"description": "dry run: the per-row report"}});
+        for (r, codes) in [
+            (
+                &mut export_responses,
+                &[
+                    ("401", "unauthenticated"),
+                    ("403", "forbidden"),
+                    ("404", "not_found"),
+                    ("422", "validation_failed"),
+                ][..],
+            ),
+            (
+                &mut import_responses,
+                &[
+                    ("401", "unauthenticated"),
+                    ("403", "forbidden"),
+                    ("404", "not_found"),
+                    ("409", "constraint_violation"),
+                    ("413", "payload_too_large"),
+                    ("422", "validation_failed"),
+                    ("428", "precondition_required"),
+                ][..],
+            ),
+        ] {
+            if let (Value::Object(r), Value::Object(e)) = (r, problem_responses(codes)) {
+                r.extend(e);
+            }
+        }
+        paths.insert(
+            format!("{base}/_export"),
+            json!({"get": {"operationId": format!("export_{name}"),
+                "parameters": list_params, "responses": export_responses}}),
+        );
+        paths.insert(
+            format!("{base}/_import"),
+            json!({"post": {"operationId": format!("import_{name}"),
+                "parameters": [
+                    {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string"}},
+                    {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}}],
+                "requestBody": {"required": true, "content": {"text/csv": {"schema": {"type": "string"}}}},
+                "responses": import_responses}}),
+        );
         // One upload/download path per `file` field; the bytes are the body.
         for (fname, f) in ent["fields"].as_object().into_iter().flatten() {
             if f["type"] != "file" {

@@ -367,6 +367,7 @@ dependencies = [
  "ce-auth",
  "ce-events",
  "ce-expr",
+ "ce-io",
  "ce-manifest",
  "ce-policy",
  "ce-store",
