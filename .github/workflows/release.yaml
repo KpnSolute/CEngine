@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, for example 0.1.0 (tag becomes v0.1.0)
+        required: true
+      prerelease:
+        description: Mark the release as a pre-release
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the version matches Cargo.toml
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          have="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "$have" = "$VERSION" ] || { echo "Cargo.toml says $have, not $VERSION"; exit 1; }
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.event.inputs.version }}
+          PRE: ${{ github.event.inputs.prerelease }}
+        run: |
+          flag=""
+          [ "$PRE" = true ] && flag="--prerelease"
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "CEngine $VERSION" --generate-notes $flag
