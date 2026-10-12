@@ -211,6 +211,27 @@ pub(crate) fn check_unlocked(
     guard_locked(tx, env, entity, Some(id), record, None)
 }
 
+/// Refuses a record being put into a frozen window: when the write sets a `ref` field (the way a
+/// record joins a period), the record as it would become must not be locked. A write that only
+/// changes plain fields may lock its own record (a status that freezes it), so the result of
+/// those is not held against it; the stored record was already checked.
+fn guard_moved<'k>(
+    tx: &dyn Store,
+    env: &Env,
+    entity: &str,
+    id: Option<&str>,
+    record: &Map<String, Value>,
+    old: Option<&Map<String, Value>>,
+    changed: impl Iterator<Item = &'k String>,
+) -> Result<(), Failure> {
+    let fields = &env.manifest.value["entities"][entity]["fields"];
+    let mut changed = changed;
+    if changed.any(|k| fields[k.as_str()]["type"] == "ref") {
+        guard_locked(tx, env, entity, id, record, old)?;
+    }
+    Ok(())
+}
+
 /// Refuses the write when `locked_when` holds for the record, as stored or as it would become.
 /// A period close freezes the records that point at the period this way.
 fn guard_locked(
@@ -418,7 +439,7 @@ pub(crate) fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<O
                     derived = true;
                     let mut obj = data.clone();
                     match settle(tx, env, entity, None, &mut obj, None)
-                        .and_then(|()| guard_locked(tx, env, entity, None, &obj, None))
+                        .and_then(|()| guard_moved(tx, env, entity, None, &obj, None, data.keys()))
                     {
                         Ok(()) => {
                             obj.retain(|k, v| data.get(k) != Some(&*v));
@@ -489,7 +510,7 @@ pub(crate) fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<O
                 None,
             )?;
             settle(tx, env, entity, Some(id), &mut obj, old)?;
-            guard_locked(tx, env, entity, Some(id), &obj, old)?;
+            guard_moved(tx, env, entity, Some(id), &obj, old, patch.keys())?;
             let rec = tx.update(env.scope, entity, id, *expected, Value::Object(obj))?;
             refresh_parents(tx, env, entity, old, rec.data.as_object())?;
             Ok(Outcome {

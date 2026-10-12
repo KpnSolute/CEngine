@@ -16,10 +16,13 @@
 
 mod actions;
 mod changesets;
+mod files;
 mod openapi;
 mod periods;
 mod problem;
 mod writes;
+
+pub use files::{BlobStore, MemoryBlobs};
 
 pub use problem::Problem;
 
@@ -48,6 +51,8 @@ pub struct AppState<S> {
     pub installation: String,
     /// Unix seconds; injected so tests control time.
     pub now: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// Where file bytes live; without one the file endpoints answer 503.
+    pub blobs: Option<Arc<dyn BlobStore>>,
 }
 
 impl<S> Clone for AppState<S> {
@@ -59,6 +64,7 @@ impl<S> Clone for AppState<S> {
             manifest: self.manifest.clone(),
             installation: self.installation.clone(),
             now: self.now.clone(),
+            blobs: self.blobs.clone(),
         }
     }
 }
@@ -77,8 +83,23 @@ impl<S> AppState<S> {
                     .map(|d| d.as_secs())
                     .unwrap_or(0)
             }),
+            blobs: None,
         }
     }
+
+    /// Gives the server a place for file bytes.
+    pub fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
+    }
+}
+
+/// The largest file body: `runtime.storage.max_file_mb` (10 by default).
+fn max_file_bytes(m: &Manifest) -> usize {
+    let mb = m.value["runtime"]["storage"]["max_file_mb"]
+        .as_u64()
+        .unwrap_or(10);
+    usize::try_from(mb.saturating_mul(1024 * 1024)).unwrap_or(10 * 1024 * 1024)
 }
 
 pub fn router<S>(state: AppState<S>) -> Router
@@ -93,6 +114,12 @@ where
         .route(
             "/v1/{inst}/changeset/{id}/{verb}",
             post(changeset_verb::<S>),
+        )
+        .route(
+            "/v1/{inst}/_files/{entity}/{id}/{field}",
+            get(file_get::<S>)
+                .put(file_put::<S>)
+                .layer(DefaultBodyLimit::max(max_file_bytes(&state.manifest))),
         )
         .route("/v1/{inst}/_batch", post(batch::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
@@ -541,6 +568,148 @@ async fn stage_if_governed<S: Store + Send + Sync + 'static>(
         "meta": {"request_id": rid}
     });
     Ok(Some((StatusCode::ACCEPTED, Json(body)).into_response()))
+}
+
+/// The `file` field `field` of `entity`, or not found.
+fn file_field<'a, S>(st: &'a AppState<S>, entity: &str, field: &str) -> Result<&'a Value, Problem> {
+    let f = &st.manifest.value["entities"][entity]["fields"][field];
+    if f["type"] == "file" {
+        Ok(f)
+    } else {
+        Err(Problem::not_found())
+    }
+}
+
+fn blobs_of<S>(st: &AppState<S>) -> Result<Arc<dyn BlobStore>, Problem> {
+    st.blobs.clone().ok_or_else(|| {
+        Problem::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "files_not_configured",
+            "this installation has no file storage",
+        )
+    })
+}
+
+/// `PUT .../_files/{entity}/{id}/{field}`: the body is the file. Needs `If-Match`.
+async fn file_put<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, entity, id, field)): Path<(String, String, String, String)>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
+        file_field(&st, &entity, &field)?;
+        let blobs = blobs_of(&st)?;
+        let expected = if_match(&headers)?;
+        let bytes = body.map_err(body_problem)?;
+        if bytes.is_empty() {
+            return Err(Problem::validation(
+                "the body is empty",
+                vec![
+                    json!({"path": "", "code": "required", "detail": "send the file as the body"}),
+                ],
+            ));
+        }
+        if changesets::governed(&st.manifest, &entity)
+            && !st.policy.can_run(&who.roles, changesets::MERGE_ACTION)
+        {
+            return Err(Problem::validation(
+                "this entity is governed; files cannot be attached through a proposal yet",
+                vec![json!({"path": "", "code": "governed", "detail": "governed entity"})],
+            ));
+        }
+        let content_type = header_str(&headers, "content-type")?
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let name = files::clean_name(header_str(&headers, "x-ce-filename")?.unwrap_or("file"));
+        let sha = files::sha256_hex(&bytes);
+        let scope = who.scope().clone();
+        let key = files::object_key(&scope, &entity, &id, &field, &sha);
+        let meta = json!({"key": key, "sha256": sha, "size": bytes.len(),
+                          "content_type": content_type, "name": name});
+        let mut patch = Map::new();
+        patch.insert(field.clone(), meta);
+        let readable = st.policy.can_read(&who.roles, &entity);
+        let (put_scope, put_key, put_type) = (scope.clone(), key.clone(), content_type.clone());
+        tokio::task::spawn_blocking(move || blobs.put(&put_scope, &put_key, &bytes, &put_type))
+            .await
+            .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+            .map_err(|e| store_problem(StoreError::Backend(e)))?;
+        let ctx = invariant_context(&st, &who);
+        let rec = write(
+            &st,
+            scope,
+            ctx,
+            entity,
+            writes::Op::Patch {
+                id,
+                expected,
+                patch,
+            },
+            &rid,
+        )
+        .await?
+        .ok_or_else(|| store_problem(StoreError::Backend("no record".into())))?;
+        Ok(record_response(StatusCode::OK, &rec, &rid, readable))
+    };
+    finish(&rid, run.await)
+}
+
+/// `GET .../_files/{entity}/{id}/{field}`: the file's bytes.
+async fn file_get<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, entity, id, field)): Path<(String, String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = guard(&st, &headers, &inst, &entity, Access::Read)?;
+        file_field(&st, &entity, &field)?;
+        let blobs = blobs_of(&st)?;
+        let scope = who.scope().clone();
+        let (s2, e2, rec_id) = (scope.clone(), entity.clone(), id.clone());
+        let rec = blocking(&st, move |s| s.get(&s2, &e2, &id)).await?;
+        let meta = rec
+            .data
+            .get(&field)
+            .filter(|m| m.is_object())
+            .ok_or_else(Problem::not_found)?;
+        let key = meta["key"]
+            .as_str()
+            .ok_or_else(Problem::not_found)?
+            .to_string();
+        // The key must belong to this very record and field, whatever the stored value says:
+        // a file field written through a plain patch cannot point at someone else's file.
+        if !key.starts_with(&format!("{}/{entity}/{rec_id}/{field}/", scope.tenant_id())) {
+            return Err(Problem::not_found());
+        }
+        let sha = meta["sha256"].as_str().unwrap_or_default().to_string();
+        let name = files::clean_name(meta["name"].as_str().unwrap_or("file"));
+        let got = tokio::task::spawn_blocking(move || blobs.get(&scope, &key))
+            .await
+            .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+            .map_err(|e| store_problem(StoreError::Backend(e)))?;
+        let (bytes, content_type) = got.ok_or_else(Problem::not_found)?;
+        let mut res = (StatusCode::OK, bytes).into_response();
+        let h = res.headers_mut();
+        if let Ok(v) = HeaderValue::from_str(&content_type) {
+            h.insert(header::CONTENT_TYPE, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&format!("\"{sha}\"")) {
+            h.insert(header::ETAG, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+            h.insert(header::CONTENT_DISPOSITION, v);
+        }
+        h.insert(
+            "x-content-type-options",
+            HeaderValue::from_static("nosniff"),
+        );
+        Ok(res)
+    };
+    finish(&rid, run.await)
 }
 
 const MAX_BATCH: usize = 100;
