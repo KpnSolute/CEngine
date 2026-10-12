@@ -181,6 +181,55 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
                     "responses": delete_responses}
             }),
         );
+        // One upload/download path per `file` field; the bytes are the body.
+        for (fname, f) in ent["fields"].as_object().into_iter().flatten() {
+            if f["type"] != "file" {
+                continue;
+            }
+            let errs = |codes: &[(&str, &str)]| problem_responses(codes);
+            let mut put_responses = json!({"200": single});
+            if let (Value::Object(r), Value::Object(e)) = (
+                &mut put_responses,
+                errs(&[
+                    ("401", "unauthenticated"),
+                    ("403", "forbidden"),
+                    ("404", "not_found"),
+                    ("409", "version_conflict"),
+                    ("413", "payload_too_large"),
+                    ("422", "validation_failed"),
+                    ("428", "precondition_required"),
+                    ("503", "files_not_configured"),
+                ]),
+            ) {
+                r.extend(e);
+            }
+            let mut get_file = json!({"200": {"description": "the file's bytes",
+                "headers": {"ETag": {"schema": {"type": "string"}}},
+                "content": {"*/*": {"schema": {"type": "string", "format": "binary"}}}}});
+            if let (Value::Object(r), Value::Object(e)) = (
+                &mut get_file,
+                errs(&[
+                    ("401", "unauthenticated"),
+                    ("403", "forbidden"),
+                    ("404", "not_found"),
+                    ("503", "files_not_configured"),
+                ]),
+            ) {
+                r.extend(e);
+            }
+            paths.insert(
+                format!("/v1/{installation}/_files/{name}/{{id}}/{fname}"),
+                json!({
+                    "get": {"operationId": format!("download_{name}_{fname}"),
+                        "parameters": [id_param], "responses": get_file},
+                    "put": {"operationId": format!("upload_{name}_{fname}"),
+                        "parameters": [id_param, if_match,
+                            {"name": "X-CE-Filename", "in": "header", "required": false, "schema": {"type": "string"}}],
+                        "requestBody": {"required": true, "content": {"*/*": {"schema": {"type": "string", "format": "binary"}}}},
+                        "responses": put_responses}
+                }),
+            );
+        }
     }
     json!({
         "openapi": "3.1.0",

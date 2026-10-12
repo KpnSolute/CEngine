@@ -329,6 +329,39 @@ async fn files_obey_roles_sizes_fields_freezes_and_forged_keys() {
     )
     .await;
     assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+    // The advertised hash comes from the key, not from a stored value a patch could set.
+    let (_, mine) = f
+        .api
+        .call("GET", &format!("/v1/{INST}/doc/{id}"), None, None)
+        .await;
+    let mut meta = mine["data"]["scan"].clone();
+    let real = meta["key"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+    meta["sha256"] = json!("bogus");
+    meta["content_type"] = json!("text/plain");
+    let (s, v) = f
+        .api
+        .call(
+            "PATCH",
+            &format!("/v1/{INST}/doc/{id}"),
+            Some(2),
+            Some(json!({"scan": meta})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, h, _) = raw(&app, "GET", &path(&id, "scan"), "owner", None, vec![]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(h["etag"].to_str().unwrap().trim_matches('"'), real);
+    let (s, _, spec) = raw(&app, "GET", "/_meta/openapi", "owner", None, vec![]).await;
+    assert_eq!(s, StatusCode::OK);
+    let spec: Value = serde_json::from_slice(&spec).unwrap();
+    let p = &spec["paths"][format!("/v1/{INST}/_files/doc/{{id}}/scan")];
+    assert!(p["get"].is_object() && p["put"].is_object(), "{p}");
     // A plain patch cannot point a file field at another record's file.
     let (s, _, _) = raw(
         &app,
@@ -350,7 +383,7 @@ async fn files_obey_roles_sizes_fields_freezes_and_forged_keys() {
         .call(
             "PATCH",
             &format!("/v1/{INST}/doc/{id}"),
-            Some(2),
+            Some(3),
             Some(json!({"scan": forged})),
         )
         .await;

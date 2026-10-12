@@ -685,13 +685,21 @@ async fn file_get<S: Store + Send + Sync + 'static>(
         if !key.starts_with(&format!("{}/{entity}/{rec_id}/{field}/", scope.tenant_id())) {
             return Err(Problem::not_found());
         }
-        let sha = meta["sha256"].as_str().unwrap_or_default().to_string();
+        // The hash is the last part of the key, which the prefix check above ties to this record;
+        // the stored `sha256` value is not trusted. The type is the committed one, not whatever
+        // an upload that was later rejected left in the store.
+        let sha = key.rsplit('/').next().unwrap_or_default().to_string();
+        let stored_type = meta["content_type"]
+            .as_str()
+            .unwrap_or("application/octet-stream")
+            .to_string();
         let name = files::clean_name(meta["name"].as_str().unwrap_or("file"));
         let got = tokio::task::spawn_blocking(move || blobs.get(&scope, &key))
             .await
             .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
             .map_err(|e| store_problem(StoreError::Backend(e)))?;
-        let (bytes, content_type) = got.ok_or_else(Problem::not_found)?;
+        let (bytes, _) = got.ok_or_else(Problem::not_found)?;
+        let content_type = stored_type;
         let mut res = (StatusCode::OK, bytes).into_response();
         let h = res.headers_mut();
         if let Ok(v) = HeaderValue::from_str(&content_type) {
