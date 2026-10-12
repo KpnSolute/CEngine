@@ -164,3 +164,63 @@ fn every_legacy_vector_matches_the_module_under_the_mjcc_policy() {
         bad.join("\n")
     );
 }
+
+/// Prices where the legacy float arithmetic holds a move of exactly 25% (for example
+/// 57.946660 to 43.459995, which is exactly three quarters). The legacy tests and rule text say
+/// exactly 25% applies, and the exact decimal rule does that. Anything else that differs from
+/// the legacy decision is a failure.
+const KNOWN_FLOAT_HOLDS: [(&str, &str); 6] = [
+    ("57.946660", "43.459995"),
+    ("82.172024", "102.715030"),
+    ("70.860152", "88.575190"),
+    ("8.808492", "11.010615"),
+    ("2.100712", "1.575534"),
+    ("32.815008", "41.018760"),
+];
+
+#[test]
+fn price_decisions_match_the_legacy_observed_price_protocol() {
+    let m = manifest();
+    let rule = m.value["actions"]["settle_price_observation"]["effect"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|e| e["set"]["decision"].as_str())
+        .expect("the decision rule is a string")
+        .to_string();
+    let vectors: Value = serde_json::from_str(include_str!(
+        "../../../tests/parity/mjcc_price_vectors.json"
+    ))
+    .unwrap();
+    let cases = vectors["cases"].as_array().unwrap();
+    assert!(cases.len() >= 300, "too few vectors: {}", cases.len());
+    let mut bad: Vec<String> = Vec::new();
+    let mut seen = [false; KNOWN_FLOAT_HOLDS.len()];
+    for c in cases {
+        let (prev, obs) = (
+            c["previous"].as_str().unwrap(),
+            c["observed"].as_str().unwrap(),
+        );
+        let mut env = ce_expr::Env::new();
+        env.insert("previous_price".into(), ce_expr::Value::Dec(dec(prev)));
+        env.insert("observed_price".into(), ce_expr::Value::Dec(dec(obs)));
+        let got = match ce_expr::run(&rule, &env) {
+            Ok(ce_expr::Value::Str(s)) => s,
+            other => panic!("{prev} -> {obs}: {other:?}"),
+        };
+        let want = c["decision"].as_str().unwrap();
+        if got == want {
+            continue;
+        }
+        match KNOWN_FLOAT_HOLDS.iter().position(|k| *k == (prev, obs)) {
+            Some(at) if want == "hold" && got == "apply" => seen[at] = true,
+            _ => bad.push(format!("{prev} -> {obs}: {got}, legacy {want}")),
+        }
+    }
+    for (k, hit) in KNOWN_FLOAT_HOLDS.iter().zip(&seen) {
+        if !hit {
+            bad.push(format!("expected float-hold difference not seen: {k:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}

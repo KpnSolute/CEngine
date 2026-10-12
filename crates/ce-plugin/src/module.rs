@@ -128,6 +128,20 @@ pub fn compose(
         entities.insert(k.clone(), v.clone());
     }
 
+    if let Some(acts) = fragment["actions"].as_object() {
+        let actions = root
+            .entry("actions")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or(ComposeError::NotAnObject)?;
+        for (k, v) in acts {
+            if actions.contains_key(k) {
+                return Err(ComposeError::Clash(k.clone()));
+            }
+            actions.insert(k.clone(), v.clone());
+        }
+    }
+
     let mut prov = serde_json::json!({"module": {"name": module, "api": def["api"]}});
     if let (Some(p), Some(d)) = (plugin, digest) {
         prov["plugin"] =
