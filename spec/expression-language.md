@@ -106,3 +106,13 @@ through the same transactional store API as actions.
 - `ends_at > starts_at`
 - `ref(period).state == 'published'`
 - `when(amount > 1000, 'director', 'manager')`
+
+## Actions over HTTP
+`POST /v1/{inst}/actions/{name}` with body `{"id": "<record>", "input": {...}}`, `If-Match` (the record's version) and `Idempotency-Key`. The caller's role must list the action (`roles.*.actions`); that alone is enough, the role needs no write on the entity. The effects run in order inside one transaction; any failure undoes all of them:
+
+- `set`: each value is an expression, evaluated against the record as it stands and written through the normal write path (rules, computed fields, `locked_when` and audit apply). Bindings: the record's fields, `input.<name>`, `actor.*`, `now`, `today`.
+- `transition`: moves the record to the named state if the state graph allows it from the current one (409 `invalid_transition` otherwise).
+- `create`: builds a record of another entity from expressions, with its initial state and defaults, and creates it. Its idempotency key is derived from the request's key.
+- `emit`: names an event. It is returned in `meta.emitted` and handed to the outbox when events out lands.
+
+`requires_state` is checked first (409 `invalid_transition`); the input is validated against the action's `input` fields (422). The response is the record after the last effect plus `meta.created` and `meta.emitted`. A retry of a finished action fails with 409 `version_conflict` because the record has moved on.

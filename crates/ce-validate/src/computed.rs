@@ -262,3 +262,30 @@ pub fn evaluate_computed_with(
         Err(errors)
     }
 }
+
+/// Evaluates one action expression (`effect.set` or `effect.create.values`) against `record`
+/// (the stored record of the action's entity) with the action's `input.*` values bound, and
+/// shapes the result for `target`, a field definition. `Ok(None)` means null.
+#[allow(clippy::too_many_arguments)]
+pub fn eval_effect(
+    m: &Manifest,
+    entity: &str,
+    record: &serde_json::Map<String, Value>,
+    ctx: &crate::Context,
+    input: &serde_json::Map<String, Value>,
+    input_defs: &serde_json::Map<String, Value>,
+    resolver: &dyn ce_expr::Resolver,
+    src: &str,
+    target_name: &str,
+    target: &Value,
+) -> Result<Option<Value>, String> {
+    let ent = &m.value["entities"][entity];
+    let mut env = crate::invariants::build_env(ent, record, None, ctx);
+    for (name, def) in input_defs {
+        let ty = def["type"].as_str().unwrap_or("");
+        let v = input.get(name).unwrap_or(&Value::Null);
+        env.insert(format!("input.{name}"), crate::invariants::to_expr(ty, v));
+    }
+    let out = ce_expr::run_with(src, &env, resolver).map_err(|e| format!("{e:?}"))?;
+    to_json(target_name, target, out)
+}

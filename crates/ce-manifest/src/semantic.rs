@@ -184,6 +184,9 @@ pub fn check(m: &Value) -> Vec<Issue> {
         if let Some(sf) = ent.get("state").and_then(|s| s["field"].as_str()) {
             names.insert(sf);
         }
+        // Expressions of an action also read the caller's `input.*`.
+        let mut expr_names = names.clone();
+        expr_names.insert("input");
         for (i, s) in a
             .get("requires_state")
             .and_then(Value::as_array)
@@ -227,7 +230,13 @@ pub fn check(m: &Value) -> Vec<Issue> {
                         ));
                     }
                     if let Some(e) = v.as_str() {
-                        expr(&mut out, &format!("{ep}/set/{k}"), e, &names, Site::Plain);
+                        expr(
+                            &mut out,
+                            &format!("{ep}/set/{k}"),
+                            e,
+                            &expr_names,
+                            Site::Plain,
+                        );
                     }
                 }
             }
@@ -238,7 +247,28 @@ pub fn check(m: &Value) -> Vec<Issue> {
                         "unknown_entity",
                         format!("no entity `{t}`"),
                     )),
-                    _ => {}
+                    Some(t) => {
+                        let tf = obj(&entities[t], "fields").unwrap_or(&empty);
+                        for (k, v) in c.get("values").and_then(Value::as_object).unwrap_or(&empty) {
+                            if !tf.contains_key(k) {
+                                out.push(issue(
+                                    format!("{ep}/create/values/{k}"),
+                                    "unknown_field",
+                                    format!("`{t}` has no field `{k}`"),
+                                ));
+                            }
+                            if let Some(e) = v.as_str() {
+                                expr(
+                                    &mut out,
+                                    &format!("{ep}/create/values/{k}"),
+                                    e,
+                                    &expr_names,
+                                    Site::Plain,
+                                );
+                            }
+                        }
+                    }
+                    None => {}
                 }
             }
         }

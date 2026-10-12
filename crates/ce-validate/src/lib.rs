@@ -20,7 +20,9 @@
 
 mod computed;
 mod invariants;
-pub use computed::{aggregate_sources, evaluate_computed, evaluate_computed_with, AggregateSource};
+pub use computed::{
+    aggregate_sources, eval_effect, evaluate_computed, evaluate_computed_with, AggregateSource,
+};
 pub use invariants::{
     check_invariants, check_invariants_with, is_locked, json_to_expr, unenforced_invariants,
     Context, Unenforced,
@@ -138,7 +140,7 @@ fn mismatch(k: &str, want: &str) -> Option<FieldError> {
     Some(err(k, "type_mismatch", format!("expected {want}")))
 }
 
-fn check_value(k: &str, f: &Value, v: &Value) -> Option<FieldError> {
+pub fn check_value(k: &str, f: &Value, v: &Value) -> Option<FieldError> {
     match f["type"].as_str().unwrap_or("") {
         "string" | "text" => {
             let Some(s) = v.as_str() else {

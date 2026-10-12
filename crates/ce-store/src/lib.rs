@@ -115,6 +115,26 @@ pub trait Store {
         data: Value,
     ) -> Result<Record, StoreError>;
 
+    /// Moves the record to another state when `expected_version` matches. Stores that own the
+    /// state field (it is never taken from caller data) write it themselves; the default keeps
+    /// the state in the record's data and replaces it.
+    fn set_state(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+        field: &str,
+        state: &str,
+    ) -> Result<Record, StoreError> {
+        let cur = self.get(scope, entity, id)?;
+        let mut data = cur.data;
+        if let Some(o) = data.as_object_mut() {
+            o.insert(field.to_string(), Value::String(state.to_string()));
+        }
+        self.update(scope, entity, id, expected_version, data)
+    }
+
     /// Soft-deletes when `expected_version` matches.
     fn delete(
         &self,

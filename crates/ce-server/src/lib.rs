@@ -14,6 +14,7 @@
 //! (including sums over child records) and invariants (including `ref()`) are enforced there.
 //! Not yet: batch, actions, changesets, events, files.
 
+mod actions;
 mod changesets;
 mod openapi;
 mod periods;
@@ -93,6 +94,7 @@ where
             "/v1/{inst}/changeset/{id}/{verb}",
             post(changeset_verb::<S>),
         )
+        .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
         .route("/v1/{inst}/{entity}", get(list::<S>).post(create::<S>))
         .route(
@@ -231,6 +233,30 @@ fn invariant_context<S>(st: &AppState<S>, who: &Principal) -> ce_validate::Conte
         actor_id: who.user_id.clone(),
         actor_role: who.roles.first().cloned(),
         now_unix: i64::try_from((st.now)()).unwrap_or(0),
+    }
+}
+
+pub(crate) fn failure_problem(f: writes::Failure) -> Problem {
+    match f {
+        writes::Failure::Store(e) => store_problem(e),
+        writes::Failure::Rules(errors) => invariant_problem(errors),
+        writes::Failure::Locked => locked_problem(),
+    }
+}
+
+/// Sets what the server owns on a new record: the initial state and the declared defaults.
+pub(crate) fn prepare_create(m: &Manifest, entity: &str, obj: &mut Map<String, Value>) {
+    // Callers cannot choose the state; the server sets the initial one for every backend.
+    let sm = &m.value["entities"][entity]["state"];
+    if let (Some(f), Some(i)) = (sm["field"].as_str(), sm["initial"].as_str()) {
+        obj.insert(f.to_string(), Value::String(i.to_string()));
+    }
+    // Defaults are written with the record, so later patches see them like any stored value.
+    let fields = &m.value["entities"][entity]["fields"];
+    for (name, f) in fields.as_object().into_iter().flatten() {
+        if !obj.contains_key(name) && !f["computed"].is_string() && !f["default"].is_null() {
+            obj.insert(name.clone(), f["default"].clone());
+        }
     }
 }
 
@@ -504,6 +530,76 @@ async fn stage_if_governed<S: Store + Send + Sync + 'static>(
     Ok(Some((StatusCode::ACCEPTED, Json(body)).into_response()))
 }
 
+/// `POST .../actions/{name}` with `{"id": ..., "input": {...}}`, `If-Match` and `Idempotency-Key`.
+async fn run_action<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authenticate(&st, &headers)?;
+        if inst != st.installation || !actions::exists(&st.manifest, &name) {
+            return Err(Problem::not_found());
+        }
+        if !st.policy.can_run(&who.roles, &name) {
+            return Err(Problem::forbidden());
+        }
+        let expected = if_match(&headers)?;
+        let key = idempotency_key(&headers)?;
+        let mut body = parse_object(&body.map_err(body_problem)?)?;
+        let id = match body.remove("id") {
+            Some(Value::String(s)) => s,
+            _ => {
+                return Err(Problem::validation(
+                    "the body needs the id of the record",
+                    vec![json!({"path": "/id", "code": "required", "detail": "a record id"})],
+                ))
+            }
+        };
+        let input = match body.remove("input") {
+            None | Some(Value::Null) => Map::new(),
+            Some(Value::Object(o)) => o,
+            Some(_) => {
+                return Err(Problem::validation(
+                    "input must be an object",
+                    vec![json!({"path": "/input", "code": "type_mismatch", "detail": "an object"})],
+                ))
+            }
+        };
+        let ctx = invariant_context(&st, &who);
+        let scope = who.scope().clone();
+        let (store, manifest, rid2) = (st.store.clone(), st.manifest.clone(), rid.clone());
+        let done = tokio::task::spawn_blocking(move || {
+            let env = writes::Env {
+                manifest: &manifest,
+                scope: &scope,
+                ctx: &ctx,
+                request_id: &rid2,
+            };
+            actions::run(
+                &*store,
+                &env,
+                &actions::Run {
+                    name: &name,
+                    id: &id,
+                    expected,
+                    input: &input,
+                    key: &key,
+                },
+            )
+        })
+        .await
+        .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
+        let body = json!({"data": record_json(&done.record), "meta": {
+            "request_id": rid, "version": done.record.version,
+            "created": done.created, "emitted": done.emitted}});
+        Ok((StatusCode::OK, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
+}
+
 /// `POST .../period/{id}/{close|reopen}`.
 async fn period_verb<S: Store + Send + Sync + 'static>(
     State(st): State<AppState<S>>,
@@ -601,18 +697,7 @@ async fn create<S: Store + Send + Sync + 'static>(
         let key = idempotency_key(&headers)?;
         let mut obj = parse_object(&body.map_err(body_problem)?)?;
         validate_body(&st, &entity, &obj, ce_validate::Mode::Create)?;
-        // Callers cannot choose the state; the server sets the initial one for every backend.
-        let sm = &st.manifest.value["entities"][entity.as_str()]["state"];
-        if let (Some(f), Some(i)) = (sm["field"].as_str(), sm["initial"].as_str()) {
-            obj.insert(f.to_string(), Value::String(i.to_string()));
-        }
-        // Defaults are written with the record, so later patches see them like any stored value.
-        let fields = &st.manifest.value["entities"][entity.as_str()]["fields"];
-        for (name, f) in fields.as_object().into_iter().flatten() {
-            if !obj.contains_key(name) && !f["computed"].is_string() && !f["default"].is_null() {
-                obj.insert(name.clone(), f["default"].clone());
-            }
-        }
+        prepare_create(&st.manifest, &entity, &mut obj);
         if let Some(res) = stage_if_governed(
             &st,
             &who,

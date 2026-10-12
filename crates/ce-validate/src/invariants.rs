@@ -25,7 +25,7 @@ pub fn json_to_expr(ty: &str, v: &Value) -> Ev {
     to_expr(ty, v)
 }
 
-fn to_expr(ty: &str, v: &Value) -> Ev {
+pub(crate) fn to_expr(ty: &str, v: &Value) -> Ev {
     match v {
         Value::Null => Ev::Null,
         Value::Bool(b) => Ev::Bool(*b),
