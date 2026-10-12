@@ -1022,3 +1022,119 @@ async fn rollover_carries_cost_so_a_new_price_does_not_revalue_what_was_on_hand(
     assert_eq!(oil["data"]["opening_value"], "0.00");
     close(api.app).await;
 }
+
+/// The same rollover as the client procedure above, as one server action on the closed period:
+/// it needs the period closed, copies every line with its carried cost, refuses a second run,
+/// and leaves the closed period alone.
+#[tokio::test]
+async fn the_rollover_action_carries_quantity_and_cost_in_one_request() {
+    let Some(url) = url() else { return };
+    let rules = plugin("legacy-valuation", LEGACY_VALUATION);
+    let mut api = Api {
+        app: app(&url, manifest(Some(&rules))).await,
+        n: 0,
+    };
+    let (_, w1) = api
+        .post(
+            "period",
+            json!({"label": "W1", "starts_on": "2026-11-01", "ends_on": "2026-11-07"}),
+        )
+        .await;
+    let (_, w2) = api
+        .post(
+            "period",
+            json!({"label": "W2", "starts_on": "2026-11-08", "ends_on": "2026-11-14"}),
+        )
+        .await;
+    let (w1id, w2id) = (id(&w1), id(&w2));
+    for (sku, open, price, pull) in [("RICE", "7", "1.428571", "1"), ("OIL", "2", "5", "2")] {
+        let (_, item) = api
+            .post(
+                "stock_item",
+                json!({"sku": sku, "description": sku, "unit_price": price}),
+            )
+            .await;
+        let (_, line) = api
+            .post(
+                "stock_line",
+                json!({"item": id(&item), "period": w1id, "opening_oh": open, "unit_price": price}),
+            )
+            .await;
+        let (s, _) = api
+            .post(
+                "stock_movement",
+                json!({"line": id(&line), "period": w1id, "pulled": pull}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+    async fn run(api: &mut Api, from: &str, to: &str, v: u64) -> (StatusCode, Value) {
+        api.call(
+            "POST",
+            &format!("/v1/{INST}/actions/rollover_stock"),
+            Some(v),
+            Some(json!({"id": from, "input": {"to": to}})),
+        )
+        .await
+    }
+    // An open period has not finished moving, so it cannot be carried.
+    let (s, v) = run(&mut api, &w1id, &w2id, 1).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let (s, v) = api
+        .call(
+            "POST",
+            &format!("/v1/{INST}/period/{w1id}/close"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let version = v["data"]["version"].as_u64().unwrap();
+
+    let (s, v) = run(&mut api, &w1id, &w2id, version).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, all) = api
+        .call(
+            "GET",
+            &format!("/v1/{INST}/stock_line?limit=100"),
+            None,
+            None,
+        )
+        .await;
+    let next: Vec<&Value> = all["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l["period"] == w2id.as_str())
+        .collect();
+    assert_eq!(next.len(), 2, "{all}");
+    let rice = next.iter().find(|l| l["opening_oh"] == "6.000").unwrap();
+    assert_eq!(rice["opening_unit_cost"], "1.428333");
+    let oil = next.iter().find(|l| l["opening_oh"] == "0.000").unwrap();
+    assert_eq!(oil["opening_unit_cost"], "0.000000");
+    // The supplier then raises the price to 3: the opening stock keeps its carried cost.
+    let (s, p) = api
+        .patch(
+            "stock_line",
+            rice["id"].as_str().unwrap(),
+            rice["version"].as_u64().unwrap(),
+            json!({"unit_price": "3"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{p}");
+    assert_eq!(p["data"]["opening_value"], "8.57");
+
+    // Running it again is refused whole and changes nothing: the period moved on with the first run.
+    let (s, v) = run(&mut api, &w1id, &w2id, version).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let (_, again) = api
+        .call(
+            "GET",
+            &format!("/v1/{INST}/stock_line?limit=100"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(again["data"].as_array().unwrap().len(), 4);
+    close(api.app).await;
+}

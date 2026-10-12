@@ -105,6 +105,7 @@
               "update": { "type": "object", "required": ["entity", "id", "set"], "additionalProperties": false, "properties": { "entity": { "$ref": "#/$defs/name" }, "id": { "type": "string", "description": "Expression giving the record id, usually a ref field of the action's record." }, "set": { "type": "object", "additionalProperties": { "type": "string" } } } },
               "transition": { "$ref": "#/$defs/name" },
               "create": { "type": "object", "required": ["entity", "values"], "additionalProperties": false, "properties": { "entity": { "$ref": "#/$defs/name" }, "values": { "type": "object", "additionalProperties": { "type": "string" } } } },
+              "carry": { "type": "object", "required": ["entity", "via", "values"], "additionalProperties": false, "properties": { "entity": { "$ref": "#/$defs/name" }, "via": { "$ref": "#/$defs/name", "description": "A ref field of `entity` that points at the action's entity. Every live record pointing at the action's record is copied." }, "values": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Expressions over the source row's fields and `input.*`. Must set `via` to a different record." }, "requires": { "type": "string", "description": "Expression over the action's own record; the action is refused (409) unless it is true." } } },
               "emit": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*$" }
             },
             "minProperties": 1
