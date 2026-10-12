@@ -336,6 +336,35 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
                 "summary": r["title"], "parameters": params, "responses": responses}}),
         );
     }
+    if crate::slots::enabled(m) {
+        let mut responses = json!({"200": {"description": "free slots in time order, at most 1000",
+            "content": {"application/json": {"schema": {"type": "object", "properties": {
+                "data": {"type": "array", "items": {"type": "object", "properties": {
+                    "starts_at": {"type": "string", "format": "date-time"},
+                    "ends_at": {"type": "string", "format": "date-time"}}}}}}}}}});
+        if let (Value::Object(r), Value::Object(e)) = (
+            &mut responses,
+            problem_responses(&[
+                ("401", "unauthenticated"),
+                ("403", "forbidden"),
+                ("404", "not_found"),
+                ("422", "validation_failed"),
+            ]),
+        ) {
+            r.extend(e);
+        }
+        paths.insert(
+            format!("/v1/{installation}/_slots"),
+            json!({"get": {"operationId": "freeSlots",
+                "parameters": [
+                    query("resource", true, json!({"type": "string"})),
+                    query("from", true, json!({"type": "string", "format": "date-time"})),
+                    query("to", true, json!({"type": "string", "format": "date-time"})),
+                    query("duration", true, json!({"type": "integer", "minimum": 1, "maximum": 1440})),
+                    query("step", false, json!({"type": "integer", "minimum": 1, "maximum": 1440}))],
+                "responses": responses}}),
+        );
+    }
     json!({
         "openapi": "3.1.0",
         "info": {

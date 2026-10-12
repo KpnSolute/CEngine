@@ -8,6 +8,7 @@
         "name": {"type": "string", "required": true, "max_length": 160, "unique": true, "indexed": true},
         "timezone": {"type": "string", "required": true, "max_length": 64},
         "buffer_minutes": {"type": "integer", "default": 0},
+        "hours": {"type": "json"},
         "notes": {"type": "text"}
       },
       "sort_keys": ["name"]
