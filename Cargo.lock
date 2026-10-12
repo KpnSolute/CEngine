@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "ce-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "hmac 0.12.1",
@@ -216,14 +216,14 @@ dependencies = [
 
 [[package]]
 name = "ce-barcode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "qrcode",
 ]
 
 [[package]]
 name = "ce-bind"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bigdecimal",
  "ce-expr",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "ce-calendar"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "ce-codegen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ce-manifest",
  "serde_json",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "ce-events"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "ce-auth",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "ce-expr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bigdecimal",
  "num-bigint",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "ce-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ce-manifest",
  "ce-validate",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "ce-manifest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ce-expr",
  "jsonschema",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "ce-migrate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "ce-auth",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "ce-plugin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ce-expr",
  "ce-manifest",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "ce-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "ce-auth",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "ce-provider"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "ce-auth",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "ce-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ce-bind",
  "pyo3",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "ce-query"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "ce-auth",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "ce-serve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "ce-auth",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "ce-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "ce-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ce-manifest",
  "serde_json",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "ce-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "ce-auth",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "ce-store-pg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "ce-auth",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "ce-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ce-manifest",
  "ce-validate",
@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "ce-validate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bigdecimal",
  "ce-expr",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "ce-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ce-bind",
  "getrandom 0.3.4",
