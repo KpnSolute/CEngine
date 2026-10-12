@@ -214,6 +214,18 @@ fn apply<S: Store>(
             bad = Some(not_open());
             return Err(StoreError::Aborted);
         }
+        // Four eyes: the person who staged the work does not approve it, even holding both roles.
+        if !revert
+            && preview.is_none()
+            && text(&object(&cs.data), "submitted_by") == env.ctx.actor_id
+        {
+            bad = Some(Problem::new(
+                StatusCode::FORBIDDEN,
+                "self_merge",
+                "a changeset cannot be merged by the person who submitted it",
+            ));
+            return Err(StoreError::Aborted);
+        }
         let mut list = ops(tx, env.scope, id)?;
         if revert {
             list.reverse();
