@@ -144,6 +144,67 @@ fn settle(
     }
 }
 
+/// The `(entity, id)` of every parent whose totals a write to `child` changes.
+fn parent_keys(
+    env: &Env,
+    child: &str,
+    old: Option<&Map<String, Value>>,
+    new: Option<&Map<String, Value>>,
+) -> BTreeSet<(String, String)> {
+    let mut parents = BTreeSet::new();
+    for src in aggregate_sources(env.manifest)
+        .into_iter()
+        .filter(|s| s.child == child)
+    {
+        for d in [old, new].into_iter().flatten() {
+            if let Some(id) = d.get(&src.ref_field).and_then(Value::as_str) {
+                parents.insert((src.parent.clone(), id.to_string()));
+            }
+        }
+    }
+    parents
+}
+
+/// Locks every record a write will change above its own row, top-down, before the write touches
+/// its own row. A writer that updates a child goes on to update the parent and then the
+/// grandparent; one that deletes a parent holds the parent and waits for its children. If each
+/// took its locks in its own order they would deadlock, so all of them take the same order: the
+/// highest ancestor first, then down, and the row itself last. (Writing a child row also takes a
+/// share lock on its parent, so locking the parent afterwards is the same hazard.)
+fn lock_parents(
+    tx: &dyn Store,
+    env: &Env,
+    child: &str,
+    old: Option<&Map<String, Value>>,
+    new: Option<&Map<String, Value>>,
+) -> Result<(), Failure> {
+    let mut levels: Vec<BTreeSet<(String, String)>> = Vec::new();
+    let mut frontier = parent_keys(env, child, old, new);
+    while !frontier.is_empty() && levels.len() < MAX_DEPTH {
+        let mut next = BTreeSet::new();
+        for (entity, id) in &frontier {
+            // Only to find the next level up; the lock follows, top-down.
+            if let Ok(r) = tx.get(env.scope, entity, id) {
+                next.extend(parent_keys(env, entity, r.data.as_object(), None));
+            }
+        }
+        levels.push(std::mem::take(&mut frontier));
+        frontier = next;
+    }
+    // A record reachable at two heights is locked at the higher one.
+    let mut placed: BTreeSet<(String, String)> = BTreeSet::new();
+    for level in levels.iter().rev() {
+        for key in level.iter().filter(|k| !placed.contains(*k)) {
+            match tx.get_locked(env.scope, &key.0, &key.1) {
+                Ok(_) | Err(StoreError::NotFound) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        placed.extend(level.iter().cloned());
+    }
+    Ok(())
+}
+
 /// Brings every parent of a changed child up to date. `old` and `new` are the child's data
 /// before and after the write (`None` when it did not exist).
 fn refresh_parents(
@@ -157,17 +218,7 @@ fn refresh_parents(
     // Every parent at this level is locked, in one order, before any of them changes or the
     // cascade climbs: two writers then never wait on each other's parents, and a rule of a
     // higher level sees all of this level's new totals together.
-    let mut parents: BTreeSet<(String, String)> = BTreeSet::new();
-    for src in aggregate_sources(env.manifest)
-        .into_iter()
-        .filter(|s| s.child == child)
-    {
-        for d in [old, new].into_iter().flatten() {
-            if let Some(id) = d.get(&src.ref_field).and_then(Value::as_str) {
-                parents.insert((src.parent.clone(), id.to_string()));
-            }
-        }
-    }
+    let parents = parent_keys(env, child, old, new);
     if parents.is_empty() {
         return Ok(());
     }
@@ -213,6 +264,7 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             // The derived fields are computed only if this call really creates the record: a
             // retry of the same request replays the first result even when the records they
             // read have changed since (or would now break a rule).
+            lock_parents(tx, env, entity, None, Some(data))?;
             let mut failed = None;
             let mut derived = false;
             let rec = tx.insert_with(
@@ -255,6 +307,10 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             expected,
             patch,
         } => {
+            let pre = tx.get(env.scope, entity, id)?;
+            let mut moved = pre.data.clone();
+            crate::merge_patch(&mut moved, &Value::Object(patch.clone()));
+            lock_parents(tx, env, entity, pre.data.as_object(), moved.as_object())?;
             let current = tx.get_locked(env.scope, entity, id)?;
             if current.version != *expected {
                 return Err(StoreError::VersionConflict {
@@ -274,6 +330,8 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             Ok(Some(rec))
         }
         Op::Delete { id, expected } => {
+            let pre = tx.get(env.scope, entity, id)?;
+            lock_parents(tx, env, entity, pre.data.as_object(), None)?;
             let current = tx.get_locked(env.scope, entity, id)?;
             tx.delete(env.scope, entity, id, *expected)?;
             refresh_parents(tx, env, entity, current.data.as_object(), None, 0)?;

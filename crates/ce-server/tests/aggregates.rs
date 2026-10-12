@@ -507,3 +507,48 @@ async fn concurrent_children_of_one_parent_all_land_and_the_total_is_exact() {
     assert_eq!(api.get("customer", &id(&c)).await["data"]["owed"], "12.00");
     close(api.app).await;
 }
+
+#[tokio::test]
+async fn children_racing_a_parent_delete_never_deadlock() {
+    let Some(url) = url() else { return };
+    let mut api = Api {
+        app: app(&url, capped()).await,
+        n: 0,
+    };
+    let (_, c) = api.post("customer", json!({"name": "Ada"})).await;
+    for round in 0..8u32 {
+        let (_, o) = api.post("order", json!({"customer": id(&c)})).await;
+        let oid = id(&o);
+        let version = o["data"]["version"].as_u64().unwrap_or(1);
+        let mut tasks = Vec::new();
+        for i in 0..6u32 {
+            let mut a = Api {
+                app: api.app.clone(),
+                n: 100_000 * (round + 1) + 1000 * i,
+            };
+            let oid = oid.clone();
+            tasks.push(tokio::spawn(async move {
+                a.post("item", json!({"order": oid, "price": "1.00"}))
+                    .await
+                    .0
+            }));
+        }
+        let mut d = Api {
+            app: api.app.clone(),
+            n: 900_000 + round,
+        };
+        let del = tokio::spawn(async move { d.delete("order", &oid, version).await });
+        for s in std::iter::once(del.await.unwrap()).chain(futures_util_join(tasks).await) {
+            assert!(!s.is_server_error(), "round {round}: {s}");
+        }
+    }
+    close(api.app).await;
+}
+
+async fn futures_util_join(tasks: Vec<tokio::task::JoinHandle<StatusCode>>) -> Vec<StatusCode> {
+    let mut out = Vec::new();
+    for t in tasks {
+        out.push(t.await.unwrap());
+    }
+    out
+}
