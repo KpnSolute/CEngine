@@ -56,24 +56,24 @@ fn sum(v: &Value) -> BigDecimal {
         .fold(BigDecimal::from(0), |a, b| a + b)
 }
 
-/// True when any of the three products behind a line's money is an exact half-cent, the one
-/// place exact decimal rounding and the legacy float rounding can disagree.
-fn ties(i: &Value) -> bool {
-    let price = dec(i["unit_price"].as_str().unwrap());
-    let ouc = dec(i["opening_unit_cost"].as_str().unwrap());
-    let open = dec(i["opening_oh"].as_str().unwrap());
-    let open_cost = if ouc > 0 { ouc } else { price.clone() };
-    [
-        open * open_cost,
-        sum(&i["received"]) * price.clone(),
-        sum(&i["pulled"]) * price,
-    ]
-    .into_iter()
-    .any(|p| {
-        let p = p * BigDecimal::from(200);
-        p.is_integer() && p.with_scale(0).digits() > 0 && (&p % BigDecimal::from(2)) != 0
-    })
-}
+/// (case, field, CEngine, legacy): exact half-cent products where exact half-up differs from the
+/// legacy float rounding. Anything else that differs is a failure.
+const KNOWN_FLOAT_ROUNDING: [(&str, &str, &str, &str); 4] = [
+    ("tie product 1.005 x 1", "opening_value", "1.01", "1.00"),
+    ("tie product 1.005 x 1", "ending_value", "1.01", "1.00"),
+    (
+        "tie product 0.045 x 1 on received",
+        "received_value",
+        "0.05",
+        "0.04",
+    ),
+    (
+        "tie product 0.045 x 1 on received",
+        "ending_value",
+        "0.05",
+        "0.04",
+    ),
+];
 
 fn cents(legacy: &str) -> String {
     format!("{:.2}", legacy.parse::<f64>().unwrap())
@@ -94,7 +94,7 @@ fn every_legacy_vector_matches_the_module_under_the_mjcc_policy() {
     let cases = vectors["cases"].as_array().unwrap();
     assert!(cases.len() >= 100, "too few vectors: {}", cases.len());
     let mut bad: Vec<String> = Vec::new();
-    let mut tie_diffs: Vec<String> = Vec::new();
+    let mut seen = [false; KNOWN_FLOAT_ROUNDING.len()];
     for c in cases {
         let i = &c["input"];
         let mut rec: Map<String, Value> = json!({
@@ -123,37 +123,39 @@ fn every_legacy_vector_matches_the_module_under_the_mjcc_policy() {
         if (&end_q - &want_q).abs() > dec("0.000000001") {
             bad.push(format!("{name}: ending_qty {end_q} != {want_q}"));
         }
-        // Money: to the cent. The only accepted difference is the legacy float rounding of an
-        // exact half-cent product (1.005 is stored below 1.005, so Python rounds it down):
-        // the module rounds the exact product half up. See `ties` below.
-        let tie = ties(i);
+        // Money: to the cent. The only accepted differences are the four figures in
+        // `KNOWN_FLOAT_ROUNDING`: the legacy float read path rounds an exact half cent one cent
+        // down (1.005 is stored below 1.005), the module rounds the exact product half up.
         for name_of in [
             "opening_value",
             "received_value",
             "pulled_value",
             "ending_value",
         ] {
-            let got = dec(rec[name_of].as_str().unwrap());
-            let exp = dec(&cents(want[name_of].as_str().unwrap()));
-            let diff = (&got - &exp).abs();
-            if diff == 0 {
+            let got = rec[name_of].as_str().unwrap().to_string();
+            let exp = cents(want[name_of].as_str().unwrap());
+            if dec(&got) == dec(&exp) {
                 continue;
             }
-            if tie && diff <= dec("0.03") {
-                tie_diffs.push(format!("{name}: {name_of} {got} vs legacy {exp}"));
-            } else {
-                bad.push(format!(
+            let known = KNOWN_FLOAT_ROUNDING
+                .iter()
+                .position(|k| *k == (name, name_of, got.as_str(), exp.as_str()));
+            match known {
+                Some(at) => seen[at] = true,
+                None => bad.push(format!(
                     "{name}: {name_of} {got} != legacy {exp} (input {})",
                     c["input"]
-                ));
+                )),
             }
         }
     }
-    eprintln!(
-        "half-cent ties where exact half-up differs from legacy float rounding: {}\n{}",
-        tie_diffs.len(),
-        tie_diffs.join("\n")
-    );
+    for (k, hit) in KNOWN_FLOAT_ROUNDING.iter().zip(&seen) {
+        if !hit {
+            bad.push(format!(
+                "expected float-rounding difference not seen: {k:?}"
+            ));
+        }
+    }
     assert!(
         bad.is_empty(),
         "{} of {} vectors differ:\n{}",
