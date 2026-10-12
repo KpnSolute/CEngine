@@ -3,7 +3,7 @@
   "api": 1,
   "title": "Stock counts: items, counts per period, movements, and the calculations over them",
   "requires_entities": ["period"],
-  "read": ["stock.items", "stock.lines", "stock.movements"],
+  "read": ["stock.items", "stock.lines", "stock.movements", "stock.invoices"],
   "write": [],
   "emit": [],
   "slots": {
@@ -95,7 +95,56 @@
         "locked_when": "ref(period).status == 'closed'",
         "sort_keys": ["txn_date"]
       },
+      "sku_alias": {
+        "governed": true,
+        "fields": {
+          "vendor": {"type": "string", "required": true, "max_length": 120, "indexed": true},
+          "vendor_sku": {"type": "string", "required": true, "max_length": 60, "indexed": true},
+          "alias_key": {"type": "string", "max_length": 200, "unique": true, "indexed": true, "computed": "concat(lower(trim(vendor)), '|', lower(trim(vendor_sku)))"},
+          "item": {"type": "ref", "ref": "stock_item", "indexed": true, "required": true}
+        },
+        "sort_keys": ["vendor", "vendor_sku"]
+      },
+      "supplier_invoice": {
+        "governed": true,
+        "fields": {
+          "vendor": {"type": "string", "required": true, "max_length": 120, "indexed": true},
+          "invoice_no": {"type": "string", "required": true, "max_length": 60},
+          "invoice_key": {"type": "string", "max_length": 200, "unique": true, "indexed": true, "computed": "concat(lower(trim(vendor)), '|', lower(trim(invoice_no)))"},
+          "invoice_date": {"type": "date", "indexed": true},
+          "fuel_charge": {"type": "decimal", "precision": 14, "scale": 2, "default": 0},
+          "tax": {"type": "decimal", "precision": 14, "scale": 2, "default": 0},
+          "vizient_discount": {"type": "decimal", "precision": 14, "scale": 2, "default": 0},
+          "stated_total": {"type": "decimal", "precision": 14, "scale": 2, "required": true},
+          "goods_total": {"type": "decimal", "precision": 14, "scale": 2, "computed": "sum(children(supplier_invoice_line, invoice).ext_price)"},
+          "net_total": {"type": "decimal", "precision": 14, "scale": 2, "computed": "round(goods_total + fuel_charge + tax - vizient_discount, 2)"},
+          "delta": {"type": "decimal", "precision": 14, "scale": 2, "computed": "round(stated_total - net_total, 2)"},
+          "reconciled": {"type": "boolean", "computed": "abs(delta) < 0.01"},
+          "document_name": {"type": "string", "max_length": 200},
+          "document_sha256": {"type": "string", "max_length": 64}
+        },
+        "sort_keys": ["invoice_date", "vendor"]
+      },
+      "supplier_invoice_line": {
+        "governed": true,
+        "fields": {
+          "invoice": {"type": "ref", "ref": "supplier_invoice", "indexed": true, "required": true},
+          "line_no": {"type": "integer", "required": true, "indexed": true},
+          "vendor_sku": {"type": "string", "max_length": 60, "indexed": true},
+          "description": {"type": "string", "max_length": 200},
+          "item": {"type": "ref", "ref": "stock_item", "indexed": true},
+          "qty": {"type": "decimal", "precision": 14, "scale": 3, "required": true},
+          "unit_price": {"type": "decimal", "precision": 12, "scale": 6, "required": true},
+          "ext_price": {"type": "decimal", "precision": 14, "scale": 2, "computed": "round(qty * unit_price, 2)"}
+        },
+        "invariants": [
+          {"name": "qty_positive", "expr": "qty > 0", "message_code": "invoice.qty_not_positive"},
+          {"name": "price_not_negative", "expr": "unit_price >= 0", "message_code": "stock.negative_price"}
+        ],
+        "sort_keys": ["line_no"]
+      },
       "price_observation": {
+        "governed": true,
         "fields": {
           "line": {"type": "ref", "ref": "stock_line", "indexed": true, "required": true},
           "observed_price": {"type": "decimal", "precision": 12, "scale": 6, "required": true},
