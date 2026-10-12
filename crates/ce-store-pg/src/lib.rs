@@ -16,9 +16,11 @@
 //! this generic store is the contract reference). Schema names are validated, never spliced
 //! from user input.
 
+mod blobs;
 mod pool;
 mod tls;
 mod typed;
+pub use blobs::PgBlobs;
 pub use tls::{connect, Tls};
 pub use typed::{PoolConfig, TypedPgStore};
 
