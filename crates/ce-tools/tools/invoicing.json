@@ -5,55 +5,228 @@
   "entities": {
     "invoice": {
       "fields": {
-        "number": {"type": "string", "required": true, "max_length": 40, "unique": true, "indexed": true},
-        "bill_to_name": {"type": "string", "required": true, "max_length": 160, "pii": true},
-        "bill_to_email": {"type": "string", "max_length": 254, "pii": true},
-        "currency": {"type": "string", "required": true, "max_length": 3},
-        "issue_date": {"type": "date", "required": true, "indexed": true},
-        "due_date": {"type": "date", "indexed": true},
-        "subtotal": {"type": "decimal", "precision": 14, "scale": 2, "default": 0},
-        "tax": {"type": "decimal", "precision": 14, "scale": 2, "default": 0},
-        "total": {"type": "decimal", "precision": 14, "scale": 2, "default": 0},
-        "status": {"type": "enum", "values": ["draft", "sent", "overdue", "paid", "void"], "indexed": true},
-        "notes": {"type": "text"}
+        "number": {
+          "type": "string",
+          "required": true,
+          "max_length": 40,
+          "unique": true,
+          "indexed": true
+        },
+        "bill_to_name": {
+          "type": "string",
+          "required": true,
+          "max_length": 160,
+          "pii": true
+        },
+        "bill_to_email": {
+          "type": "string",
+          "max_length": 254,
+          "pii": true
+        },
+        "currency": {
+          "type": "string",
+          "required": true,
+          "max_length": 3
+        },
+        "issue_date": {
+          "type": "date",
+          "required": true,
+          "indexed": true
+        },
+        "due_date": {
+          "type": "date",
+          "indexed": true
+        },
+        "subtotal": {
+          "type": "decimal",
+          "precision": 14,
+          "scale": 2,
+          "computed": "sum(children(invoice_line, invoice).line_total)"
+        },
+        "tax": {
+          "type": "decimal",
+          "precision": 14,
+          "scale": 2,
+          "default": 0
+        },
+        "total": {
+          "type": "decimal",
+          "precision": 14,
+          "scale": 2,
+          "computed": "subtotal + tax"
+        },
+        "status": {
+          "type": "enum",
+          "values": [
+            "draft",
+            "sent",
+            "overdue",
+            "paid",
+            "void"
+          ],
+          "indexed": true
+        },
+        "notes": {
+          "type": "text"
+        }
       },
       "state": {
         "field": "status",
         "initial": "draft",
         "states": {
-          "draft": {"code": 100, "to": ["sent", "void"]},
-          "sent": {"code": 200, "to": ["overdue", "paid", "void"]},
-          "overdue": {"code": 400, "to": ["paid", "void"]},
-          "paid": {"code": 600},
-          "void": {"code": 610}
+          "draft": {
+            "code": 100,
+            "to": [
+              "sent",
+              "void"
+            ]
+          },
+          "sent": {
+            "code": 200,
+            "to": [
+              "overdue",
+              "paid",
+              "void"
+            ]
+          },
+          "overdue": {
+            "code": 400,
+            "to": [
+              "paid",
+              "void"
+            ]
+          },
+          "paid": {
+            "code": 600
+          },
+          "void": {
+            "code": 610
+          }
         }
       },
       "invariants": [
-        {"name": "total_adds_up", "expr": "total == subtotal + tax", "message_code": "invoice.total_mismatch"},
-        {"name": "non_negative", "expr": "subtotal >= 0 and tax >= 0", "message_code": "invoice.negative_amount"},
-        {"name": "currency_code", "expr": "len(currency) == 3 and currency == upper(currency)", "message_code": "invoice.bad_currency"},
-        {"name": "due_after_issue", "expr": "is_null(due_date) or due_date >= issue_date", "message_code": "invoice.due_before_issue"}
+        {
+          "name": "non_negative",
+          "expr": "subtotal >= 0 and tax >= 0",
+          "message_code": "invoice.negative_amount"
+        },
+        {
+          "name": "currency_code",
+          "expr": "len(currency) == 3 and currency == upper(currency)",
+          "message_code": "invoice.bad_currency"
+        },
+        {
+          "name": "due_after_issue",
+          "expr": "is_null(due_date) or due_date >= issue_date",
+          "message_code": "invoice.due_before_issue"
+        }
       ],
-      "sort_keys": ["number", "issue_date", "due_date"]
+      "sort_keys": [
+        "number",
+        "issue_date",
+        "due_date"
+      ]
     },
     "invoice_line": {
       "fields": {
-        "invoice": {"type": "ref", "ref": "invoice", "required": true, "indexed": true},
-        "description": {"type": "string", "required": true, "max_length": 300},
-        "quantity": {"type": "decimal", "precision": 12, "scale": 3, "required": true},
-        "unit_price": {"type": "decimal", "precision": 14, "scale": 2, "required": true},
-        "line_total": {"type": "decimal", "precision": 14, "scale": 2, "required": true}
+        "invoice": {
+          "type": "ref",
+          "ref": "invoice",
+          "required": true,
+          "indexed": true
+        },
+        "description": {
+          "type": "string",
+          "required": true,
+          "max_length": 300
+        },
+        "quantity": {
+          "type": "decimal",
+          "precision": 12,
+          "scale": 3,
+          "required": true
+        },
+        "unit_price": {
+          "type": "decimal",
+          "precision": 14,
+          "scale": 2,
+          "required": true
+        },
+        "line_total": {
+          "type": "decimal",
+          "precision": 14,
+          "scale": 2,
+          "computed": "round(quantity * unit_price, 2)"
+        }
       },
       "invariants": [
-        {"name": "line_adds_up", "expr": "line_total == round(quantity * unit_price, 2)", "message_code": "invoice.line_mismatch"},
-        {"name": "positive_quantity", "expr": "quantity > 0", "message_code": "invoice.bad_quantity"}
+        {
+          "name": "positive_quantity",
+          "expr": "quantity > 0",
+          "message_code": "invoice.bad_quantity"
+        }
       ]
     }
   },
   "actions": {
-    "send_invoice": {"entity": "invoice", "requires_state": ["draft"], "effect": [{"transition": "sent"}, {"emit": "invoice.sent"}]},
-    "mark_invoice_overdue": {"entity": "invoice", "requires_state": ["sent"], "effect": [{"transition": "overdue"}, {"emit": "invoice.overdue"}]},
-    "mark_invoice_paid": {"entity": "invoice", "requires_state": ["sent", "overdue"], "effect": [{"transition": "paid"}, {"emit": "invoice.paid"}]},
-    "void_invoice": {"entity": "invoice", "requires_state": ["draft", "sent", "overdue"], "effect": [{"transition": "void"}, {"emit": "invoice.voided"}]}
+    "send_invoice": {
+      "entity": "invoice",
+      "requires_state": [
+        "draft"
+      ],
+      "effect": [
+        {
+          "transition": "sent"
+        },
+        {
+          "emit": "invoice.sent"
+        }
+      ]
+    },
+    "mark_invoice_overdue": {
+      "entity": "invoice",
+      "requires_state": [
+        "sent"
+      ],
+      "effect": [
+        {
+          "transition": "overdue"
+        },
+        {
+          "emit": "invoice.overdue"
+        }
+      ]
+    },
+    "mark_invoice_paid": {
+      "entity": "invoice",
+      "requires_state": [
+        "sent",
+        "overdue"
+      ],
+      "effect": [
+        {
+          "transition": "paid"
+        },
+        {
+          "emit": "invoice.paid"
+        }
+      ]
+    },
+    "void_invoice": {
+      "entity": "invoice",
+      "requires_state": [
+        "draft",
+        "sent",
+        "overdue"
+      ],
+      "effect": [
+        {
+          "transition": "void"
+        },
+        {
+          "emit": "invoice.voided"
+        }
+      ]
+    }
   }
 }

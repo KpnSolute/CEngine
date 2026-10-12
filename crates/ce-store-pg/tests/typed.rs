@@ -495,11 +495,10 @@ fn built_in_tools_install_and_run_on_the_typed_store() {
         )
         .unwrap();
     assert_eq!(inv.data["status"], "draft");
-    assert_eq!(inv.data["total"], "0.00");
     s.insert(
         &sc,
         "invoice_line",
-        json!({"invoice": inv.id, "description": "work", "quantity": "2.5", "unit_price": "10.00", "line_total": "25.00"}),
+        json!({"invoice": inv.id, "description": "work", "quantity": "2.5", "unit_price": "10.00"}),
         None,
     )
     .unwrap();

@@ -115,7 +115,7 @@ fn personal_data_is_marked_and_tools_name_no_provider() {
 }
 
 #[test]
-fn invoicing_checks_totals_with_invariants() {
+fn invoicing_keeps_totals_computed_and_checks_the_rest() {
     let m = compose(&shell(), &["invoicing"]).unwrap();
     let inv = &m["entities"]["invoice"]["invariants"];
     let names: Vec<&str> = inv
@@ -124,18 +124,21 @@ fn invoicing_checks_totals_with_invariants() {
         .iter()
         .map(|i| i["name"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        names,
-        [
-            "total_adds_up",
-            "non_negative",
-            "currency_code",
-            "due_after_issue"
-        ]
-    );
+    assert_eq!(names, ["non_negative", "currency_code", "due_after_issue"]);
     assert_eq!(
         m["entities"]["invoice"]["fields"]["bill_to_email"]["pii"],
         true
+    );
+    // Totals are derived, never typed in: lines compute their total, the invoice sums them.
+    let f = &m["entities"]["invoice"]["fields"];
+    assert_eq!(
+        f["subtotal"]["computed"],
+        "sum(children(invoice_line, invoice).line_total)"
+    );
+    assert_eq!(f["total"]["computed"], "subtotal + tax");
+    assert_eq!(
+        m["entities"]["invoice_line"]["fields"]["line_total"]["computed"],
+        "round(quantity * unit_price, 2)"
     );
 }
 
@@ -163,10 +166,6 @@ fn invoice_rules_are_enforced_by_the_checker() {
         Ok(())
     );
     assert_eq!(
-        run("invoice", inv("100.00", "8.25", "108.00", "2026-12-01")),
-        Err(vec!["invoice.total_mismatch".to_string()])
-    );
-    assert_eq!(
         run("invoice", inv("100.00", "8.25", "108.25", "2026-10-01")),
         Err(vec!["invoice.due_before_issue".to_string()])
     );
@@ -179,11 +178,10 @@ fn invoice_rules_are_enforced_by_the_checker() {
             "{code}"
         );
     }
-    let line = |q: &str, p: &str, t: &str| json!({"quantity": q, "unit_price": p, "line_total": t});
-    assert_eq!(run("invoice_line", line("2.5", "10.00", "25.00")), Ok(()));
-    assert_eq!(run("invoice_line", line("0.125", "0.20", "0.03")), Ok(())); // 0.025 rounds half up
+    let line = |q: &str, p: &str| json!({"quantity": q, "unit_price": p});
+    assert_eq!(run("invoice_line", line("2.5", "10.00")), Ok(()));
     assert_eq!(
-        run("invoice_line", line("2.5", "10.00", "24.00")),
-        Err(vec!["invoice.line_mismatch".to_string()])
+        run("invoice_line", line("0", "10.00")),
+        Err(vec!["invoice.bad_quantity".to_string()])
     );
 }

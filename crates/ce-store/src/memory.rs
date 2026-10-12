@@ -1,5 +1,5 @@
 use crate::{Record, Store, StoreError, TenantScope};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -46,6 +46,7 @@ impl Inner {
         scope: &TenantScope,
         entity: &str,
         data: Value,
+        caller: Option<&Value>,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
         if !data.is_object() {
@@ -54,7 +55,7 @@ impl Inner {
         let idem = idempotency_key.map(|k| (scope.tenant_id().to_string(), k.to_string()));
         if let Some(k) = &idem {
             if let Some((payload, original)) = self.keys.get(k) {
-                if original.entity != entity || payload != &data {
+                if original.entity != entity || payload != caller.unwrap_or(&data) {
                     return Err(StoreError::IdempotencyKeyReused);
                 }
                 return Ok(original.clone());
@@ -76,9 +77,29 @@ impl Inner {
             },
         );
         if let Some(k) = idem {
-            self.keys.insert(k, (data, record.clone()));
+            self.keys
+                .insert(k, (caller.unwrap_or(&data).clone(), record.clone()));
         }
         Ok(record)
+    }
+
+    fn replay(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: &Value,
+        key: &str,
+    ) -> Result<Option<Record>, StoreError> {
+        match self
+            .keys
+            .get(&(scope.tenant_id().to_string(), key.to_string()))
+        {
+            None => Ok(None),
+            Some((payload, original)) if original.entity == entity && payload == caller => {
+                Ok(Some(original.clone()))
+            }
+            Some(_) => Err(StoreError::IdempotencyKeyReused),
+        }
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
@@ -168,7 +189,33 @@ impl Store for MemoryStore {
         data: Value,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
-        self.lock().insert(scope, entity, data, idempotency_key)
+        self.lock()
+            .insert(scope, entity, data, None, idempotency_key)
+    }
+
+    fn insert_with(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derive: &mut dyn FnMut() -> Result<Map<String, Value>, StoreError>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        // The first result is looked up before `derive` runs, and no lock is held while it does
+        // (it reads through this same store). Two direct callers with one new key can therefore
+        // both derive; the server never does that, because it calls this inside `atomic`, which
+        // holds the store's lock for the whole write.
+        if let Some(key) = idempotency_key {
+            if let Some(first) = self.lock().replay(scope, entity, &caller, key)? {
+                return Ok(first);
+            }
+        }
+        let mut body = caller.clone();
+        if let Value::Object(o) = &mut body {
+            o.extend(derive()?);
+        }
+        self.lock()
+            .insert(scope, entity, body, Some(&caller), idempotency_key)
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
@@ -241,7 +288,33 @@ impl Store for MemoryTx {
     ) -> Result<Record, StoreError> {
         self.inner
             .borrow_mut()
-            .insert(scope, entity, data, idempotency_key)
+            .insert(scope, entity, data, None, idempotency_key)
+    }
+
+    fn insert_with(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derive: &mut dyn FnMut() -> Result<Map<String, Value>, StoreError>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        // The first result is looked up before `derive` runs, and no lock is held while it does
+        // (it reads through this same store). Two direct callers with one new key can therefore
+        // both derive; the server never does that, because it calls this inside `atomic`, which
+        // holds the store's lock for the whole write.
+        if let Some(key) = idempotency_key {
+            if let Some(first) = self.inner.borrow().replay(scope, entity, &caller, key)? {
+                return Ok(first);
+            }
+        }
+        let mut body = caller.clone();
+        if let Value::Object(o) = &mut body {
+            o.extend(derive()?);
+        }
+        self.inner
+            .borrow_mut()
+            .insert(scope, entity, body, Some(&caller), idempotency_key)
     }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {

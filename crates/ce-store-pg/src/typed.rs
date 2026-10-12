@@ -442,26 +442,77 @@ impl TypedPgStore {
         Ok(Page { records, next })
     }
 
-    fn insert_on(
+    /// Claims `key` for this request, comparing `data` as the client sent it. Returns the first
+    /// result if the key was already used for the same request (a replay), an error if it was
+    /// used for a different one, and `None` when the key is now ours (or there is no key).
+    fn claim_on(
         &self,
         c: &mut impl GenericClient,
         scope: &TenantScope,
         entity: &str,
-        data: Value,
+        data: &Value,
         idempotency_key: Option<&str>,
-    ) -> Result<Record, StoreError> {
-        let Value::Object(obj) = &data else {
+    ) -> Result<Option<Record>, StoreError> {
+        if !data.is_object() {
             return Err(StoreError::BadData("data must be a JSON object"));
-        };
-        let ent = self
-            .ents
+        }
+        self.ents
             .get(entity)
             .ok_or(StoreError::BadData("unknown entity"))?;
         if !is_uuid(scope.tenant_id()) {
             return Err(StoreError::BadData("tenant id is not a uuid"));
         }
+        let sch = &self.schema;
+        if let Some(key) = idempotency_key {
+            let claimed = c
+                .query_opt(
+                    &format!(
+                        r#"INSERT INTO "{sch}"."_ce_idempotency" (tenant_id, key, entity, payload)
+                           VALUES ($1::text::uuid, $2, $3, $4)
+                           ON CONFLICT (tenant_id, key) DO NOTHING
+                           RETURNING key"#
+                    ),
+                    &[&scope.tenant_id(), &key, &entity, &data],
+                )
+                .map_err(db)?;
+            if claimed.is_none() {
+                let row = c
+                    .query_one(
+                        &format!(
+                            r#"SELECT entity, payload, result FROM "{sch}"."_ce_idempotency"
+                               WHERE tenant_id = $1::text::uuid AND key = $2"#
+                        ),
+                        &[&scope.tenant_id(), &key],
+                    )
+                    .map_err(db)?;
+                let (e, payload, result): (String, Value, Option<Value>) =
+                    (row.get(0), row.get(1), row.get(2));
+                if e != entity || &payload != data {
+                    return Err(StoreError::IdempotencyKeyReused);
+                }
+                return replay(result).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Writes the record row (and, with a key, stores the result against it). `body` is the
+    /// caller's fields with any derived ones merged in.
+    fn insert_row_on(
+        &self,
+        c: &mut impl GenericClient,
+        scope: &TenantScope,
+        entity: &str,
+        body: Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        let ent = self
+            .ents
+            .get(entity)
+            .ok_or(StoreError::BadData("unknown entity"))?;
+        let sch = &self.schema;
         // The store owns the state: any incoming value is ignored and the initial state is set.
-        let mut obj = obj.clone();
+        let mut obj = body.as_object().cloned().unwrap_or_default();
         if let Some(s) = &ent.state {
             obj.remove(&s.field);
         }
@@ -496,37 +547,6 @@ impl TypedPgStore {
             vals.push(format!("${}::text", params.len()));
         }
 
-        let sch = &self.schema;
-        if let Some(key) = idempotency_key {
-            let claimed = c
-                .query_opt(
-                    &format!(
-                        r#"INSERT INTO "{sch}"."_ce_idempotency" (tenant_id, key, entity, payload)
-                           VALUES ($1::text::uuid, $2, $3, $4)
-                           ON CONFLICT (tenant_id, key) DO NOTHING
-                           RETURNING key"#
-                    ),
-                    &[&scope.tenant_id(), &key, &entity, &data],
-                )
-                .map_err(db)?;
-            if claimed.is_none() {
-                let row = c
-                    .query_one(
-                        &format!(
-                            r#"SELECT entity, payload, result FROM "{sch}"."_ce_idempotency"
-                               WHERE tenant_id = $1::text::uuid AND key = $2"#
-                        ),
-                        &[&scope.tenant_id(), &key],
-                    )
-                    .map_err(db)?;
-                let (e, payload, result): (String, Value, Option<Value>) =
-                    (row.get(0), row.get(1), row.get(2));
-                if e != entity || payload != data {
-                    return Err(StoreError::IdempotencyKeyReused);
-                }
-                return replay(result);
-            }
-        }
         let sql = format!(
             r#"INSERT INTO "{sch}"."{entity}" ({}) VALUES ({}) RETURNING {}"#,
             cols.join(", "),
@@ -550,6 +570,20 @@ impl TypedPgStore {
         Ok(record)
     }
 
+    fn insert_on(
+        &self,
+        c: &mut impl GenericClient,
+        scope: &TenantScope,
+        entity: &str,
+        data: Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        if let Some(first) = self.claim_on(c, scope, entity, &data, idempotency_key)? {
+            return Ok(first);
+        }
+        self.insert_row_on(c, scope, entity, data, idempotency_key)
+    }
+
     fn get_on(
         &self,
         c: &mut impl GenericClient,
@@ -569,7 +603,7 @@ impl TypedPgStore {
             r#"SELECT {} FROM "{}"."{entity}" WHERE "tenant_id" = $1::text::uuid AND "id" = $2::text::uuid{live}{}"#,
             ent.select_list(),
             self.schema,
-            if lock { " FOR UPDATE" } else { "" }
+            if lock { " FOR NO KEY UPDATE" } else { "" }
         );
         let row = c
             .query_opt(&sql, &[&tenant, &id])
@@ -759,6 +793,28 @@ impl Store for TypedPgStore {
         Ok(record)
     }
 
+    fn insert_with(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derive: &mut dyn FnMut() -> Result<Map<String, Value>, StoreError>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        let mut c = self.lock()?;
+        let mut tx = c.transaction().map_err(db)?;
+        if let Some(first) = self.claim_on(&mut tx, scope, entity, &caller, idempotency_key)? {
+            return Ok(first);
+        }
+        let mut body = caller;
+        if let Value::Object(o) = &mut body {
+            o.extend(derive()?);
+        }
+        let record = self.insert_row_on(&mut tx, scope, entity, body, idempotency_key)?;
+        tx.commit().map_err(db)?;
+        Ok(record)
+    }
+
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError> {
         let mut c = self.lock()?;
         self.get_on(&mut *c, scope, entity, id, false)
@@ -845,6 +901,36 @@ impl Store for TypedTx<'_> {
             scope,
             entity,
             data,
+            idempotency_key,
+        )
+    }
+
+    fn insert_with(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derive: &mut dyn FnMut() -> Result<Map<String, Value>, StoreError>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        // `derive` reads through this same transaction, so the borrow is released around it.
+        let claimed = {
+            let mut tx = self.tx.borrow_mut();
+            self.store
+                .claim_on(&mut *tx, scope, entity, &caller, idempotency_key)?
+        };
+        if let Some(first) = claimed {
+            return Ok(first);
+        }
+        let mut body = caller;
+        if let Value::Object(o) = &mut body {
+            o.extend(derive()?);
+        }
+        self.store.insert_row_on(
+            &mut *self.tx.borrow_mut(),
+            scope,
+            entity,
+            body,
             idempotency_key,
         )
     }

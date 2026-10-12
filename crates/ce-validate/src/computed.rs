@@ -20,6 +20,8 @@ use std::collections::HashSet;
 pub(crate) struct Uses {
     pub calls: Vec<String>,
     pub names: Vec<String>,
+    /// `(entity, ref_field)` of every `children(entity, ref_field)`.
+    pub children: Vec<(String, String)>,
 }
 
 fn walk(e: &Expr, u: &mut Uses) {
@@ -35,6 +37,11 @@ fn walk(e: &Expr, u: &mut Uses) {
         }
         Expr::Call(n, xs) => {
             u.calls.push(n.clone());
+            if let (true, [Expr::Path(e), Expr::Path(f)]) = (n == "children", xs.as_slice()) {
+                if let ([e], [f]) = (e.as_slice(), f.as_slice()) {
+                    u.children.push((e.clone(), f.clone()));
+                }
+            }
             xs.iter().for_each(|x| walk(x, u));
         }
         Expr::Field(x, _) | Expr::Neg(x) | Expr::Not(x) => walk(x, u),
@@ -52,6 +59,7 @@ pub(crate) fn uses(src: &str) -> Option<Uses> {
     let mut u = Uses {
         calls: Vec::new(),
         names: Vec::new(),
+        children: Vec::new(),
     };
     walk(&e, &mut u);
     Some(u)
@@ -91,6 +99,40 @@ pub(crate) fn unsupported_fields(ent: &Value) -> HashSet<String> {
             return out;
         }
     }
+}
+
+/// A parent entity whose computed fields sum or count the records of `child` that point at it
+/// through `ref_field`. Writing such a child record changes the parent.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AggregateSource {
+    pub parent: String,
+    pub child: String,
+    pub ref_field: String,
+}
+
+/// Every `children(child, ref_field)` that a computed field of the manifest reads, sorted.
+pub fn aggregate_sources(m: &Manifest) -> Vec<AggregateSource> {
+    let mut out = Vec::new();
+    for (parent, ent) in m.value["entities"].as_object().into_iter().flatten() {
+        for f in ent["fields"]
+            .as_object()
+            .into_iter()
+            .flat_map(|f| f.values())
+        {
+            if let Some(u) = f["computed"].as_str().and_then(uses) {
+                for (child, ref_field) in u.children {
+                    out.push(AggregateSource {
+                        parent: parent.clone(),
+                        child,
+                        ref_field,
+                    });
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn fail(field: &str, detail: &str) -> FieldError {

@@ -20,9 +20,10 @@
 
 mod computed;
 mod invariants;
-pub use computed::{evaluate_computed, evaluate_computed_with};
+pub use computed::{aggregate_sources, evaluate_computed, evaluate_computed_with, AggregateSource};
 pub use invariants::{
-    check_invariants, check_invariants_with, unenforced_invariants, Context, Unenforced,
+    check_invariants, check_invariants_with, json_to_expr, unenforced_invariants, Context,
+    Unenforced,
 };
 
 use ce_manifest::Manifest;

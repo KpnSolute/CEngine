@@ -17,7 +17,7 @@ First wave in 0.1, status:
 - `customers`: `customer`, `customer_contact` (built).
 - `tasks`: `task` with open, in_progress, done, cancelled and start/complete/cancel actions (built).
 - `notifications`: `notification` records with pending, sent, read, failed; delivery is Infajn's (built).
-- `invoicing`: `invoice` (draft, sent, overdue, paid, void; per-record arithmetic and currency code checked by invariants) and `invoice_line`, with send/overdue/paid/void actions (built). The subtotal is not yet reconciled against the invoice's lines: that needs a computed sum over `children`, and sums over other records are not evaluated yet (computed fields that use arithmetic, strings and `when` are). No payment collection: that is a payments connector, made through Infajn.
+- `invoicing`: `invoice` (draft, sent, overdue, paid, void) and `invoice_line`, with send/overdue/paid/void actions (built). Totals are derived, never typed in: a line's `line_total` is `round(quantity * unit_price, 2)`, the invoice's `subtotal` is the sum of its lines' totals, and `total` is `subtotal + tax`. The server updates the invoice in the same transaction as any line write. Currency code, non-negative amounts and due date are invariants. No payment collection: that is a payments connector, made through Infajn.
 - `bookings`: `resource` and `booking` (requested, confirmed, cancelled, completed, no_show) with confirm/cancel/complete/no-show actions (built). The scheduling logic (recurrence, conflicts, free slots) is `ce-calendar`; wiring it to the server endpoints is still to do.
 - barcodes: logic in `ce-barcode` (built).
 

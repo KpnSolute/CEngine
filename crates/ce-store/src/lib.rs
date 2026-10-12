@@ -20,7 +20,7 @@ mod memory;
 pub use ce_auth::TenantScope;
 pub use ce_query::{ListRequest, QueryError, SortDir, SortKey};
 pub use memory::MemoryStore;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Record {
@@ -79,6 +79,29 @@ pub trait Store {
         data: Value,
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError>;
+
+    /// Like `insert`, for a body that also gets fields the host computes from the store's
+    /// current contents (`derive`). Those can differ between two identical requests, so with a
+    /// key the store claims the key, comparing only `caller` (the body as the client sent it),
+    /// before calling `derive`; a retry gets the first result back and `derive` is not called.
+    /// The record stored is `caller` with the derived fields merged over it.
+    ///
+    /// The default cannot claim a key before deriving, so with a key it returns `Unsupported`
+    /// rather than derive for a retry; without one it calls `derive` and then `insert`, which is
+    /// correct only when `derive` gives no fields (otherwise `Unsupported` too).
+    fn insert_with(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        caller: Value,
+        derive: &mut dyn FnMut() -> Result<Map<String, Value>, StoreError>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Record, StoreError> {
+        if idempotency_key.is_some() || !derive()?.is_empty() {
+            return Err(StoreError::Unsupported);
+        }
+        self.insert(scope, entity, caller, idempotency_key)
+    }
 
     fn get(&self, scope: &TenantScope, entity: &str, id: &str) -> Result<Record, StoreError>;
 
