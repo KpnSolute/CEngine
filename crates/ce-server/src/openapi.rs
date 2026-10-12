@@ -83,10 +83,18 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
         let if_match = json!({"name": "If-Match", "in": "header", "required": true, "schema": {"type": "string"}});
         let id_param =
             json!({"name": "id", "in": "path", "required": true, "schema": {"type": "string"}});
-        let list_params: Vec<Value> = ["select", "sort", "limit", "after", "filter"]
+        let mut list_params: Vec<Value> = ["select", "sort", "limit", "after", "filter"]
             .iter()
             .map(|p| json!({"name": p, "in": "query", "required": false, "schema": {"type": "string"}}))
             .collect();
+        let searchable = ent["fields"]
+            .as_object()
+            .is_some_and(|fs| fs.values().any(|f| f["searchable"] == true));
+        if searchable {
+            list_params.push(json!({"name": "q", "in": "query", "required": false,
+                "description": "text search over the searchable fields",
+                "schema": {"type": "string", "minLength": 1, "maxLength": 100}}));
+        }
         let mut list_responses = json!({"200": {"description": "one page",
             "content": {"application/json": {"schema": {"type": "object", "properties": {
                 "data": {"type": "array", "items": reference},
