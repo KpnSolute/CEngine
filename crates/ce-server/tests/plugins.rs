@@ -141,6 +141,34 @@ impl Api {
     }
 }
 
+impl Api {
+    async fn patch(
+        &mut self,
+        entity: &str,
+        id: &str,
+        version: u64,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        self.call(
+            "PATCH",
+            &format!("/v1/{INST}/{entity}/{id}"),
+            Some(version),
+            Some(body),
+        )
+        .await
+    }
+    async fn delete(&mut self, entity: &str, id: &str, version: u64) -> StatusCode {
+        self.call(
+            "DELETE",
+            &format!("/v1/{INST}/{entity}/{id}"),
+            Some(version),
+            None,
+        )
+        .await
+        .0
+    }
+}
+
 fn plugin(id: &str, slots: &str) -> ce_plugin::Plugin {
     let text = format!(
         r#"schema_version = 1
@@ -208,8 +236,12 @@ async fn run(url: &str, m: Value) -> (Value, (StatusCode, Value)) {
         .await;
     assert_eq!(s, StatusCode::CREATED, "{line}");
     let lid = id(&line);
+    let pid = id(&period);
     let pull = api
-        .post("stock_movement", json!({"line": lid, "pulled": "12"}))
+        .post(
+            "stock_movement",
+            json!({"line": lid, "period": pid, "pulled": "12"}),
+        )
         .await;
     let cur = api.get("stock_line", &lid).await;
     close(api.app).await;
@@ -248,4 +280,104 @@ rule = "true"
     assert_eq!(line["data"]["price"], "1.234600");
     assert_eq!(line["data"]["ending_qty"], "-2.000");
     assert_eq!(line["data"]["ending_value"], "-2.47");
+}
+
+#[tokio::test]
+async fn a_closed_period_freezes_its_lines_and_movements() {
+    let Some(url) = url() else { return };
+    let mut api = Api {
+        app: app(&url, manifest(None)).await,
+        n: 0,
+    };
+    let (_, p1) = api
+        .post(
+            "period",
+            json!({"label": "W1", "starts_on": "2026-11-01", "ends_on": "2026-11-07"}),
+        )
+        .await;
+    let (_, p2) = api
+        .post(
+            "period",
+            json!({"label": "W2", "starts_on": "2026-11-08", "ends_on": "2026-11-14"}),
+        )
+        .await;
+    let (_, item) = api
+        .post(
+            "stock_item",
+            json!({"sku": "RICE", "description": "Rice", "unit_price": "2"}),
+        )
+        .await;
+    let mk_line = |p: &Value| json!({"item": id(&item), "period": id(p), "opening_oh": "10"});
+    let (_, l1) = api.post("stock_line", mk_line(&p1)).await;
+    let (_, l2) = api.post("stock_line", mk_line(&p2)).await;
+    let (s, m1) = api
+        .post(
+            "stock_movement",
+            json!({"line": id(&l1), "period": id(&p1), "pulled": "3"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{m1}");
+    assert_eq!(
+        api.get("stock_line", &id(&l1)).await["data"]["ending_qty"],
+        "7.000"
+    );
+
+    // A movement must belong to its line's period.
+    let (s, bad) = api
+        .post(
+            "stock_movement",
+            json!({"line": id(&l2), "period": id(&p1), "pulled": "1"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+
+    // Close period 1.
+    let (s, closed) = api
+        .call(
+            "POST",
+            &format!("/v1/{INST}/period/{}/close", id(&p1)),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{closed}");
+
+    // Nothing in it can change: not the line, and not a movement added, edited or removed.
+    let (s, r) = api
+        .post(
+            "stock_movement",
+            json!({"line": id(&l1), "period": id(&p1), "pulled": "1"}),
+        )
+        .await;
+    assert_ne!(s, StatusCode::CREATED, "{r}");
+    let (s, r) = api
+        .patch("stock_movement", &id(&m1), 1, json!({"pulled": "9"}))
+        .await;
+    assert_ne!(s, StatusCode::OK, "{r}");
+    assert_ne!(
+        api.delete("stock_movement", &id(&m1), 1).await,
+        StatusCode::NO_CONTENT
+    );
+    // A movement of the open period cannot be pointed at the closed one either.
+    let (_, m2) = api
+        .post(
+            "stock_movement",
+            json!({"line": id(&l2), "period": id(&p2), "pulled": "1"}),
+        )
+        .await;
+    let (s, r) = api
+        .patch(
+            "stock_movement",
+            &id(&m2),
+            1,
+            json!({"line": id(&l1), "period": id(&p1)}),
+        )
+        .await;
+    assert_ne!(s, StatusCode::OK, "{r}");
+    let l1 = api.get("stock_line", &id(&l1)).await;
+    assert_eq!(
+        (&l1["data"]["pulled"], &l1["data"]["ending_qty"]),
+        (&json!("3.000"), &json!("7.000"))
+    );
+    close(api.app).await;
 }

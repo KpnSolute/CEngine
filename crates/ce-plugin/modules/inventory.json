@@ -76,15 +76,18 @@
       "stock_movement": {
         "fields": {
           "line": {"type": "ref", "ref": "stock_line", "indexed": true, "required": true},
+          "period": {"type": "ref", "ref": "period", "indexed": true, "required": true},
           "received": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
           "pulled": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
           "txn_date": {"type": "date", "indexed": true},
           "reason": {"type": "string", "max_length": 200}
         },
         "invariants": [
+          {"name": "in_line_period", "expr": "period == ref(line).period", "message_code": "stock.movement_period_mismatch"},
           {"name": "received_not_negative", "expr": "received >= 0", "message_code": "stock.negative_received"},
           {"name": "pulled_not_negative", "expr": "pulled >= 0", "message_code": "stock.negative_pulled"}
         ],
+        "locked_when": "ref(period).status == 'closed'",
         "sort_keys": ["txn_date"]
       }
     }
