@@ -29,7 +29,8 @@ fn every_tool_composes_into_a_valid_manifest_alone_and_together() {
             "tasks",
             "notifications",
             "bookings",
-            "invoicing"
+            "invoicing",
+            "audit"
         ]
     );
     for n in &names {

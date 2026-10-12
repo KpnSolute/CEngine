@@ -317,10 +317,20 @@ async fn write<S>(
     ctx: ce_validate::Context,
     entity: String,
     op: writes::Op,
+    rid: &str,
 ) -> Result<Option<Record>, Problem>
 where
     S: Store + Send + Sync + 'static,
 {
+    // The audit trail is written by the server alone; nobody edits it through the API.
+    if entity == writes::AUDIT_ENTITY {
+        return Err(Problem::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "the audit trail is written by the server only",
+        ));
+    }
+    let rid = rid.to_string();
     let store = st.store.clone();
     let manifest = st.manifest.clone();
     tokio::task::spawn_blocking(move || {
@@ -328,6 +338,7 @@ where
             manifest: &manifest,
             scope: &scope,
             ctx: &ctx,
+            request_id: &rid,
         };
         writes::execute(&*store, &env, &entity, &op)
     })
@@ -424,6 +435,7 @@ async fn create<S: Store + Send + Sync + 'static>(
             ctx,
             entity.clone(),
             writes::Op::Create { data: obj, key },
+            &rid,
         )
         .await?
         .ok_or_else(|| store_problem(StoreError::Backend("no record".into())))?;
@@ -484,6 +496,7 @@ async fn update<S: Store + Send + Sync + 'static>(
                 expected,
                 patch,
             },
+            &rid,
         )
         .await?
         .ok_or_else(|| store_problem(StoreError::Backend("no record".into())))?;
@@ -503,7 +516,15 @@ async fn remove<S: Store + Send + Sync + 'static>(
         let expected = if_match(&headers)?;
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
-        write(&st, scope, ctx, entity, writes::Op::Delete { id, expected }).await?;
+        write(
+            &st,
+            scope,
+            ctx,
+            entity,
+            writes::Op::Delete { id, expected },
+            &rid,
+        )
+        .await?;
         Ok(StatusCode::NO_CONTENT.into_response())
     };
     finish(&rid, run.await)

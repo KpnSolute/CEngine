@@ -19,7 +19,7 @@ use ce_validate::{
     aggregate_sources, check_invariants_with, evaluate_computed_with, json_to_expr, Context,
     FieldError,
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 
@@ -57,6 +57,8 @@ pub(crate) struct Env<'a> {
     pub manifest: &'a Manifest,
     pub scope: &'a TenantScope,
     pub ctx: &'a Context,
+    /// Id of the request that causes the write, recorded in the audit trail.
+    pub request_id: &'a str,
 }
 
 /// Answers `ref()` and `children()` from the store, for one record of one tenant.
@@ -323,7 +325,17 @@ fn refresh_parents(
     Ok(())
 }
 
-fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Record>, Failure> {
+/// What a write changed: the record it left (none for a delete) and the data it replaced
+/// (none for a create), which is what the audit trail keeps.
+struct Outcome {
+    after: Option<Record>,
+    before: Option<Value>,
+    /// False when a create was a replay of an earlier request with the same key: nothing
+    /// changed, so there is nothing to audit.
+    fresh: bool,
+}
+
+fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Outcome, Failure> {
     match op {
         Op::Create { data, key } => {
             // The derived fields are computed only if this call really creates the record: a
@@ -365,7 +377,11 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             if derived {
                 refresh_parents(tx, env, entity, None, rec.data.as_object())?;
             }
-            Ok(Some(rec))
+            Ok(Outcome {
+                after: Some(rec),
+                before: None,
+                fresh: derived,
+            })
         }
         Op::Patch {
             id,
@@ -399,7 +415,11 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             settle(tx, env, entity, Some(id), &mut obj, old)?;
             let rec = tx.update(env.scope, entity, id, *expected, Value::Object(obj))?;
             refresh_parents(tx, env, entity, old, rec.data.as_object())?;
-            Ok(Some(rec))
+            Ok(Outcome {
+                after: Some(rec),
+                before: Some(current.data.clone()),
+                fresh: true,
+            })
         }
         Op::Delete { id, expected } => {
             let pre = tx.get(env.scope, entity, id)?;
@@ -407,9 +427,50 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             let current = tx.get_locked(env.scope, entity, id)?;
             tx.delete(env.scope, entity, id, *expected)?;
             refresh_parents(tx, env, entity, current.data.as_object(), None)?;
-            Ok(None)
+            Ok(Outcome {
+                after: None,
+                before: Some(current.data.clone()),
+                fresh: true,
+            })
         }
     }
+}
+
+/// The entity the `audit` tool adds. Only the server writes it.
+pub(crate) const AUDIT_ENTITY: &str = "audit_event";
+
+/// Records the write in the audit trail, in the transaction of the write itself, when the
+/// template uses the `audit` tool. The audit entity is never audited.
+fn audit(tx: &dyn Store, env: &Env, entity: &str, op: &Op, out: &Outcome) -> Result<(), Failure> {
+    if entity == AUDIT_ENTITY
+        || !out.fresh
+        || !env.manifest.value["entities"][AUDIT_ENTITY].is_object()
+    {
+        return Ok(());
+    }
+    let (after, before) = (&out.after, &out.before);
+    let (operation, id) = match (op, after) {
+        (Op::Create { .. }, Some(r)) => ("create", r.id.clone()),
+        (Op::Patch { id, .. }, _) => ("update", id.clone()),
+        (Op::Delete { id, .. }, _) => ("delete", id.clone()),
+        (Op::Create { .. }, None) => return Ok(()),
+    };
+    let mut ev = Map::new();
+    ev.insert("entity".into(), json!(entity));
+    ev.insert("record_id".into(), json!(id));
+    ev.insert("operation".into(), json!(operation));
+    ev.insert("actor".into(), json!(env.ctx.actor_id));
+    ev.insert("request_id".into(), json!(env.request_id));
+    ev.insert("at".into(), json!(env.ctx.now_unix));
+    if let Some(r) = after {
+        ev.insert("to_version".into(), json!(r.version));
+        ev.insert("after".into(), r.data.clone());
+    }
+    if let Some(b) = before {
+        ev.insert("before".into(), b.clone());
+    }
+    tx.insert(env.scope, AUDIT_ENTITY, Value::Object(ev), None)?;
+    Ok(())
 }
 
 /// Runs one write and everything it changes as a single transaction. Stores without
@@ -423,9 +484,11 @@ pub(crate) fn execute<S: Store>(
 ) -> Result<Option<Record>, Failure> {
     let mut done = None;
     let mut failed = None;
-    let out = store.atomic(&mut |tx| match step(tx, env, entity, op) {
-        Ok(rec) => {
-            done = Some(rec);
+    let out = store.atomic(&mut |tx| match step(tx, env, entity, op)
+        .and_then(|o| audit(tx, env, entity, op, &o).map(|()| o))
+    {
+        Ok(o) => {
+            done = Some(o.after);
             Ok(())
         }
         Err(f) => {
@@ -446,7 +509,10 @@ pub(crate) fn execute<S: Store>(
             {
                 return Err(Failure::Store(StoreError::Unsupported));
             }
-            step(store, env, entity, op)
+            step(store, env, entity, op).and_then(|o| {
+                audit(store, env, entity, op, &o)?;
+                Ok(o.after)
+            })
         }
         Err(e) => Err(failed.unwrap_or(Failure::Store(e))),
     }
@@ -541,6 +607,7 @@ mod tests {
             manifest: &m,
             scope: who.scope(),
             ctx: &ctx,
+            request_id: "test",
         };
         let store = Flaky(
             MemoryStore::new(),
