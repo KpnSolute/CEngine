@@ -16,6 +16,7 @@
 
 mod changesets;
 mod openapi;
+mod periods;
 mod problem;
 mod writes;
 
@@ -92,6 +93,7 @@ where
             "/v1/{inst}/changeset/{id}/{verb}",
             post(changeset_verb::<S>),
         )
+        .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
         .route("/v1/{inst}/{entity}", get(list::<S>).post(create::<S>))
         .route(
             "/v1/{inst}/{entity}/{id}",
@@ -232,6 +234,14 @@ fn invariant_context<S>(st: &AppState<S>, who: &Principal) -> ce_validate::Conte
     }
 }
 
+fn locked_problem() -> Problem {
+    Problem::new(
+        StatusCode::CONFLICT,
+        "entity_locked",
+        "the record is frozen; reopen its period to change it",
+    )
+}
+
 fn invariant_problem(errors: Vec<ce_validate::FieldError>) -> Problem {
     Problem::validation(
         "the record breaks a rule of the template",
@@ -337,6 +347,16 @@ where
             "this record is written by the server only",
         ));
     }
+    if entity == periods::PERIOD
+        && periods::enabled(&st.manifest)
+        && periods::touches_server_fields(&op)
+    {
+        return Err(Problem::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "a period is closed and reopened through its close and reopen endpoints",
+        ));
+    }
     let rid = rid.to_string();
     let store = st.store.clone();
     let manifest = st.manifest.clone();
@@ -354,6 +374,7 @@ where
     .map_err(|f| match f {
         writes::Failure::Store(e) => store_problem(e),
         writes::Failure::Rules(errors) => invariant_problem(errors),
+        writes::Failure::Locked => locked_problem(),
     })
 }
 
@@ -481,6 +502,45 @@ async fn stage_if_governed<S: Store + Send + Sync + 'static>(
         "meta": {"request_id": rid}
     });
     Ok(Some((StatusCode::ACCEPTED, Json(body)).into_response()))
+}
+
+/// `POST .../period/{id}/{close|reopen}`.
+async fn period_verb<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, id, verb)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authenticate(&st, &headers)?;
+        if inst != st.installation
+            || !periods::enabled(&st.manifest)
+            || !matches!(verb.as_str(), "close" | "reopen")
+        {
+            return Err(Problem::not_found());
+        }
+        if !st.policy.can_run(&who.roles, periods::ACTION) {
+            return Err(Problem::forbidden());
+        }
+        let ctx = invariant_context(&st, &who);
+        let scope = who.scope().clone();
+        let (store, manifest, rid2) = (st.store.clone(), st.manifest.clone(), rid.clone());
+        let rec = tokio::task::spawn_blocking(move || {
+            let env = writes::Env {
+                manifest: &manifest,
+                scope: &scope,
+                ctx: &ctx,
+                request_id: &rid2,
+            };
+            periods::transition(&*store, &env, &id, verb == "close")
+        })
+        .await
+        .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
+        let body =
+            json!({"data": record_json(&rec), "meta": {"request_id": rid, "version": rec.version}});
+        Ok((StatusCode::OK, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
 }
 
 /// `POST .../changeset/{id}/{merge|reject|revert|withdraw}`.

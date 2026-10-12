@@ -169,6 +169,7 @@ fn failure_problem(f: Failure) -> Problem {
     match f {
         Failure::Store(e) => crate::store_problem(e),
         Failure::Rules(errors) => crate::invariant_problem(errors),
+        Failure::Locked => crate::locked_problem(),
     }
 }
 
@@ -177,6 +178,7 @@ fn is_conflict(f: &Failure) -> bool {
     matches!(
         f,
         Failure::Rules(_)
+            | Failure::Locked
             | Failure::Store(
                 StoreError::VersionConflict { .. }
                     | StoreError::NotFound
@@ -346,6 +348,7 @@ fn apply<S: Store>(store: &S, env: &Env, id: &str, revert: bool) -> Result<Recor
 fn failure_problem_code(f: &Failure) -> &'static str {
     match f {
         Failure::Rules(_) => "rule_broken",
+        Failure::Locked => "entity_locked",
         Failure::Store(StoreError::VersionConflict { .. }) => "version_conflict",
         Failure::Store(StoreError::NotFound) => "not_found",
         Failure::Store(_) => "store",

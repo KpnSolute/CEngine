@@ -23,6 +23,7 @@ const TOOLS: &[(&str, &str)] = &[
     ("invoicing", include_str!("../tools/invoicing.json")),
     ("audit", include_str!("../tools/audit.json")),
     ("changesets", include_str!("../tools/changesets.json")),
+    ("period", include_str!("../tools/period.json")),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

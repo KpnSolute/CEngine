@@ -199,3 +199,22 @@ pub fn check_invariants_with(
         Err(errors)
     }
 }
+
+/// Whether `locked_when` holds for `record`. An entity with no `locked_when`, a null result
+/// and an expression that cannot be evaluated all count as unlocked (spec/expression-language.md).
+/// `record` is the record as stored (or as it would be); `old` is the stored one on a patch.
+pub fn is_locked(
+    m: &Manifest,
+    entity: &str,
+    record: &Map<String, Value>,
+    old: Option<&Map<String, Value>>,
+    ctx: &Context,
+    resolver: &dyn Resolver,
+) -> bool {
+    let ent = &m.value["entities"][entity];
+    let Some(src) = ent["locked_when"].as_str() else {
+        return false;
+    };
+    let env = build_env(ent, record, old, ctx);
+    matches!(ce_expr::run_with(src, &env, resolver), Ok(Ev::Bool(true)))
+}

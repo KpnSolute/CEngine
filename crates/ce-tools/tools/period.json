@@ -1,0 +1,22 @@
+{
+  "tool": "period",
+  "version": "0.1.0",
+  "title": "Periods: windows of time that can be closed, which freezes the records that belong to them",
+  "entities": {
+    "period": {
+      "fields": {
+        "label": {"type": "string", "required": true, "unique": true, "max_length": 80, "indexed": true},
+        "starts_on": {"type": "date", "required": true, "indexed": true},
+        "ends_on": {"type": "date", "required": true},
+        "status": {"type": "enum", "values": ["open", "closed"], "default": "open", "indexed": true},
+        "closed_by": {"type": "string", "max_length": 120},
+        "closed_at": {"type": "integer"},
+        "snapshot": {"type": "json"}
+      },
+      "sort_keys": ["label", "starts_on", "status"]
+    }
+  },
+  "actions": {
+    "close_period": {"entity": "period", "effect": [{"emit": "period.decided"}]}
+  }
+}
