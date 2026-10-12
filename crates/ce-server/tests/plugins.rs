@@ -628,3 +628,182 @@ async fn a_negative_ending_cannot_be_carried_as_an_opening() {
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     close(api.app).await;
 }
+
+impl Api {
+    async fn act(
+        &mut self,
+        name: &str,
+        id: &str,
+        version: u64,
+        input: Value,
+    ) -> (StatusCode, Value) {
+        self.call(
+            "POST",
+            &format!("/v1/{INST}/actions/{name}"),
+            Some(version),
+            Some(json!({"id": id, "input": input})),
+        )
+        .await
+    }
+}
+
+/// A fresh item and line (price `current`) in the period; returns the line id.
+async fn priced_line(api: &mut Api, period: &str, sku: &str, current: &str) -> String {
+    let (s, item) = api
+        .post(
+            "stock_item",
+            json!({"sku": sku, "description": sku, "unit_price": current}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{item}");
+    let (s, line) = api
+        .post(
+            "stock_line",
+            json!({"item": id(&item), "period": period, "opening_oh": "10", "unit_price": current}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{line}");
+    id(&line)
+}
+
+/// Records an observation and settles it; returns the settled observation and the line's price.
+async fn observe(api: &mut Api, line: &str, observed: &str) -> (Value, Value) {
+    let (s, o) = api
+        .post(
+            "price_observation",
+            json!({"line": line, "observed_price": observed, "source": "inv-1"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{o}");
+    let (s, done) = api
+        .act("settle_price_observation", &id(&o), 1, json!({}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{done}");
+    let price = api.get("stock_line", line).await["data"]["unit_price"].clone();
+    (done, price)
+}
+
+#[tokio::test]
+async fn an_observed_price_is_applied_or_held_for_review_by_the_inventory_rule() {
+    let Some(url) = url() else { return };
+    let mut api = Api {
+        app: app(&url, manifest(None)).await,
+        n: 0,
+    };
+    let (_, period) = api
+        .post(
+            "period",
+            json!({"label": "2026-W1", "starts_on": "2026-11-01", "ends_on": "2026-11-07"}),
+        )
+        .await;
+    let pid = id(&period);
+
+    // Exactly 25% up applies at once; the line takes the new price.
+    let l1 = priced_line(&mut api, &pid, "A", "40.000000").await;
+    let (o, price) = observe(&mut api, &l1, "50.000000").await;
+    assert_eq!(o["data"]["status"], "auto_applied");
+    assert_eq!(o["data"]["decision"], "apply");
+    assert_eq!(o["data"]["previous_price"], "40.000000");
+    assert_eq!(o["data"]["change"], "0.250000");
+    assert_eq!(price, "50.000000");
+
+    // A hair over 25% is held: the line keeps its price until a manager decides.
+    let l2 = priced_line(&mut api, &pid, "B", "40.000000").await;
+    let (o, price) = observe(&mut api, &l2, "50.010000").await;
+    assert_eq!(o["data"]["status"], "pending");
+    assert_eq!(o["data"]["decision"], "hold");
+    assert_eq!(price, "40.000000");
+    let oid = id(&o);
+    let v = o["data"]["version"].as_u64().unwrap();
+
+    // The manager applies it with their own price.
+    let (s, done) = api
+        .act("apply_price_observation", &oid, v, json!({"price": "45"}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{done}");
+    assert_eq!(done["data"]["status"], "applied");
+    assert_eq!(done["data"]["applied_price"], "45.000000");
+    assert_eq!(
+        api.get("stock_line", &l2).await["data"]["unit_price"],
+        "45.000000"
+    );
+    // A decided observation cannot be decided again.
+    let v = done["data"]["version"].as_u64().unwrap();
+    let (s, _) = api.act("keep_price_observation", &oid, v, json!({})).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // Kept: the price stays.
+    let l3 = priced_line(&mut api, &pid, "C", "40.000000").await;
+    let (o, _) = observe(&mut api, &l3, "10.000000").await;
+    assert_eq!(o["data"]["status"], "pending");
+    let (s, kept) = api
+        .act(
+            "keep_price_observation",
+            &id(&o),
+            o["data"]["version"].as_u64().unwrap(),
+            json!({}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{kept}");
+    assert_eq!(kept["data"]["status"], "kept");
+    assert_eq!(
+        api.get("stock_line", &l3).await["data"]["unit_price"],
+        "40.000000"
+    );
+
+    // Within half a cent is the same price; a zero price is no usable price. Neither changes the line.
+    let l4 = priced_line(&mut api, &pid, "D", "40.000000").await;
+    let (o, price) = observe(&mut api, &l4, "40.004000").await;
+    assert_eq!(
+        (o["data"]["decision"].as_str(), price.as_str()),
+        (Some("same"), Some("40.000000"))
+    );
+    assert_eq!(o["data"]["status"], "dismissed");
+    let (o, price) = observe(&mut api, &l4, "0").await;
+    assert_eq!(
+        (o["data"]["decision"].as_str(), price.as_str()),
+        (Some("skip"), Some("40.000000"))
+    );
+
+    // A line with no price yet takes the first observed one.
+    let l5 = priced_line(&mut api, &pid, "E", "0").await;
+    let (o, price) = observe(&mut api, &l5, "3.500000").await;
+    assert_eq!(o["data"]["decision"], "apply");
+    assert_eq!(price, "3.500000");
+
+    // The widest accepted move still settles (held), instead of overflowing `change`.
+    let l5b = priced_line(&mut api, &pid, "E2", "0.000001").await;
+    let (o, price) = observe(&mut api, &l5b, "999999.999999").await;
+    assert_eq!(o["data"]["decision"], "hold");
+    assert_eq!(price, "0.000001");
+
+    // Once the period is closed the line is frozen: the observation cannot move its price, and
+    // stays unsettled.
+    let l6 = priced_line(&mut api, &pid, "F", "40.000000").await;
+    let (_, o) = api
+        .post(
+            "price_observation",
+            json!({"line": l6, "observed_price": "41.000000", "source": "inv-9"}),
+        )
+        .await;
+    let (s, closed) = api
+        .call(
+            "POST",
+            &format!("/v1/{INST}/period/{pid}/close"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{closed}");
+    let (s, v) = api
+        .act("settle_price_observation", &id(&o), 1, json!({}))
+        .await;
+    assert!(!s.is_success(), "{s} {v}");
+    let after = api.get("price_observation", &id(&o)).await;
+    assert_eq!(after["data"]["status"], "new");
+    assert_eq!(
+        api.get("stock_line", &l6).await["data"]["unit_price"],
+        "40.000000"
+    );
+    close(api.app).await;
+}

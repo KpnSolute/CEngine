@@ -55,6 +55,7 @@ fn the_registry_lists_the_inventory_module_and_its_slots() {
             "opening_value",
             "over_pull",
             "price",
+            "price_decision",
             "pulled_value",
             "received_value"
         ]
