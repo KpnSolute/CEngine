@@ -152,8 +152,12 @@ fn manifest() -> Value {
 }
 
 async fn setup(role: &'static str) -> Option<Api> {
+    setup_with(role, manifest()).await
+}
+
+async fn setup_with(role: &'static str, m: Value) -> Option<Api> {
     let url = url()?;
-    let app = tokio::task::spawn_blocking(move || build(&url, manifest()))
+    let app = tokio::task::spawn_blocking(move || build(&url, m))
         .await
         .unwrap();
     Some(Api {
@@ -242,4 +246,105 @@ async fn columns_must_be_declared_and_the_caller_must_be_allowed() {
         .send("GET", &format!("/v1/{INST}/nope/_export"), None, "")
         .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_dry_run_runs_the_database_rules_and_keeps_nothing() {
+    let Some(mut a) = setup("owner").await else {
+        return;
+    };
+    let (s, _) = a.import("name,sku\r\nfirst,S1\r\n", "").await;
+    assert_eq!(s, StatusCode::CREATED);
+    // The real import would be refused (duplicate sku), and so is the dry run.
+    let (s, v) = a.import("name,sku\r\nagain,S1\r\n", "?dry_run=true").await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let (s, _) = a.import("name,sku\r\nother,S2\r\n", "?dry_run=true").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(a.count().await, 1);
+}
+
+async fn send(a: &mut Api, csv: &'static str) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/{INST}/item/_import"))
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", token(T1, "owner", "owner")),
+        )
+        .header("idempotency-key", "same-key")
+        .header(header::CONTENT_TYPE, "text/csv")
+        .body(Body::from(csv))
+        .unwrap();
+    a.app.clone().unwrap().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn one_key_never_mixes_two_different_files() {
+    let Some(mut a) = setup("owner").await else {
+        return;
+    };
+    assert_eq!(send(&mut a, "name\r\none\r\n").await, StatusCode::CREATED);
+    // The same file again replays: still one record.
+    assert_eq!(send(&mut a, "name\r\none\r\n").await, StatusCode::CREATED);
+    assert_eq!(a.count().await, 1);
+    // The first row is the same but a second row was added: not a replay of the first import.
+    assert_eq!(
+        send(&mut a, "name\r\none\r\ntwo\r\n").await,
+        StatusCode::CREATED
+    );
+    assert_eq!(a.count().await, 3, "the new file is its own import");
+}
+
+#[tokio::test]
+async fn export_reports_a_bad_query_as_it_is() {
+    let Some(mut a) = setup("owner").await else {
+        return;
+    };
+    let (s, body, v) = a
+        .send(
+            "GET",
+            &format!("/v1/{INST}/item/_export?sort=sku"),
+            None,
+            "",
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(!body.contains("narrow the export"), "{body}");
+    let _ = v;
+}
+
+#[tokio::test]
+async fn an_import_cannot_set_what_only_the_server_sets() {
+    let m = ce_tools::compose(
+        &json!({
+            "manifest_version": 1,
+            "template": {"name": "shop", "version": "0.1.0", "title": "Shop"},
+            "entities": {},
+            "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}}
+        }),
+        &["period"],
+    )
+    .unwrap();
+    let Some(mut a) = setup_with("owner", m).await else {
+        return;
+    };
+    let head = "label,starts_on,ends_on";
+    let (s, _, _) = a
+        .send(
+            "POST",
+            &format!("/v1/{INST}/period/_import"),
+            Some("text/csv"),
+            &format!("{head},status\r\n2026-09,2026-09-01,2026-09-30,closed\r\n"),
+        )
+        .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, _) = a
+        .send(
+            "POST",
+            &format!("/v1/{INST}/period/_import"),
+            Some("text/csv"),
+            &format!("{head}\r\n2026-09,2026-09-01,2026-09-30\r\n"),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "an ordinary row still imports");
 }

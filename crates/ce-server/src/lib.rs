@@ -1535,24 +1535,20 @@ async fn export_csv<S: Store + Send + Sync + 'static>(
                 let page = s.list(&scope, &ent, &req)?;
                 all.extend(page.records.iter().map(record_json));
                 if all.len() > EXPORT_ROWS {
-                    return Err(StoreError::BadData("too many rows to export"));
+                    return Ok(None);
                 }
                 match page.next {
                     Some(c) => req.after = Some(c),
-                    None => return Ok(all),
+                    None => return Ok(Some(all)),
                 }
             }
         })
-        .await
-        .map_err(|p| {
-            if p.status == StatusCode::UNPROCESSABLE_ENTITY {
-                Problem::validation(
-                    format!("more than {EXPORT_ROWS} rows; narrow the export with filter"),
-                    Vec::new(),
-                )
-            } else {
-                p
-            }
+        .await?
+        .ok_or_else(|| {
+            Problem::validation(
+                format!("more than {EXPORT_ROWS} rows; narrow the export with filter"),
+                Vec::new(),
+            )
         })?;
         let csv =
             ce_io::export_csv(&st.manifest, &entity, &records).map_err(|_| Problem::not_found())?;
@@ -1585,14 +1581,6 @@ async fn import_csv<S: Store + Send + Sync + 'static>(
         let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
         let key = idempotency_key(&headers)?;
         let dry = q.get("dry_run").is_some_and(|v| v == "true");
-        check_server_only(
-            &st.manifest,
-            &entity,
-            &writes::Op::Create {
-                data: Map::new(),
-                key: String::new(),
-            },
-        )?;
         if changesets::governed(&st.manifest, &entity)
             && !st.policy.can_run(&who.roles, changesets::MERGE_ACTION)
         {
@@ -1634,25 +1622,26 @@ async fn import_csv<S: Store + Send + Sync + 'static>(
             p.extra.push(("rows", Value::Array(rows)));
             return Err(p);
         }
-        if dry {
-            let n = report.rows.len();
-            return Ok((
-                StatusCode::OK,
-                Json(json!({"data": {"rows": rows, "created": 0}, "meta": {"request_id": rid, "dry_run": true, "count": n}})),
-            )
-                .into_response());
-        }
+        // Row keys carry a digest of the whole file, so a retry of the same file replays every
+        // row and a different file under the same key never mixes with it.
+        let digest = {
+            use sha2::{Digest, Sha256};
+            let d = Sha256::digest(bytes.as_ref());
+            d.iter()
+                .take(8)
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
         let mut ops: Vec<(String, writes::Op)> = Vec::new();
         for r in &report.rows {
             let mut obj = r.body.clone();
             prepare_create(&st.manifest, &entity, &mut obj);
-            ops.push((
-                entity.clone(),
-                writes::Op::Create {
-                    data: obj,
-                    key: format!("import:{key}:{}", r.row),
-                },
-            ));
+            let op = writes::Op::Create {
+                data: obj,
+                key: format!("import:{key}:{digest}:{}", r.row),
+            };
+            check_server_only(&st.manifest, &entity, &op)?;
+            ops.push((entity.clone(), op));
         }
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
@@ -1664,11 +1653,19 @@ async fn import_csv<S: Store + Send + Sync + 'static>(
                 ctx: &ctx,
                 request_id: &rid2,
             };
-            writes::execute_all(&*store, &env, &ops)
+            writes::execute_all_with(&*store, &env, &ops, dry)
         })
         .await
         .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
         .map_err(failure_problem)?;
+        if dry {
+            let n = rows.len();
+            return Ok((
+                StatusCode::OK,
+                Json(json!({"data": {"rows": rows, "created": 0}, "meta": {"request_id": rid, "dry_run": true, "count": n}})),
+            )
+                .into_response());
+        }
         let ids: Vec<Value> = made.iter().flatten().map(|r| json!(r.id)).collect();
         let body = json!({"data": {"created": ids.len(), "ids": ids}, "meta": {"request_id": rid}});
         Ok((StatusCode::CREATED, Json(body)).into_response())

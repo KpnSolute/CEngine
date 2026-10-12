@@ -216,7 +216,8 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
         paths.insert(
             format!("{base}/_export"),
             json!({"get": {"operationId": format!("export_{name}"),
-                "parameters": list_params, "responses": export_responses}}),
+                "parameters": list_params.iter().filter(|p| matches!(p["name"].as_str(), Some("sort" | "filter" | "q"))).cloned().collect::<Vec<_>>(),
+                "responses": export_responses}}),
         );
         paths.insert(
             format!("{base}/_import"),
