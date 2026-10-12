@@ -413,6 +413,104 @@ async fn a_closed_period_freezes_its_lines_and_movements() {
     close(api.app).await;
 }
 
+/// A locked week freezes the movements tagged with it; other weeks and untagged movements move on.
+#[tokio::test]
+async fn a_locked_week_freezes_its_movements_only() {
+    let Some(url) = url() else { return };
+    let mut api = Api {
+        app: app(&url, manifest(None)).await,
+        n: 0,
+    };
+    let (_, p) = api
+        .post(
+            "period",
+            json!({"label": "Oct", "starts_on": "2026-10-01", "ends_on": "2026-10-31"}),
+        )
+        .await;
+    let (_, item) = api
+        .post(
+            "stock_item",
+            json!({"sku": "RICE", "description": "Rice", "unit_price": "2"}),
+        )
+        .await;
+    let (_, line) = api
+        .post(
+            "stock_line",
+            json!({"item": id(&item), "period": id(&p), "opening_oh": "10", "unit_price": "2"}),
+        )
+        .await;
+    let mv = |week: Option<u32>| {
+        let mut v = json!({"line": id(&line), "period": id(&p), "pulled": "1"});
+        if let Some(w) = week {
+            v["week"] = json!(w);
+        }
+        v
+    };
+    let (s, w1) = api.post("stock_movement", mv(Some(1))).await;
+    assert_eq!(s, StatusCode::CREATED, "{w1}");
+    assert_eq!(
+        api.post("stock_movement", mv(Some(5))).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let cur = api.get("period", &id(&p)).await;
+    let (s, r) = api
+        .patch(
+            "period",
+            &id(&p),
+            cur["data"]["version"].as_u64().unwrap(),
+            json!({"week_1_locked": true}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+
+    let (s, r) = api.post("stock_movement", mv(Some(1))).await;
+    assert_ne!(s, StatusCode::CREATED, "{r}");
+    let (s, r) = api
+        .patch("stock_movement", &id(&w1), 1, json!({"pulled": "9"}))
+        .await;
+    assert_ne!(s, StatusCode::OK, "{r}");
+    assert_ne!(
+        api.delete("stock_movement", &id(&w1), 1).await,
+        StatusCode::NO_CONTENT
+    );
+    // Week 2 and an untagged movement are untouched.
+    let (s, w2) = api.post("stock_movement", mv(Some(2))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, loose) = api.post("stock_movement", mv(None)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    // Moving a movement into the locked week is refused, tagged or not, and changes nothing.
+    for m in [&w2, &loose] {
+        let (s, r) = api
+            .patch(
+                "stock_movement",
+                &id(m),
+                1,
+                json!({"week": 1, "pulled": "9"}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{r}");
+    }
+    let (s, _) = api
+        .patch("stock_movement", &id(&w2), 1, json!({"week": 3}))
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    // Unlocking reopens week 1.
+    let cur = api.get("period", &id(&p)).await;
+    api.patch(
+        "period",
+        &id(&p),
+        cur["data"]["version"].as_u64().unwrap(),
+        json!({"week_1_locked": false}),
+    )
+    .await;
+    assert_eq!(
+        api.post("stock_movement", mv(Some(1))).await.0,
+        StatusCode::CREATED
+    );
+    close(api.app).await;
+}
+
 #[tokio::test]
 async fn every_audit_event_names_the_plugin_that_ruled() {
     let Some(url) = url() else { return };

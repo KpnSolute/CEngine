@@ -226,7 +226,9 @@ fn guard_moved<'k>(
 ) -> Result<(), Failure> {
     let fields = &env.manifest.value["entities"][entity]["fields"];
     let mut changed = changed;
-    if changed.any(|k| fields[k.as_str()]["type"] == "ref") {
+    if changed
+        .any(|k| fields[k.as_str()]["type"] == "ref" || fields[k.as_str()]["joins_lock"] == true)
+    {
         guard_locked(tx, env, entity, id, record, old)?;
     }
     Ok(())

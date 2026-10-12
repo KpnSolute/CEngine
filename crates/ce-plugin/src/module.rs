@@ -61,6 +61,8 @@ pub enum ComposeError {
     NotAnObject,
     /// The template lacks an entity the module needs (for example `period`).
     MissingEntity(String),
+    /// The template's entity lacks a field the module reads: `(entity, field)`.
+    MissingField(String, String),
     /// The template already has an entity the module adds.
     Clash(String),
     /// The composed manifest failed validation: `(code, path, message)`.
@@ -107,6 +109,22 @@ pub fn compose(
     {
         if !entities.contains_key(need) {
             return Err(ComposeError::MissingEntity(need.to_string()));
+        }
+    }
+    for (entity, fields) in def["requires_fields"].as_object().into_iter().flatten() {
+        for f in fields
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if entities
+                .get(entity)
+                .and_then(|e| e["fields"].get(f))
+                .is_none()
+            {
+                return Err(ComposeError::MissingField(entity.clone(), f.to_string()));
+            }
         }
     }
 
