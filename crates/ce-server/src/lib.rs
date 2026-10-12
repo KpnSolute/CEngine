@@ -299,9 +299,23 @@ fn authenticate_any<S>(st: &AppState<S>, headers: &HeaderMap) -> Result<Principa
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(Problem::unauthenticated)?;
-    st.verifier
+    let who = st
+        .verifier
         .verify_token(token, (st.now)())
-        .map_err(|_| Problem::unauthenticated())
+        .map_err(|_| Problem::unauthenticated())?;
+    // The cutoff belongs to the accounts of the tenant this login issues for; a token for another
+    // tenant that happens to share a username is not touched by it.
+    if let Some(nb) = st
+        .issuing
+        .as_ref()
+        .filter(|i| i.tenant == who.scope().tenant_id())
+        .and_then(|i| i.login.not_before(&who.user_id))
+    {
+        if who.issued_at <= nb {
+            return Err(Problem::unauthenticated());
+        }
+    }
+    Ok(who)
 }
 
 /// Token, installation, role, entity, in that order.
@@ -2108,7 +2122,12 @@ async fn issue_token<S: Store + Send + Sync + 'static>(
                 "those credentials were not accepted",
             ));
         }
-        let now = (st.now)();
+        // A token signed in the same second as a revocation would be refused by it; date it one
+        // second after, so signing in right after a PIN change works.
+        let now = match issuing.login.not_before(&who.sub) {
+            Some(nb) if nb < u64::MAX => (st.now)().max(nb + 1),
+            _ => (st.now)(),
+        };
         let token = st
             .verifier
             .sign_token(&who.sub, &issuing.tenant, &roles, now, issuing.ttl_secs)

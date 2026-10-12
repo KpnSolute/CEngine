@@ -94,6 +94,10 @@ pub struct PinLogin {
     policy: PinPolicy,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
     tracks: Mutex<HashMap<String, Track>>,
+    /// Per username, the time of the last change that ends earlier sessions.
+    revoked: Mutex<HashMap<String, u64>>,
+    /// The directory's revocation state has been read. Until it has, every token is refused.
+    loaded: std::sync::atomic::AtomicBool,
     /// Scrypt memory in use now, in bytes.
     in_use: AtomicUsize,
     /// What an unknown username is checked against: the dearest hash in the list (or a built-in one
@@ -224,14 +228,37 @@ impl PinLogin {
         now: Arc<dyn Fn() -> u64 + Send + Sync>,
         dummy: Parsed,
     ) -> Self {
-        PinLogin {
+        let login = PinLogin {
             dir,
             policy,
             now,
             tracks: Mutex::new(HashMap::new()),
+            revoked: Mutex::new(HashMap::new()),
+            loaded: std::sync::atomic::AtomicBool::new(false),
             in_use: AtomicUsize::new(0),
             dummy,
+        };
+        login.load_revocations();
+        login
+    }
+
+    /// What the directory remembers survives a restart: a PIN set at T ends sessions up to T, and a
+    /// switched-off account is revoked from now. If the directory cannot be read, tokens stay
+    /// refused (fail closed) and the next sign-in tries again.
+    fn load_revocations(&self) {
+        let start = (self.now)();
+        let Ok(all) = self.dir.list() else { return };
+        let mut m = self.revoked.lock().unwrap_or_else(|e| e.into_inner());
+        for r in all {
+            let t = match (r.active, r.pin_updated_at) {
+                (false, _) => start,
+                (true, t) if t > 0 => t,
+                _ => continue,
+            };
+            let e = m.entry(r.username).or_insert(0);
+            *e = (*e).max(t);
         }
+        self.loaded.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Roles for a user: each role they hold plus every lower one, lowest first.
@@ -335,8 +362,33 @@ impl PinLogin {
     }
 }
 
+impl PinLogin {
+    /// Ends every session issued before now for this account (kept in memory; the directory's
+    /// PIN time and active flag rebuild it at start).
+    fn revoke(&self, key: &str) {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_string(), (self.now)());
+    }
+}
+
 impl Login for PinLogin {
+    fn not_before(&self, user: &str) -> Option<u64> {
+        if !self.loaded.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some(u64::MAX);
+        }
+        self.revoked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key_of(user))
+            .copied()
+    }
+
     fn login(&self, c: &Map<String, Value>) -> Result<Identity, LoginError> {
+        if !self.loaded.load(std::sync::atomic::Ordering::SeqCst) {
+            self.load_revocations();
+        }
         let name = c.get("username").and_then(Value::as_str).unwrap_or("");
         let pin = c.get("pin").and_then(Value::as_str).unwrap_or("");
         if name.is_empty() || name.len() > MAX_USERNAME || pin.is_empty() || pin.len() > MAX_PIN {
@@ -541,7 +593,9 @@ impl StaffAdmin for PinLogin {
         let hash = self.pin_ok(new)?;
         self.dir
             .set_pin(&key, &hash, false, (self.now)(), &key)
-            .map_err(fail_of)
+            .map_err(fail_of)?;
+        self.revoke(&key);
+        Ok(())
     }
 
     fn list(&self) -> Result<Vec<StaffInfo>, AdminError> {
@@ -604,9 +658,11 @@ impl StaffAdmin for PinLogin {
         let roles = roles.map(|r| self.grantable(actor_roles, r)).transpose()?;
         if let Some(r) = roles {
             self.dir.set_roles(&key, &r, actor).map_err(fail_of)?;
+            self.revoke(&key);
         }
         if let Some(a) = active {
             self.dir.set_active(&key, a, actor).map_err(fail_of)?;
+            self.revoke(&key);
         }
         self.refreshed(&key)
     }
@@ -624,6 +680,7 @@ impl StaffAdmin for PinLogin {
         self.dir
             .set_pin(&key, &hash, true, (self.now)(), actor)
             .map_err(fail_of)?;
+        self.revoke(&key);
         // A reset also clears the lock, so the person can sign in with the temporary PIN.
         self.pass(&key);
         self.refreshed(&key)
