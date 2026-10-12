@@ -445,3 +445,112 @@ async fn every_audit_event_names_the_plugin_that_ruled() {
     }
     close(api.app).await;
 }
+
+/// Rollover is a client procedure over the batch endpoint: read the closed period's ending
+/// counts, write the next period's opening lines in chunks, each under its own idempotency key.
+/// Re-running a chunk after a lost response creates nothing twice.
+#[tokio::test]
+async fn rollover_carries_each_ending_into_the_next_opening_and_is_safe_to_rerun() {
+    let Some(url) = url() else { return };
+    let mut api = Api {
+        app: app(&url, manifest(None)).await,
+        n: 0,
+    };
+    let (_, w1) = api
+        .post(
+            "period",
+            json!({"label": "W1", "starts_on": "2026-11-01", "ends_on": "2026-11-07"}),
+        )
+        .await;
+    let (_, w2) = api
+        .post(
+            "period",
+            json!({"label": "W2", "starts_on": "2026-11-08", "ends_on": "2026-11-14"}),
+        )
+        .await;
+    let (w1, w2) = (id(&w1), id(&w2));
+    let mut expect = Vec::new();
+    for (i, (open, pull)) in [("10", "3"), ("5", "5"), ("8", "1"), ("2", "0"), ("7", "2")]
+        .into_iter()
+        .enumerate()
+    {
+        let (_, item) = api
+            .post(
+                "stock_item",
+                json!({"sku": format!("S{i}"), "description": "x", "unit_price": "1.5"}),
+            )
+            .await;
+        let (s, line) = api
+            .post(
+                "stock_line",
+                json!({"item": id(&item), "period": w1, "opening_oh": open, "unit_price": "1.5"}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{line}");
+        let (s, m) = api
+            .post(
+                "stock_movement",
+                json!({"line": id(&line), "period": w1, "pulled": pull}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{m}");
+        expect.push((id(&item), api.get("stock_line", &id(&line)).await));
+    }
+    let (s, v) = api
+        .call("POST", &format!("/v1/{INST}/period/{w1}/close"), None, None)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    // Chunks of two, as a client with a batch limit would send them.
+    let ops: Vec<Value> = expect
+        .iter()
+        .map(|(item, line)| {
+            json!({"op": "create", "entity": "stock_line", "data": {
+                "item": item, "period": w2,
+                "opening_oh": line["data"]["ending_qty"],
+                "unit_price": line["data"]["price"],
+            }})
+        })
+        .collect();
+    for pass in 0..2 {
+        for (n, chunk) in ops.chunks(2).enumerate() {
+            let (s, v) = api
+                .call_keyed(
+                    "POST",
+                    &format!("/v1/{INST}/_batch"),
+                    None,
+                    Some(json!({"ops": chunk})),
+                    &format!("rollover-w2-{n}"),
+                )
+                .await;
+            assert_eq!(s, StatusCode::OK, "pass {pass}: {v}");
+        }
+    }
+    let (_, all) = api
+        .call(
+            "GET",
+            &format!("/v1/{INST}/stock_line?limit=100"),
+            None,
+            None,
+        )
+        .await;
+    let next: Vec<&Value> = all["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l["period"] == w2.as_str())
+        .collect();
+    assert_eq!(next.len(), 5, "a rerun must not duplicate lines");
+    for (item, prev) in &expect {
+        let l = next.iter().find(|l| l["item"] == item.as_str()).unwrap();
+        assert_eq!(l["opening_oh"], prev["data"]["ending_qty"]);
+        assert_eq!(l["price"], prev["data"]["price"]);
+    }
+    // The closed period is untouched.
+    let first = api.get("stock_line", &id(&expect[0].1)).await;
+    assert_eq!(
+        first["data"]["ending_qty"],
+        expect[0].1["data"]["ending_qty"]
+    );
+    close(api.app).await;
+}
