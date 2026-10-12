@@ -508,7 +508,7 @@ async fn rollover_carries_each_ending_into_the_next_opening_and_is_safe_to_rerun
             json!({"op": "create", "entity": "stock_line", "data": {
                 "item": item, "period": w2,
                 "opening_oh": line["data"]["ending_qty"],
-                "unit_price": line["data"]["price"],
+                "unit_price": line["data"]["unit_price"],
             }})
         })
         .collect();
@@ -546,11 +546,85 @@ async fn rollover_carries_each_ending_into_the_next_opening_and_is_safe_to_rerun
         assert_eq!(l["opening_oh"], prev["data"]["ending_qty"]);
         assert_eq!(l["price"], prev["data"]["price"]);
     }
+    // A second run under a new key conflicts on the unique (item, period) line_key instead of
+    // duplicating.
+    let (s, v) = api
+        .call_keyed(
+            "POST",
+            &format!("/v1/{INST}/_batch"),
+            None,
+            Some(json!({"ops": ops[..1]})),
+            "rollover-w2-again",
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
     // The closed period is untouched.
     let first = api.get("stock_line", &id(&expect[0].1)).await;
     assert_eq!(
         first["data"]["ending_qty"],
         expect[0].1["data"]["ending_qty"]
     );
+    close(api.app).await;
+}
+
+/// A plugin that lets stock go negative cannot roll the shortfall forward: `opening_oh` is never
+/// negative, so the batch is refused whole. The client settles the shortfall first.
+#[tokio::test]
+async fn a_negative_ending_cannot_be_carried_as_an_opening() {
+    let Some(url) = url() else { return };
+    let lenient = plugin(
+        "lenient-rules",
+        "[[policy]]\nslot = \"ending_qty\"\nrule = \"opening_oh + received - pulled\"\n[[policy]]\nslot = \"over_pull\"\nrule = \"true\"\n",
+    );
+    let mut api = Api {
+        app: app(&url, manifest(Some(&lenient))).await,
+        n: 0,
+    };
+    let (_, w1) = api
+        .post(
+            "period",
+            json!({"label": "W1", "starts_on": "2026-11-01", "ends_on": "2026-11-07"}),
+        )
+        .await;
+    let (_, w2) = api
+        .post(
+            "period",
+            json!({"label": "W2", "starts_on": "2026-11-08", "ends_on": "2026-11-14"}),
+        )
+        .await;
+    let (_, item) = api
+        .post(
+            "stock_item",
+            json!({"sku": "RICE", "description": "x", "unit_price": "1.5"}),
+        )
+        .await;
+    let (_, line) = api
+        .post(
+            "stock_line",
+            json!({"item": id(&item), "period": id(&w1), "opening_oh": "10", "unit_price": "1.5"}),
+        )
+        .await;
+    let (s, _) = api
+        .post(
+            "stock_movement",
+            json!({"line": id(&line), "period": id(&w1), "pulled": "12"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let cur = api.get("stock_line", &id(&line)).await;
+    assert_eq!(cur["data"]["ending_qty"], "-2.000");
+    let (s, v) = api
+        .call(
+            "POST",
+            &format!("/v1/{INST}/_batch"),
+            None,
+            Some(
+                json!({"ops": [{"op": "create", "entity": "stock_line", "data": {
+                "item": id(&item), "period": id(&w2),
+                "opening_oh": cur["data"]["ending_qty"], "unit_price": "1.5"}}]}),
+            ),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     close(api.app).await;
 }
