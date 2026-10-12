@@ -1,0 +1,17 @@
+[package]
+name = "ce-plugin"
+description = "CEngine customer plugin contract: strict plugin.toml reader and validator (declarative policy packs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ce-expr = { path = "../ce-expr" }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+semver = "1"
