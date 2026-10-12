@@ -89,6 +89,38 @@ impl Verifier {
         })
     }
 
+    /// Signs a token for `sub` in `tenant` with `roles`, valid from `now` for `ttl_secs` (1 second
+    /// to 24 hours). The host decides who may ask: this only turns an identity it has already
+    /// checked into the token `verify_token` accepts. Fails on an empty `sub` or a tenant that is
+    /// not a canonical lowercase uuid.
+    pub fn sign_token(
+        &self,
+        sub: &str,
+        tenant: &str,
+        roles: &[String],
+        now: u64,
+        ttl_secs: u64,
+    ) -> Result<String, AuthError> {
+        if sub.is_empty() || !is_uuid(tenant) || !(1..=86_400).contains(&ttl_secs) {
+            return Err(AuthError::BadClaims);
+        }
+        let h = B64.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+        let p = B64.encode(
+            serde_json::json!({
+                "sub": sub, "tenant": tenant, "roles": roles,
+                "iat": now, "exp": now.saturating_add(ttl_secs),
+            })
+            .to_string(),
+        );
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.key).map_err(|_| AuthError::BadClaims)?;
+        mac.update(format!("{h}.{p}").as_bytes());
+        Ok(format!(
+            "{h}.{p}.{}",
+            B64.encode(mac.finalize().into_bytes())
+        ))
+    }
+
     pub fn verify_token(&self, token: &str, now: u64) -> Result<Principal, AuthError> {
         let mut parts = token.split('.');
         let (h, p, s) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
@@ -142,4 +174,38 @@ fn is_uuid(s: &str) -> bool {
             8 | 13 | 18 | 23 => *c == b'-',
             _ => c.is_ascii_digit() || (b'a'..=b'f').contains(c),
         })
+}
+
+#[cfg(test)]
+mod issue_tests {
+    use super::*;
+    const T: &str = "11111111-1111-1111-1111-111111111111";
+
+    #[test]
+    fn a_signed_token_verifies_and_expires() {
+        let v = Verifier::new(b"0123456789abcdef0123456789abcdef").unwrap();
+        let t = v
+            .sign_token("u1", T, &["owner".to_string()], 1000, 60)
+            .unwrap();
+        let p = v.verify_token(&t, 1059).unwrap();
+        assert_eq!((p.user_id.as_str(), p.scope().tenant_id()), ("u1", T));
+        assert_eq!(p.roles, ["owner"]);
+        assert_eq!(v.verify_token(&t, 1060).err(), Some(AuthError::Expired));
+    }
+
+    #[test]
+    fn bad_inputs_are_refused() {
+        let v = Verifier::new(b"0123456789abcdef0123456789abcdef").unwrap();
+        for (sub, tenant, ttl) in [
+            ("", T, 60),
+            ("u", "nope", 60),
+            ("u", T, 0),
+            ("u", T, 86_401),
+        ] {
+            assert_eq!(
+                v.sign_token(sub, tenant, &[], 1000, ttl),
+                Err(AuthError::BadClaims)
+            );
+        }
+    }
 }

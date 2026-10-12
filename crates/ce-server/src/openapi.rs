@@ -336,6 +336,28 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
                 "summary": r["title"], "parameters": params, "responses": responses}}),
         );
     }
+    let mut token_responses = json!({"200": {"description": "a signed token for the installation's tenant",
+        "content": {"application/json": {"schema": {"type": "object", "properties": {"data": {"type": "object",
+            "properties": {"token": {"type": "string"}, "expires_at": {"type": "integer"},
+                "roles": {"type": "array", "items": {"type": "string"}}, "sub": {"type": "string"}}}}}}}}});
+    if let (Value::Object(r), Value::Object(e)) = (
+        &mut token_responses,
+        problem_responses(&[
+            ("401", "invalid_credentials"),
+            ("404", "not_found"),
+            ("422", "validation_failed"),
+            ("429", "throttled"),
+            ("503", "unavailable"),
+        ]),
+    ) {
+        r.extend(e);
+    }
+    paths.insert(
+        format!("/v1/{installation}/_auth/token"),
+        json!({"post": {"operationId": "issueToken", "security": [],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object"}}}},
+            "responses": token_responses}}),
+    );
     json!({
         "openapi": "3.1.0",
         "info": {

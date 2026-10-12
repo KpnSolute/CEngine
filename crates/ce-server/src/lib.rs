@@ -18,6 +18,7 @@ mod actions;
 mod changesets;
 mod events;
 mod files;
+mod login;
 mod openapi;
 mod periods;
 mod problem;
@@ -44,6 +45,7 @@ use serde_json::{json, Map, Value};
 use std::{collections::HashMap, sync::Arc};
 
 pub use events::{relay_once, Deliver, Delivery, Relay, Report as RelayReport};
+pub use login::{Identity, Issuing, Login, LoginError};
 
 const MAX_BODY: usize = 1024 * 1024;
 
@@ -62,6 +64,8 @@ pub struct AppState<S> {
     pub public_tenants: Option<PublicTenants>,
     /// Signs and delivers events out; without one `POST .../events/relay` answers 503.
     pub relay: Option<Arc<Relay>>,
+    /// Turns the host's login into tokens; without one `POST .../_auth/token` answers 503.
+    pub issuing: Option<Arc<Issuing>>,
 }
 
 /// Looks up the tenant behind a public workspace name.
@@ -79,6 +83,7 @@ impl<S> Clone for AppState<S> {
             blobs: self.blobs.clone(),
             public_tenants: self.public_tenants.clone(),
             relay: self.relay.clone(),
+            issuing: self.issuing.clone(),
         }
     }
 }
@@ -100,6 +105,7 @@ impl<S> AppState<S> {
             blobs: None,
             public_tenants: None,
             relay: None,
+            issuing: None,
         }
     }
 
@@ -107,6 +113,28 @@ impl<S> AppState<S> {
     pub fn with_relay(mut self, relay: Relay) -> Self {
         self.relay = Some(Arc::new(relay));
         self
+    }
+
+    /// Lets the host's login be exchanged for tokens scoped to `tenant`, valid `ttl_secs` (1 to
+    /// 86,400). Fails if the tenant is not a lowercase uuid or the lifetime is out of range.
+    pub fn with_login(
+        mut self,
+        login: Box<dyn Login>,
+        tenant: &str,
+        ttl_secs: u64,
+    ) -> Result<Self, &'static str> {
+        if self.verifier.public_scope(tenant).is_none() {
+            return Err("the tenant must be a lowercase uuid");
+        }
+        if !(1..=86_400).contains(&ttl_secs) {
+            return Err("the token lifetime is 1 to 86400 seconds");
+        }
+        self.issuing = Some(Arc::new(Issuing {
+            login,
+            tenant: tenant.to_string(),
+            ttl_secs,
+        }));
+        Ok(self)
     }
 
     /// Lets public projections resolve workspace names to tenants.
@@ -155,6 +183,7 @@ where
         )
         .route("/v1/{inst}/_batch", post(batch::<S>))
         .route("/v1/{inst}/_barcode", get(barcode::<S>))
+        .route("/v1/{inst}/_auth/token", post(issue_token::<S>))
         .route("/v1/{inst}/_report/{name}", get(report::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
@@ -1860,6 +1889,94 @@ async fn report<S: Store + Send + Sync + 'static>(
                 .insert("x-ce-truncated", HeaderValue::from_static("true"));
         }
         Ok(res)
+    };
+    finish(&rid, run.await)
+}
+
+/// The most bytes of credentials one login request may carry.
+const LOGIN_BYTES: usize = 4096;
+
+/// `POST .../_auth/token` with the host's credentials as a JSON object: answers a signed token
+/// for the configured tenant. No bearer token is needed (this is how one is obtained). A wrong
+/// credential is always the same 401, whatever part was wrong.
+async fn issue_token<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        if inst != st.installation {
+            return Err(Problem::not_found());
+        }
+        let Some(issuing) = st.issuing.clone() else {
+            return Err(Problem::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "no login is configured",
+            ));
+        };
+        let body = body.map_err(body_problem)?;
+        if body.len() > LOGIN_BYTES {
+            return Err(Problem::validation(
+                "the credentials are too large",
+                vec![
+                    json!({"path": "", "code": "too_large", "detail": format!("at most {LOGIN_BYTES} bytes")}),
+                ],
+            ));
+        }
+        let credentials = parse_object(&body)?;
+        let checked = tokio::task::spawn_blocking({
+            let issuing = issuing.clone();
+            move || issuing.login.login(&credentials)
+        })
+        .await
+        .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?;
+        let who = match checked {
+            Ok(who) => who,
+            Err(LoginError::Denied) => {
+                return Err(Problem::new(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_credentials",
+                    "those credentials were not accepted",
+                ))
+            }
+            Err(LoginError::Throttled) => {
+                let mut p = Problem::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "throttled",
+                    "too many attempts, try again later",
+                );
+                p.retryable = true;
+                return Err(p);
+            }
+            Err(LoginError::Unavailable) => {
+                let mut p = Problem::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    "sign-in is unavailable right now",
+                );
+                p.retryable = true;
+                return Err(p);
+            }
+        };
+        let roles = login::known_roles(&st.manifest, &who.roles);
+        if roles.is_empty() {
+            // Signed in but holding nothing this template defines: same answer as a bad login.
+            return Err(Problem::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_credentials",
+                "those credentials were not accepted",
+            ));
+        }
+        let now = (st.now)();
+        let token = st
+            .verifier
+            .sign_token(&who.sub, &issuing.tenant, &roles, now, issuing.ttl_secs)
+            .map_err(|_| store_problem(StoreError::Backend("cannot sign".into())))?;
+        let body = json!({"data": {"token": token, "expires_at": now + issuing.ttl_secs, "roles": roles, "sub": who.sub},
+            "meta": {"request_id": rid}});
+        Ok((StatusCode::OK, Json(body)).into_response())
     };
     finish(&rid, run.await)
 }
