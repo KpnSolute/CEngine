@@ -21,6 +21,13 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 python3 reference/run_vectors.py
 ```
 
+## Run it
+`docker build -t cengine .` builds the server image (one `ce-serve` binary, configured by `CE_*`
+environment variables, listed in `crates/ce-serve/src/main.rs`). Run it once with the argument
+`install` to create the schema, then without arguments to serve. Health: `GET /_meta/health/ready`.
+CI builds the image and checks it installs, serves and answers the health check; nothing is pushed
+to a registry.
+
 ## Not done yet
 Store (Postgres execution), events, server, Python and WASM bindings,
 date and aggregate functions, static type checking of expressions.

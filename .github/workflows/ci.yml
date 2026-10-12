@@ -62,6 +62,49 @@ jobs:
           wasm-bindgen --target nodejs --out-dir target/wasm-out target/wasm32-unknown-unknown/release/ce_wasm.wasm
           node reference/run_wasm.cjs target/wasm-out
 
+  docker:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ce
+          POSTGRES_PASSWORD: ce
+          POSTGRES_DB: ce_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ce -d ce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t cengine .
+      - name: The image installs, serves and answers the health check
+        run: |
+          run() {
+            docker run --rm --network host \
+              -e CE_DATABASE_URL=postgresql://ce:ce@127.0.0.1:5432/ce_test \
+              -e CE_MANIFEST=/manifest.json \
+              -e CE_JWT_KEY=0123456789abcdef0123456789abcdef \
+              -e CE_INSTALLATION=smoke \
+              -v "$PWD/spec/examples/inventory.json:/manifest.json:ro" "$@"
+          }
+          run cengine install
+          docker run -d --name ce --network host \
+            -e CE_DATABASE_URL=postgresql://ce:ce@127.0.0.1:5432/ce_test \
+            -e CE_MANIFEST=/manifest.json \
+            -e CE_JWT_KEY=0123456789abcdef0123456789abcdef \
+            -e CE_INSTALLATION=smoke \
+            -v "$PWD/spec/examples/inventory.json:/manifest.json:ro" cengine
+          for i in $(seq 1 20); do
+            curl -fsS http://127.0.0.1:8080/_meta/health/ready && exit 0
+            sleep 1
+          done
+          docker logs ce
+          exit 1
+
   conformance:
     runs-on: ubuntu-latest
     steps:
