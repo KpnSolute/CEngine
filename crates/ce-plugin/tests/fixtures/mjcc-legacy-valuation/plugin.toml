@@ -1,0 +1,25 @@
+schema_version = 1
+
+[plugin]
+id = "mjcc-legacy-valuation"
+version = "0.1.0"
+description = "Synthetic test copy of MJCC's inventory valuation rules, as the legacy Compute backend computes them today."
+
+[compatibility]
+engine = ">=0.2.0"
+module = "business.inventory"
+module_api = 1
+
+[execution]
+kind = "policy-pack"
+
+# Opening stock keeps the cost it was carried in at; when none was carried it takes the line price.
+[[policy]]
+slot = "opening_value"
+rule = "when(opening_oh > 0, round(opening_oh * when(opening_unit_cost > 0, opening_unit_cost, price), 2), 0)"
+
+# Value follows quantity: nothing on hand is worth nothing; otherwise the value flows
+# opening + received - pulled, never below zero.
+[[policy]]
+slot = "ending_value"
+rule = "when(ending_qty <= 0, 0, round(max(0, opening_value + received_value - pulled_value), 2))"
