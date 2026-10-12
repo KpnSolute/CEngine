@@ -230,6 +230,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-codegen"
+version = "0.0.1"
+dependencies = [
+ "ce-manifest",
+ "serde_json",
+]
+
+[[package]]
 name = "ce-events"
 version = "0.0.1"
 dependencies = [

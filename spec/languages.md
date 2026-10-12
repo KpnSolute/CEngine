@@ -54,6 +54,7 @@ pub fn eval(expr: &CompiledExpr, env: &Env) -> Value;       // used by tests and
 ## Python: `ce-py` and connectors
 - Package `cengine` wraps `ce-py` (PyO3, abi3 wheels). Exposes `compile_manifest`, `validate_manifest`, `eval_expr`, `canonical_json`, `hash_manifest`.
 - Generated client: `CEngineClient` from the manifest and OpenAPI, using `Decimal`, never `float`, for decimal fields; datetimes are timezone-aware UTC.
+- Built (`ce-codegen`): `ce-codegen manifest.json --lang python --out client.py` writes one standard-library-only file (Python 3.11+). It has a dataclass per entity (`Decimal`, `date`, aware `datetime`, `Literal` enums), `Client(base_url, installation, token)` with `client.item.list/iter/get/create/update/delete`, filters and sorts built from the declared fields (`Item.f.unit_cost >= Decimal("2") & ~(Item.f.name == "Salt")`, `Item.f.name.desc()`), automatic idempotency keys on create, and `CEngineError` carrying the problem code. Floats are refused for decimals.
 - Connector workers and AI/persona code consume events and call the API as a normal client with a service token. They never read or write tenant tables directly.
 - Python is off the request hot path. If Python is unavailable, the data plane still serves.
 - Typing: full type hints, `mypy --strict` clean on the public package.
