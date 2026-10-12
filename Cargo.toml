@@ -7,3 +7,7 @@ version = "0.2.1"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
+
+# scrypt is slow unoptimised; keep the PIN tests quick in debug builds.
+[profile.dev.package.scrypt]
+opt-level = 3

@@ -3,6 +3,7 @@
 //! ```text
 //! ce-serve install   create the installation's Postgres schema (fails if it exists)
 //! ce-serve [serve]   open the schema and serve the HTTP API (default)
+//! ce-serve staff hash  read a PIN on stdin, print the hash to put in the staff list
 //! ce-serve plugin status | digest <slug> | approve <slug> <digest>
 //!                    | rollback <slug> | disable <slug> | enable <slug>
 //! ```
@@ -24,6 +25,12 @@
 //! | `CE_POOL_SIZE` | most database connections open at once (default 8) |
 //! | `CE_DB_TLS` | `off` (default), `webpki` (public roots) or `ca` (needs `CE_DB_CA`, a PEM file) |
 //! | `CE_DB_CA` | path to the CA certificate(s) the database's certificate must chain to |
+//! | `CE_STAFF_FILE` | staff list JSON (`{"users":[{"username","pin_hash","roles"}]}`); turns on `POST /v1/{id}/_auth/token`, else it answers 503 |
+//! | `CE_TENANT` | the one tenant every issued token is for, a lowercase uuid (required with `CE_STAFF_FILE`) |
+//! | `CE_TOKEN_TTL_SECS` | token lifetime, 1 to 86400 (default 43200, 12 hours) |
+//! | `CE_LOGIN_MAX_FAILED` | wrong PINs before a username locks (default 5) |
+//! | `CE_LOGIN_LOCKOUT_SECS` | how long it stays locked (default 900) |
+//! | `CE_ROLE_LADDER` | comma-separated roles, lowest first (default `staff,assistant,manager,admin,sudo`); a role also grants those below it |
 //! | `CE_BIND` | listen address (default `127.0.0.1:8080`) |
 
 use ce_auth::Verifier;
@@ -252,8 +259,67 @@ fn load_manifest() -> Result<ce_manifest::Manifest, String> {
     .map_err(|_| "the composed manifest failed validation".to_string())
 }
 
+fn env_num<T: std::str::FromStr>(name: &str, default: T) -> Result<T, String> {
+    match std::env::var(name) {
+        Ok(v) if !v.is_empty() => v.parse().map_err(|_| format!("{name} must be a number")),
+        _ => Ok(default),
+    }
+}
+
+/// The staff PIN login when `CE_STAFF_FILE` is set: the login, its tenant and token lifetime.
+fn staff_login() -> Result<Option<(ce_server::PinLogin, String, u64)>, String> {
+    let Some(path) = std::env::var("CE_STAFF_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let tenant = var("CE_TENANT")?;
+    let ttl = env_num("CE_TOKEN_TTL_SECS", 12 * 3600u64)?;
+    let mut policy = ce_server::PinPolicy {
+        max_failed: env_num("CE_LOGIN_MAX_FAILED", 5u32)?,
+        lockout_secs: env_num("CE_LOGIN_LOCKOUT_SECS", 900u64)?,
+        ..Default::default()
+    };
+    if !(1..=100).contains(&policy.max_failed) || !(1..=86_400).contains(&policy.lockout_secs) {
+        return Err("CE_LOGIN_MAX_FAILED is 1 to 100 and CE_LOGIN_LOCKOUT_SECS 1 to 86400".into());
+    }
+    if let Ok(l) = std::env::var("CE_ROLE_LADDER") {
+        if !l.is_empty() {
+            policy.ladder = l.split(',').map(|r| r.trim().to_string()).collect();
+        }
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let now: std::sync::Arc<dyn Fn() -> u64 + Send + Sync> = std::sync::Arc::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    });
+    let login =
+        ce_server::PinLogin::from_json(&text, policy, now).map_err(|e| format!("{path}: {e}"))?;
+    Ok(Some((login, tenant, ttl)))
+}
+
+/// `ce-serve staff hash`: reads a PIN from stdin (one line) and prints its hash.
+fn staff_command(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("hash") {
+        return Err("use staff hash (the PIN is read from stdin)".into());
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("cannot read the PIN: {e}"))?;
+    let pin = line.trim_end_matches(['\r', '\n']);
+    let hash = ce_server::hash_pin_random(pin).ok_or("the PIN is empty")?;
+    println!("{hash}");
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("staff") {
+        return staff_command(&args[1..]);
+    }
     if args.first().map(String::as_str) == Some("plugin") {
         return plugin_command(&args[1..]);
     }
@@ -303,7 +369,14 @@ fn run() -> Result<(), String> {
     let store = TypedPgStore::open_with(&url, &manifest, &schema, pool).map_err(|e| {
         format!("cannot open schema {schema}: {e:?} (run `ce-serve install` first)")
     })?;
-    let app = router(AppState::new(store, verifier, manifest, &installation));
+    let mut state = AppState::new(store, verifier, manifest, &installation);
+    if let Some(login) = staff_login()? {
+        let (login, tenant, ttl) = login;
+        state = state
+            .with_login(Box::new(login), &tenant, ttl)
+            .map_err(|e| format!("cannot enable sign-in: {e}"))?;
+    }
+    let app = router(state);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

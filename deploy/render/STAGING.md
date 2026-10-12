@@ -35,6 +35,8 @@ Values are never in the repo. Secrets are `sync: false`: Render asks for them at
 | `CE_DB_TLS` | `off`, `webpki` or `ca` | Owner, depending on the database (sync: false). Never `off` over a public network |
 | `CE_DB_CA` | Path to CA PEM, only with `CE_DB_TLS=ca` | Owner uploads the CA as a Render secret file, e.g. `/etc/secrets/db-ca.pem` (sync: false) |
 | `CE_SCHEMA` | Postgres schema name (default `ce_` + installation id) | Optional on first boot; MUST be a new name for the plugin phase, and the same on the install command and the service |
+| `CE_STAFF_FILE`, `CE_TENANT` | Turn on staff PIN sign-in at `POST /v1/{id}/_auth/token`. `CE_STAFF_FILE` is a staff list the owner keeps as a Render secret file, e.g. `/etc/secrets/staff.json`: `{"users":[{"username":"chef","pin_hash":"kpn-scrypt$1$...","roles":["manager"]}]}`. `CE_TENANT` is the one lowercase uuid every token is for. Make a hash with `ce-serve staff hash` (reads the PIN on stdin); hashes from the legacy backend work unchanged. | Optional. Unset, sign-in answers 503. The server refuses to start on a bad list |
+| `CE_TOKEN_TTL_SECS`, `CE_LOGIN_MAX_FAILED`, `CE_LOGIN_LOCKOUT_SECS`, `CE_ROLE_LADDER` | Token life (default 43200), wrong PINs before a lock (5), lock length (900), role order lowest first (`staff,assistant,manager,admin,sudo`; a role also grants those below) | Optional. The lock count lives in the process, so run one instance |
 | `CE_TEMPLATE`, `CE_MODULE`, `CE_PLUGIN`, `CE_PLUGIN_ROOT`, `CE_INSTALLS` | Plugin phase only; do not set `CE_MANIFEST` together with `CE_TEMPLATE` | See below |
 
 ## Database requirements
@@ -92,10 +94,10 @@ Replace `$HOST` with the service's `onrender.com` host and `$INST` with `CE_INST
 curl -fsS https://$HOST/_meta/health/live        # {"status":"ok"}
 curl -fsS https://$HOST/_meta/health/ready       # {"status":"ok"}
 curl -s -o /dev/null -w '%{http_code}\n' https://$HOST/v1/$INST/item          # 401 without a token
-curl -s -o /dev/null -w '%{http_code}\n' -X POST https://$HOST/v1/$INST/_auth/token   # 503: ce-serve configures no login
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://$HOST/v1/$INST/_auth/token   # 503 without CE_STAFF_FILE, a 4xx with it (no credentials sent)
 ```
 
-Authenticated checks need a token. `ce-serve` does not configure a login, so `_auth/token` returns 503; a staging token must be signed by the owner with `CE_JWT_KEY` (HS256; claims `sub`, `tenant` = a lowercase uuid, `roles` containing a role from the manifest, `exp`). Mint it locally and never paste the key anywhere else:
+Authenticated checks need a token. With `CE_STAFF_FILE` set, `POST /v1/$INST/_auth/token` with `{"username":"...","pin":"..."}` returns one; without it the route returns 503 and a staging token must be signed by the owner with `CE_JWT_KEY` (HS256; claims `sub`, `tenant` = a lowercase uuid, `roles` containing a role from the manifest, `exp`). Mint it locally and never paste the key anywhere else:
 
 ```sh
 TOKEN=$(CE_JWT_KEY=... python3 - <<'PY'
