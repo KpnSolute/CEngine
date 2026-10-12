@@ -31,6 +31,10 @@
       "default": "round(ending_qty * price, 2)",
       "about": "Value of the ending quantity."
     },
+    "price_decision": {
+      "default": "when(observed_price <= 0, 'skip', when(previous_price <= 0, 'apply', when(abs(observed_price - previous_price) < 0.005, 'same', when(abs(observed_price - previous_price) > 0.25 * previous_price, 'hold', 'apply'))))",
+      "about": "What a newly observed invoice price does to a line: skip (no usable price), apply (no current price, or a move within 25%), same (within half a cent of the current price) or hold (a bigger move waits for a manager)."
+    },
     "over_pull": {
       "default": "opening_oh + received - pulled >= 0",
       "about": "Invariant on a line: true when the line may be saved. Use true to allow negative stock."
@@ -90,6 +94,59 @@
         ],
         "locked_when": "ref(period).status == 'closed'",
         "sort_keys": ["txn_date"]
+      },
+      "price_observation": {
+        "fields": {
+          "line": {"type": "ref", "ref": "stock_line", "indexed": true, "required": true},
+          "observed_price": {"type": "decimal", "precision": 12, "scale": 6, "required": true},
+          "source": {"type": "string", "max_length": 200, "indexed": true},
+          "previous_price": {"type": "decimal", "precision": 12, "scale": 6, "default": 0},
+          "change": {"type": "decimal", "precision": 12, "scale": 6, "computed": "when(previous_price > 0, round((observed_price - previous_price) / previous_price, 6), 0)"},
+          "decision": {"type": "enum", "values": ["skip", "apply", "same", "hold"]},
+          "applied_price": {"type": "decimal", "precision": 12, "scale": 6}
+        },
+        "invariants": [
+          {"name": "observed_not_negative", "expr": "observed_price >= 0", "message_code": "stock.negative_price"}
+        ],
+        "state": {"field": "status", "initial": "new", "states": {
+          "new": {"code": 100, "to": ["auto_applied", "pending", "dismissed"]},
+          "auto_applied": {"code": 200},
+          "pending": {"code": 300, "to": ["applied", "kept"]},
+          "applied": {"code": 400},
+          "kept": {"code": 500},
+          "dismissed": {"code": 600}
+        }},
+        "sort_keys": ["source"]
+      }
+    },
+    "actions": {
+      "settle_price_observation": {
+        "entity": "price_observation",
+        "requires_state": ["new"],
+        "effect": [
+          {"set": {"previous_price": "ref(line).unit_price"}},
+          {"set": {"decision": {"$slot": "price_decision"}}},
+          {"when": "decision == 'apply'", "set": {"applied_price": "observed_price"}},
+          {"when": "decision == 'apply'", "update": {"entity": "stock_line", "id": "line", "set": {"unit_price": "observed_price"}}},
+          {"when": "decision == 'apply'", "transition": "auto_applied"},
+          {"when": "decision == 'hold'", "transition": "pending"},
+          {"when": "decision == 'skip' or decision == 'same'", "transition": "dismissed"}
+        ]
+      },
+      "apply_price_observation": {
+        "entity": "price_observation",
+        "requires_state": ["pending"],
+        "input": {"price": {"type": "decimal", "precision": 12, "scale": 6}},
+        "effect": [
+          {"set": {"applied_price": "when(input.price > 0, input.price, observed_price)"}},
+          {"update": {"entity": "stock_line", "id": "line", "set": {"unit_price": "applied_price"}}},
+          {"transition": "applied"}
+        ]
+      },
+      "keep_price_observation": {
+        "entity": "price_observation",
+        "requires_state": ["pending"],
+        "effect": [{"transition": "kept"}]
       }
     }
   }

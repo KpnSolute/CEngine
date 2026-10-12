@@ -70,5 +70,10 @@ Rounding: CEngine rounds exact decimals half up, as the legacy Postgres trigger 
 
 The generator (`tests/parity/gen_mjcc_inventory_vectors.py`) imports the legacy formulas read-only from a local Compute checkout and uses synthetic inputs only.
 
+## Price observations
+`business.inventory` also holds the observed-price protocol the legacy backend applies to invoice prices. A `price_observation` (line, observed price, source) is settled by the `settle_price_observation` action: it records the line's current price, decides with the `price_decision` slot, and in the same transaction either applies the price to the line (`auto_applied`), holds it (`pending`) or drops it (`dismissed`). The default rule: no usable price (zero or less) is `skip`; a line with no current price takes it (`apply`); a difference under half a cent is `same`; a move of more than 25% of the current price is `hold`; anything else is `apply`. The comparison is exact decimal arithmetic (`abs(new - old) > 0.25 * old`), so exactly 25% applies. A manager resolves a held observation with `apply_price_observation` (optionally with their own price) or `keep_price_observation`; a decided observation cannot be decided again. Lines of a closed period are frozen, so an observation cannot move their price. Who may run each action is the template's role list, not the module's.
+
+`crates/ce-plugin/tests/legacy_parity.rs` runs 326 synthetic price pairs generated from the legacy `decide_price` (`tests/parity/gen_mjcc_price_vectors.py`). All decisions match except six moves of exactly 25%, where the legacy float arithmetic lands a hair above 0.25 and holds them; the exact rule applies them, as the legacy tests and comments say it should. They are pinned by name in the test.
+
 ## Not in this increment
-Price review, fetching plugin folders from a customer repository (the host places the folder), a plugin release approval workflow beyond the owner commands, and the HTTP deploy.
+Fetching plugin folders from a customer repository (the host places the folder), a plugin release approval workflow beyond the owner commands, and the HTTP deploy.
