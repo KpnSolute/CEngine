@@ -150,6 +150,13 @@ pub fn digest_of(root: &Path, slug: &str) -> Result<String, LoadError> {
     read_descriptor(root, slug).map(|b| digest(&b))
 }
 
+/// The descriptor bytes and their digest from one read, so an approver validates exactly what
+/// was digested even if the file changes afterwards.
+pub fn snapshot(root: &Path, slug: &str) -> Result<(String, Vec<u8>), LoadError> {
+    let bytes = read_descriptor(root, slug)?;
+    Ok((digest(&bytes), bytes))
+}
+
 /// Load a plugin only if its bytes match `pin`, then validate it. The digest is checked on the
 /// same bytes that are parsed, so the file cannot change between check and use.
 pub fn load(
@@ -260,5 +267,127 @@ impl Installed {
     /// Every pin ever approved for a plugin, oldest first, including ones rolled back from.
     pub fn history(&self, id: &str) -> &[Pin] {
         self.log.get(id).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// Largest install record file accepted.
+pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
+
+fn valid_digest(d: &str) -> bool {
+    d.len() == 71
+        && d.starts_with("sha256:")
+        && d[7..]
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+impl Installed {
+    /// Plugins this record knows, sorted.
+    pub fn plugin_ids(&self) -> Vec<&str> {
+        self.log.keys().map(String::as_str).collect()
+    }
+
+    pub fn is_disabled(&self, id: &str) -> bool {
+        self.disabled.contains(id)
+    }
+
+    /// Serialize the whole record, history included, for the host to store. The output is
+    /// deterministic: ids sorted, no timestamps.
+    pub fn to_json(&self) -> String {
+        use serde_json::{json, Map, Value};
+        let mut plugins = Map::new();
+        for (id, pins) in &self.log {
+            let log: Vec<Value> = pins
+                .iter()
+                .map(|p| json!({"version": p.version.to_string(), "digest": p.digest}))
+                .collect();
+            plugins.insert(
+                id.clone(),
+                json!({
+                    "log": log,
+                    "active": self.active.get(id).cloned().unwrap_or_default(),
+                    "disabled": self.disabled.contains(id),
+                }),
+            );
+        }
+        let mut out = serde_json::to_string_pretty(&json!({"version": 1, "plugins": plugins}))
+            .expect("serialises");
+        out.push('\n');
+        out
+    }
+
+    /// Read a stored record. Strict: unknown fields, bad ids, malformed digests or versions,
+    /// and `active` positions outside the log are all refused, so a damaged or hand-edited file
+    /// cannot activate something that was never approved.
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        use serde_json::Value;
+        if text.len() > MAX_RECORD_BYTES {
+            return Err("install record is too large".into());
+        }
+        let v: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
+        let only = |o: &serde_json::Map<String, Value>, keys: &[&str], what: &str| {
+            if o.len() == keys.len() && keys.iter().all(|k| o.contains_key(*k)) {
+                Ok(())
+            } else {
+                Err(format!("{what} must have exactly the fields {keys:?}"))
+            }
+        };
+        let root = v.as_object().ok_or("install record must be an object")?;
+        only(root, &["plugins", "version"], "install record")?;
+        if root["version"] != 1 {
+            return Err("unsupported install record version".into());
+        }
+        let plugins = root["plugins"]
+            .as_object()
+            .ok_or("plugins must be an object")?;
+        let mut out = Installed::new();
+        for (id, entry) in plugins {
+            if !safe_slug(id) {
+                return Err(format!("bad plugin id {id:?}"));
+            }
+            let e = entry.as_object().ok_or("plugin entry must be an object")?;
+            only(e, &["active", "disabled", "log"], "plugin entry")?;
+            let mut pins = Vec::new();
+            for p in e["log"].as_array().ok_or("log must be a list")? {
+                let o = p.as_object().ok_or("pin must be an object")?;
+                only(o, &["digest", "version"], "pin")?;
+                let digest = o["digest"].as_str().ok_or("digest must be a string")?;
+                if !valid_digest(digest) {
+                    return Err(format!("malformed digest for {id}"));
+                }
+                let version = o["version"]
+                    .as_str()
+                    .and_then(|s| Version::parse(s).ok())
+                    .ok_or_else(|| format!("bad version for {id}"))?;
+                pins.push(Pin {
+                    id: id.clone(),
+                    version,
+                    digest: digest.to_string(),
+                });
+            }
+            let mut active = Vec::new();
+            for a in e["active"].as_array().ok_or("active must be a list")? {
+                let at = a
+                    .as_u64()
+                    .filter(|n| (*n as usize) < pins.len())
+                    .ok_or_else(|| format!("active position outside the log for {id}"))?;
+                if active.last().is_some_and(|prev| *prev >= at as usize) {
+                    return Err(format!("active positions for {id} must increase"));
+                }
+                active.push(at as usize);
+            }
+            if pins.is_empty() || active.is_empty() {
+                return Err(format!("{id} has no approved pin"));
+            }
+            let disabled = e["disabled"]
+                .as_bool()
+                .ok_or("disabled must be a boolean")?;
+            out.log.insert(id.clone(), pins);
+            out.active.insert(id.clone(), active);
+            if disabled {
+                out.disabled.insert(id.clone());
+            }
+        }
+        Ok(out)
     }
 }

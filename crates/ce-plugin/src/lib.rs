@@ -8,13 +8,16 @@
 mod load;
 mod module;
 mod registry;
+mod resolve;
 mod validate;
 
 pub use load::{
-    digest, digest_of, discover, load, Installed, LoadError, Pin, DESCRIPTOR, PLUGINS_DIR,
+    digest, digest_of, discover, load, snapshot, Installed, LoadError, Pin, DESCRIPTOR,
+    MAX_RECORD_BYTES, PLUGINS_DIR,
 };
 pub use module::{builtin_registry, compose, ComposeError, Composed};
 pub use registry::{Module, Registry, Slot};
+pub use resolve::{resolve, ResolveError};
 pub use validate::{parse, Capabilities, Plugin, Policy, Violation, MAX_BYTES, MAX_POLICIES};
 
 /// Version of the `plugin.toml` schema this crate reads.

@@ -367,9 +367,13 @@ dependencies = [
  "axum",
  "ce-auth",
  "ce-manifest",
+ "ce-plugin",
  "ce-server",
  "ce-store-pg",
  "postgres",
+ "semver",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
