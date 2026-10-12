@@ -22,6 +22,7 @@ mod files;
 mod login;
 mod openapi;
 mod periods;
+mod pin_login;
 mod problem;
 mod reports;
 mod slots;
@@ -49,6 +50,7 @@ use std::{collections::HashMap, sync::Arc};
 pub use ce_provider::{Provider, ProviderError, ProviderRequest, ProviderResponse};
 pub use events::{relay_once, Deliver, Delivery, Relay, Report as RelayReport};
 pub use login::{Identity, Issuing, Login, LoginError};
+pub use pin_login::{hash_pin, hash_pin_random, DirectoryError, PinLogin, PinPolicy};
 
 const MAX_BODY: usize = 1024 * 1024;
 
