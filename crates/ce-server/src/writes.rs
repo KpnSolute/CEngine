@@ -45,6 +45,8 @@ pub(crate) enum Op {
 pub(crate) enum Failure {
     Store(StoreError),
     Rules(Vec<FieldError>),
+    /// The record sits in a frozen window (`locked_when` holds): it cannot change.
+    Locked,
 }
 
 impl From<StoreError> for Failure {
@@ -171,6 +173,35 @@ fn settle(
         (_, Some(e)) => Err(Failure::Store(e)),
         (Err(errors), None) => Err(Failure::Rules(errors)),
         (Ok(()), None) => Ok(()),
+    }
+}
+
+/// Refuses the write when `locked_when` holds for the record, as stored or as it would become.
+/// A period close freezes the records that point at the period this way.
+fn guard_locked(
+    tx: &dyn Store,
+    env: &Env,
+    entity: &str,
+    id: Option<&str>,
+    record: &Map<String, Value>,
+    old: Option<&Map<String, Value>>,
+) -> Result<(), Failure> {
+    if env.manifest.value["entities"][entity]["locked_when"].is_null() {
+        return Ok(());
+    }
+    let r = StoreResolver {
+        store: tx,
+        env,
+        entity,
+        id,
+        failed: RefCell::new(None),
+        seen: RefCell::new(HashMap::new()),
+    };
+    let locked = ce_validate::is_locked(env.manifest, entity, record, old, env.ctx, &r);
+    match r.failed.into_inner() {
+        Some(e) => Err(Failure::Store(e)),
+        None if locked => Err(Failure::Locked),
+        None => Ok(()),
     }
 }
 
@@ -351,7 +382,9 @@ pub(crate) fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<O
                 &mut || {
                     derived = true;
                     let mut obj = data.clone();
-                    match settle(tx, env, entity, None, &mut obj, None) {
+                    match settle(tx, env, entity, None, &mut obj, None)
+                        .and_then(|()| guard_locked(tx, env, entity, None, &obj, None))
+                    {
                         Ok(()) => {
                             obj.retain(|k, v| data.get(k) != Some(&*v));
                             Ok(obj)
@@ -359,7 +392,7 @@ pub(crate) fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<O
                         Err(f) => {
                             let e = match &f {
                                 Failure::Store(e) => e.clone(),
-                                Failure::Rules(_) => StoreError::Aborted,
+                                Failure::Rules(_) | Failure::Locked => StoreError::Aborted,
                             };
                             failed = Some(f);
                             Err(e)
@@ -412,7 +445,16 @@ pub(crate) fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<O
                 return Err(StoreError::BadData("data must be a JSON object").into());
             };
             let old = current.data.as_object();
+            guard_locked(
+                tx,
+                env,
+                entity,
+                Some(id),
+                current.data.as_object().unwrap_or(&Map::new()),
+                None,
+            )?;
             settle(tx, env, entity, Some(id), &mut obj, old)?;
+            guard_locked(tx, env, entity, Some(id), &obj, old)?;
             let rec = tx.update(env.scope, entity, id, *expected, Value::Object(obj))?;
             refresh_parents(tx, env, entity, old, rec.data.as_object())?;
             Ok(Outcome {
@@ -425,6 +467,14 @@ pub(crate) fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<O
             let pre = tx.get(env.scope, entity, id)?;
             lock_parents(tx, env, entity, Some(id), pre.data.as_object(), None)?;
             let current = tx.get_locked(env.scope, entity, id)?;
+            guard_locked(
+                tx,
+                env,
+                entity,
+                Some(id),
+                current.data.as_object().unwrap_or(&Map::new()),
+                None,
+            )?;
             tx.delete(env.scope, entity, id, *expected)?;
             refresh_parents(tx, env, entity, current.data.as_object(), None)?;
             Ok(Outcome {
@@ -500,7 +550,7 @@ pub(crate) fn execute<S: Store>(
         Err(f) => {
             let e = match &f {
                 Failure::Store(e) => e.clone(),
-                Failure::Rules(_) => StoreError::Aborted,
+                Failure::Rules(_) | Failure::Locked => StoreError::Aborted,
             };
             failed = Some(f);
             Err(e)
