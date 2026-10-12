@@ -147,6 +147,7 @@ fn idempotent_replay_returns_the_original_result_after_changes<S: Store>(s: &S) 
 
 /// Runs every contract case. `make` must return an empty store on each call.
 pub fn run_all<S: Store>(make: &dyn Fn() -> S) {
+    assert!(make().ping().is_ok(), "a live store answers ping");
     insert_then_get_round_trips(&make());
     other_tenant_sees_not_found(&make());
     wrong_entity_is_not_found(&make());

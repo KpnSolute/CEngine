@@ -861,6 +861,11 @@ impl TypedPgStore {
 }
 
 impl Store for TypedPgStore {
+    fn ping(&self) -> Result<(), StoreError> {
+        let mut c = self.lock()?;
+        c.batch_execute("SELECT 1").map_err(db)
+    }
+
     fn aggregate(
         &self,
         scope: &TenantScope,

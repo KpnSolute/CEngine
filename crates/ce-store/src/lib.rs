@@ -64,6 +64,11 @@ pub struct Page {
 }
 
 pub trait Store {
+    /// Cheap check that the backing database answers. In-memory stores always do.
+    fn ping(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     /// Lists one tenant's records of `entity`. Stores that cannot query return `Unsupported`.
     fn list(
         &self,
