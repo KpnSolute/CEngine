@@ -366,6 +366,7 @@ dependencies = [
  "base64",
  "ce-auth",
  "ce-barcode",
+ "ce-calendar",
  "ce-events",
  "ce-expr",
  "ce-io",
