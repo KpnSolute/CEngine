@@ -569,6 +569,7 @@ fn an_unbounded_wait_does_not_overflow() {
     let cfg = ce_store_pg::PoolConfig {
         max: 1,
         wait: std::time::Duration::MAX,
+        ..Default::default()
     };
     let s = pooled(&url, cfg);
     let sc = scope();
@@ -585,6 +586,7 @@ fn an_exhausted_pool_is_an_error_not_a_hang() {
     let cfg = ce_store_pg::PoolConfig {
         max: 1,
         wait: std::time::Duration::from_millis(200),
+        ..Default::default()
     };
     let s = pooled(&url, cfg);
     let sc = scope();
@@ -645,3 +647,61 @@ fn text_search_matches_anywhere_ignores_case_and_stays_in_the_tenant() {
     assert!(find(&a, "nothing").is_empty());
     s.drop_schema().unwrap();
 }
+/// Needs a Postgres with TLS whose certificate is valid for the host in `CE_TEST_DATABASE_URL`
+/// and signed by the CA in the PEM file named by `CE_TEST_TLS_CA`; skipped otherwise.
+#[test]
+fn tls_connections_are_encrypted_and_verified() {
+    let (Some(url), Ok(ca_path)) = (url(), std::env::var("CE_TEST_TLS_CA")) else {
+        eprintln!("skipping: CE_TEST_TLS_CA not set");
+        return;
+    };
+    let ca = std::fs::read(ca_path).unwrap();
+    let with = |tls| ce_store_pg::PoolConfig {
+        tls,
+        ..Default::default()
+    };
+    // The trusted CA: connects, and the server reports the session as encrypted.
+    let mut c = ce_store_pg::connect(&url, &ce_store_pg::Tls::Ca(ca.clone())).unwrap();
+    let row = c
+        .query_one(
+            "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+            &[],
+        )
+        .unwrap();
+    assert!(row.get::<_, bool>(0));
+    // The store works over it.
+    let name = format!("ce_tls_{}", std::process::id());
+    let s = TypedPgStore::install_with(&url, &manifest(), &name, with(ce_store_pg::Tls::Ca(ca)))
+        .unwrap();
+    s.insert(&scope(), "item", json!({"n": 1}), None).unwrap();
+    s.drop_schema().unwrap();
+    // A CA that did not sign the server's certificate is refused, and so are bad CA files.
+    assert!(ce_store_pg::connect(
+        &url,
+        &ce_store_pg::Tls::Ca(UNRELATED_CA.as_bytes().to_vec())
+    )
+    .is_err());
+    assert!(ce_store_pg::connect(&url, &ce_store_pg::Tls::Ca(b"not pem".to_vec())).is_err());
+}
+
+/// A throwaway CA certificate (public part only) that signed nothing a test server uses.
+const UNRELATED_CA: &str = "-----BEGIN CERTIFICATE-----
+MIIDITCCAgmgAwIBAgIUfp/dxMUPj/AzyynA28veOFSeaRIwDQYJKoZIhvcNAQEL
+BQAwHzEdMBsGA1UEAwwUY2UtdW5yZWxhdGVkLXRlc3QtY2EwIBcNMjYxMDExMjMz
+ODA3WhgPMjEyNjA5MTcyMzM4MDdaMB8xHTAbBgNVBAMMFGNlLXVucmVsYXRlZC10
+ZXN0LWNhMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo+GJEizR9vO0
+DJ0NNmchYWH31SZtDFn5XA60ZHelaOFIz/LoW+JhvDm+pdpq6ZMbHz/o8JqJON8S
+k5yJBefgpXOSxDxK+7858It8W2g4XvX43rADiaRFJ2cHPcy23tior66+orfD0Y6e
+qdFi5T/047QDsZOK/UUQmenVvRzA+It7PMN/SMUlKePIVJBfxhzga+l32IR7f/Nd
+RwUkgwaGAm9agbKyeNSu+V/CEeT7FNva1BGgesia0ikMcu7B62IIylRr37NGHB0E
+aGtQS7sz6drh3CyF1kLc4H0oBm/Wzbye9xkBmDmCFzJm/NZE7Wz1ZmMGAKkSe23z
+oLR5revYOwIDAQABo1MwUTAdBgNVHQ4EFgQUo7y4sf312kR0na5xie/BNhSCPs0w
+HwYDVR0jBBgwFoAUo7y4sf312kR0na5xie/BNhSCPs0wDwYDVR0TAQH/BAUwAwEB
+/zANBgkqhkiG9w0BAQsFAAOCAQEAXVTc7lEucu6etg4+n+JVxiJyDbP2Dgr5Jjgp
+bELcYhnOXWNSNI0PuGSs8SlcoNUTrZNJVU7TPECLiOvLaGj2WsrcPb3Q/O/sanCB
+TGKwRTY8konSs9Zg99oWC24CV7vDS/AoLBLNOCoSSyEukOsP3HKxnYLt1UVdDt8h
+3tJ66nItQ3gK30U+to0RiCrtuVbtZuOe8OyIA1vDTz4XOwHX7jwo0qBMDcjhhXx9
+PFj9qsz0mx6bwzqt84wkpph7Yani17apD6CuVLR0pI/xHj2+CqbgJFSq0TU577Py
+UzEtj4WiDxAH4MTY1GfG09dUpWoRi0IBhbi88hsBc6epTTDWdg==
+-----END CERTIFICATE-----
+";
