@@ -177,7 +177,7 @@ where
 {
     Router::new()
         .route("/_meta/health/live", get(health))
-        .route("/_meta/health/ready", get(health))
+        .route("/_meta/health/ready", get(ready::<S>))
         .route("/_meta/manifest", get(manifest::<S>))
         .route("/_meta/openapi", get(openapi_doc::<S>))
         .route(
@@ -227,6 +227,21 @@ fn request_id() -> String {
 
 async fn health() -> Json<Value> {
     Json(json!({"status": "ok"}))
+}
+
+/// Ready only when the database answers; a load balancer stops sending traffic otherwise.
+async fn ready<S>(State(st): State<AppState<S>>) -> Response
+where
+    S: Store + Send + Sync + 'static,
+{
+    match blocking(&st, |s| s.ping()).await {
+        Ok(()) => Json(json!({"status": "ok"})).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "unavailable"})),
+        )
+            .into_response(),
+    }
 }
 
 fn authenticate<S>(st: &AppState<S>, headers: &HeaderMap) -> Result<Principal, Problem> {

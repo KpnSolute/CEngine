@@ -123,6 +123,14 @@ async fn health_needs_no_token() {
 }
 
 #[tokio::test]
+async fn ready_answers_ok_when_the_store_pings() {
+    let a = app();
+    let r = call(&a, "GET", "/_meta/health/ready", None, &[], None).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.body["status"], "ok");
+}
+
+#[tokio::test]
 async fn missing_bad_and_expired_tokens_are_401_problems() {
     let a = app();
     let uri = format!("/v1/{INST}/item/x");

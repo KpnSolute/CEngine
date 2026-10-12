@@ -315,9 +315,7 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("cannot listen on {bind}: {e}"))?;
         println!("serving {installation} on {bind}");
         axum::serve(listener, app.clone())
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
+            .with_graceful_shutdown(shutdown_signal())
             .await
             .map_err(|e| format!("server error: {e}"))?;
         Ok::<_, String>(app)
@@ -325,6 +323,23 @@ fn run() -> Result<(), String> {
     drop(rt);
     drop(app);
     Ok(())
+}
+
+/// Resolves on Ctrl-C or, on Unix, SIGTERM (what Render and Docker send to stop a service).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn main() -> ExitCode {
