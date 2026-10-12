@@ -154,44 +154,55 @@ fn refresh_parents(
     new: Option<&Map<String, Value>>,
     depth: usize,
 ) -> Result<(), Failure> {
+    // Every parent at this level is locked, in one order, before any of them changes or the
+    // cascade climbs: two writers then never wait on each other's parents, and a rule of a
+    // higher level sees all of this level's new totals together.
+    let mut parents: BTreeSet<(String, String)> = BTreeSet::new();
     for src in aggregate_sources(env.manifest)
         .into_iter()
         .filter(|s| s.child == child)
     {
-        let ids: BTreeSet<&str> = [old, new]
-            .into_iter()
-            .flatten()
-            .filter_map(|d| d.get(&src.ref_field).and_then(Value::as_str))
-            .collect();
-        if ids.is_empty() {
-            continue;
-        }
-        if depth >= MAX_DEPTH {
-            return Err(Failure::Store(StoreError::Constraint("aggregate depth")));
-        }
-        for id in ids {
-            let current = match tx.get_locked(env.scope, &src.parent, id) {
-                Ok(r) => r,
-                // A dangling reference has no total to keep.
-                Err(StoreError::NotFound) => continue,
-                Err(e) => return Err(e.into()),
-            };
-            let Value::Object(before) = &current.data else {
-                continue;
-            };
-            let mut after = before.clone();
-            settle(tx, env, &src.parent, Some(id), &mut after, Some(before))?;
-            if &after != before {
-                tx.update(
-                    env.scope,
-                    &src.parent,
-                    id,
-                    current.version,
-                    Value::Object(after.clone()),
-                )?;
-                refresh_parents(tx, env, &src.parent, Some(before), Some(&after), depth + 1)?;
+        for d in [old, new].into_iter().flatten() {
+            if let Some(id) = d.get(&src.ref_field).and_then(Value::as_str) {
+                parents.insert((src.parent.clone(), id.to_string()));
             }
         }
+    }
+    if parents.is_empty() {
+        return Ok(());
+    }
+    if depth >= MAX_DEPTH {
+        return Err(Failure::Store(StoreError::Constraint("aggregate depth")));
+    }
+    let mut locked = Vec::new();
+    for (parent, id) in parents {
+        match tx.get_locked(env.scope, &parent, &id) {
+            Ok(r) => locked.push((parent, id, r)),
+            // A dangling reference has no total to keep.
+            Err(StoreError::NotFound) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let mut changed = Vec::new();
+    for (parent, id, current) in locked {
+        let Value::Object(before) = &current.data else {
+            continue;
+        };
+        let mut after = before.clone();
+        settle(tx, env, &parent, Some(&id), &mut after, Some(before))?;
+        if &after != before {
+            tx.update(
+                env.scope,
+                &parent,
+                &id,
+                current.version,
+                Value::Object(after.clone()),
+            )?;
+            changed.push((parent, before.clone(), after));
+        }
+    }
+    for (parent, before, after) in changed {
+        refresh_parents(tx, env, &parent, Some(&before), Some(&after), depth + 1)?;
     }
     Ok(())
 }
