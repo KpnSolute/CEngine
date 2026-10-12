@@ -1,5 +1,7 @@
 # CEngine staging on Render (preparation only)
 
+MJCC staging: the Blueprint now runs the MJCC template. Upload `template/mjcc.template.json` from MJCC-workspace as the Render secret file `mjcc.template.json`, and `staff.json` (first admin) as `staff.json`; `CE_TEMPLATE` and `CE_MODULE` replace `CE_MANIFEST`. The same `CE_TEMPLATE`, `CE_MODULE`, `CE_INSTALLATION` and `CE_SCHEMA` must be used for `ce-serve install`. The step-by-step guide for the owner is `mjcc-cengine/go-live-staging-runbook.md` in the project files.
+
 Nothing here has been deployed. This prepares the files; the owner applies them. Staging only: no production database, no production credentials, no domain or DNS work.
 
 ## Service

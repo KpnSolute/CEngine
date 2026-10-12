@@ -20,8 +20,10 @@ services:
         value: 0.0.0.0:8080 # the image default; ce-serve does not read PORT itself
       - key: CE_INSTALLATION
         value: mjcc-staging
-      - key: CE_MANIFEST
-        value: /etc/secrets/manifest.json # Render secret file holding the manifest JSON
+      - key: CE_TEMPLATE
+        value: /etc/secrets/mjcc.template.json # Render secret file: the MJCC template JSON (from MJCC-workspace)
+      - key: CE_MODULE
+        value: business.inventory # ce-serve adds this module to the template at start
       - key: CE_POOL_SIZE
         value: "5"
       - key: CE_DATABASE_URL
@@ -32,3 +34,11 @@ services:
         sync: false # off | webpki | ca, see STAGING.md
       - key: CE_DB_CA
         sync: false # only with CE_DB_TLS=ca; e.g. /etc/secrets/db-ca.pem (Render secret file)
+      - key: CE_SCHEMA
+        sync: false # the schema `ce-serve install` created, e.g. ce_mjcc_staging
+      - key: CE_TENANT
+        sync: false # one lowercase uuid; every token is for this tenant
+      - key: CE_STAFF_FILE
+        value: /etc/secrets/staff.json # Render secret file: seeds the first admin once
+      - key: CE_STAFF_SOURCE
+        value: postgres # staff accounts live in the installation's schema after that
