@@ -139,10 +139,6 @@ impl Api {
         )
     }
 
-    async fn post(&mut self, entity: &str, body: Value) -> (StatusCode, Value) {
-        self.call("POST", &format!("/v1/{INST}/{entity}"), None, Some(body))
-            .await
-    }
     async fn list(&mut self, entity: &str) -> Vec<Value> {
         let (s, v) = self
             .call("GET", &format!("/v1/{INST}/{entity}?limit=100"), None, None)
