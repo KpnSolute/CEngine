@@ -2,7 +2,9 @@
 //! one record in a single transaction. Effects run in order, each seeing the result of the one
 //! before: `set` writes fields from expressions (rules, computed fields and freezes apply as for
 //! any write), `transition` moves the record along its state graph, `create` makes a record of
-//! another entity, `emit` names an event. Expressions read the record's fields, `input.*`,
+//! another entity, `update` changes a record of another entity that one of this record's fields
+//! points at, `emit` names an event. Any effect may carry a `when` expression and is skipped
+//! unless it is true. Expressions read the record's fields, `input.*`,
 //! `actor.*`, `now` and `today`. Every change leaves an audit row when the `audit` tool is used.
 //! Running an action is its own permission (`roles.*.actions`), so a role that may run it need
 //! not write the entity directly.
@@ -182,6 +184,22 @@ fn run_in(tx: &dyn Store, env: &Env, r: &Run) -> Result<Done, Stop> {
         .flatten()
         .enumerate()
     {
+        if let Some(cond) = eff["when"].as_str() {
+            let on = eval(
+                tx,
+                env,
+                action,
+                entity,
+                &rec,
+                r.input,
+                cond,
+                "when",
+                &json!({"type": "boolean"}),
+            )?;
+            if on != Some(Value::Bool(true)) {
+                continue;
+            }
+        }
         if let Some(set) = eff["set"].as_object() {
             let mut patch = Map::new();
             for (field, src) in set {
@@ -284,6 +302,56 @@ fn run_in(tx: &dyn Store, env: &Env, r: &Run) -> Result<Done, Stop> {
             if let Some(made) = out.after {
                 done.created.push(json!({"entity": ce, "id": made.id}));
             }
+        }
+        if let Some(u) = eff["update"].as_object() {
+            let te = u["entity"].as_str().unwrap_or_default();
+            let tent = &m.value["entities"][te];
+            let id = eval(
+                tx,
+                env,
+                action,
+                entity,
+                &rec,
+                r.input,
+                u["id"].as_str().unwrap_or_default(),
+                "update.id",
+                &json!({"type": "string"}),
+            )?;
+            let Some(Value::String(id)) = id else {
+                return Err(rules(
+                    format!("/effect/{i}/update/id"),
+                    "the record to update is not set".to_string(),
+                ));
+            };
+            if te == entity && id == rec.id {
+                return Err(rules(
+                    format!("/effect/{i}/update/id"),
+                    "use `set` to change the action's own record".to_string(),
+                ));
+            }
+            let target = tx.get_locked(env.scope, te, &id)?;
+            let mut patch = Map::new();
+            for (field, src) in u["set"].as_object().into_iter().flatten() {
+                let v = eval(
+                    tx,
+                    env,
+                    action,
+                    entity,
+                    &rec,
+                    r.input,
+                    src.as_str().unwrap_or_default(),
+                    field,
+                    &tent["fields"][field],
+                )?;
+                patch.insert(field.clone(), v.unwrap_or(Value::Null));
+            }
+            let op = Op::Patch {
+                id: target.id.clone(),
+                expected: target.version,
+                patch,
+            };
+            let out = writes::step(tx, env, te, &op)?;
+            writes::audit(tx, env, te, &op, &out)?;
         }
         if let Some(ev) = eff["emit"].as_str() {
             crate::events::enqueue(

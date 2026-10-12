@@ -185,3 +185,31 @@ fn reports_are_checked_against_the_entity() {
     m["reports"]["stock"]["filter"] = json!("phase == 'new'");
     assert_eq!(codes(&m), Vec::<&str>::new());
 }
+
+#[test]
+fn action_when_and_update_effects_are_checked() {
+    let with = |eff: Value| {
+        let mut m = example("inventory");
+        m["actions"]["touch"] = json!({"entity": "item", "effect": [eff]});
+        m
+    };
+    let ok = with(json!({
+        "when": "on_hand > 0",
+        "update": {"entity": "period", "id": "period", "set": {"month": "'x'"}}
+    }));
+    assert_eq!(codes(&ok), Vec::<&str>::new());
+
+    assert!(codes(&with(json!({"when": "on_hand > 0"}))).contains(&"empty_effect"));
+    assert!(codes(&with(
+        json!({"update": {"entity": "ghost", "id": "period", "set": {}}})
+    ))
+    .contains(&"unknown_entity"));
+    assert!(codes(&with(
+        json!({"update": {"entity": "period", "id": "period", "set": {"nope": "1"}}})
+    ))
+    .contains(&"unknown_field"));
+    assert!(codes(&with(
+        json!({"update": {"entity": "item", "id": "period", "set": {"value": "1"}}})
+    ))
+    .contains(&"computed_field"));
+}
