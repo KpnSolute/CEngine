@@ -35,7 +35,7 @@ Crates (draft names):
 - `ce-events`: outbox, relay, CloudEvents, HMAC with 10-minute key overlap.
 - `ce-provider`: provider trait toward Infajn plus a local no-op provider.
 - `ce-server`: axum/tokio service exposing data, control and meta planes.
-- `ce-py` (PyO3) and `ce-wasm` (wasm-bindgen): thin bindings, no logic.
+- `ce-py` (PyO3) and `ce-wasm` (wasm-bindgen): thin bindings, no logic. Both call `ce-bind` and pass the same 20 expression vectors in CI (`reference/run_bindings.py`, `reference/run_wasm.cjs`). The WASM build needs `RUSTFLAGS='--cfg getrandom_backend="wasm_js"'` and wasm-bindgen-cli 0.2.129.
 
 Rules:
 1. `TenantScope` has a private constructor reachable only from `verify_token`. Every store function takes a `&TenantScope`. A call without one does not compile.

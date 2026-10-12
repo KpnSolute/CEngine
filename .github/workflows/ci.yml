@@ -52,6 +52,15 @@ jobs:
         run: |
           cargo build -p ce-py
           python reference/run_bindings.py target/debug/libcengine.so
+      - name: WebAssembly binding passes the shared vectors
+        env:
+          RUSTFLAGS: -D warnings --cfg getrandom_backend="wasm_js"
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install --locked wasm-bindgen-cli --version 0.2.129
+          cargo build -p ce-wasm --target wasm32-unknown-unknown --release
+          wasm-bindgen --target nodejs --out-dir target/wasm-out target/wasm32-unknown-unknown/release/ce_wasm.wasm
+          node reference/run_wasm.cjs target/wasm-out
 
   conformance:
     runs-on: ubuntu-latest
