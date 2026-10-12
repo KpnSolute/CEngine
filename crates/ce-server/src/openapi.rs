@@ -422,6 +422,7 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
                     "hint": {"type": "string", "maxLength": 500}}}}}},
             "responses": ai_responses}}),
     );
+    add_operations(m, installation, &mut paths);
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -448,4 +449,156 @@ fn props_for_create(record: &Value) -> Option<Value> {
             "description": "optional: the id to give the new record (unique per tenant and entity)"}),
     );
     Some(Value::Object(props))
+}
+
+/// A response map with the listed problem answers added to `ok`.
+fn answers(ok: Value, problems: &[(&str, &str)]) -> Value {
+    let mut r = ok;
+    if let (Value::Object(r), Value::Object(e)) = (&mut r, problem_responses(problems)) {
+        r.extend(e);
+    }
+    r
+}
+
+/// The routes that are not plain entity CRUD: batch, actions, period close and reopen, changeset
+/// decisions, and event relay and replay. (CSV export and import are documented with each entity.)
+fn add_operations(m: &Manifest, installation: &str, paths: &mut Map<String, Value>) {
+    let key = json!({"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string"}});
+    let id = json!({"name": "id", "in": "path", "required": true, "schema": {"type": "string"}});
+    let base = format!("/v1/{installation}");
+    let common = [
+        ("401", "unauthenticated"),
+        ("403", "forbidden"),
+        ("404", "not_found"),
+    ];
+    let with = |extra: &[(&'static str, &'static str)]| -> Vec<(&'static str, &'static str)> {
+        let mut v = common.to_vec();
+        v.extend_from_slice(extra);
+        v
+    };
+
+    // _batch
+    paths.insert(
+        format!("{base}/_batch"),
+        json!({"post": {"operationId": "batch",
+            "summary": "up to 100 creates, updates and deletes in one transaction; all apply or none",
+            "parameters": [key.clone()],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object",
+                "required": ["ops"],
+                "properties": {"ops": {"type": "array", "minItems": 1, "maxItems": 100, "items": {
+                    "type": "object", "required": ["op", "entity"],
+                    "properties": {
+                        "op": {"type": "string", "enum": ["create", "update", "delete"]},
+                        "entity": {"type": "string"},
+                        "id": {"type": "string", "description": "update and delete"},
+                        "version": {"type": "integer", "description": "update and delete: the version being changed"},
+                        "data": {"type": "object", "description": "create and update"}}}}}}}}},
+            "responses": answers(
+                json!({"200": {"description": "one entry per operation, in order (null for a delete)",
+                    "content": {"application/json": {"schema": {"type": "object", "properties": {
+                        "data": {"type": "array", "items": {"type": ["object", "null"]}},
+                        "meta": {"type": "object"}}}}}}}),
+                &with(&[
+                    ("409", "conflict"),
+                    ("422", "validation_failed"),
+                    ("428", "precondition_required: Idempotency-Key is missing"),
+                ]))}}),
+    );
+
+    // actions
+    for (name, a) in m.value["actions"].as_object().into_iter().flatten() {
+        let entity = a["entity"].as_str().unwrap_or_default();
+        let record = if m.value["entities"][entity].is_object() {
+            json!({"$ref": format!("#/components/schemas/{entity}")})
+        } else {
+            json!({"type": "object"})
+        };
+        paths.insert(
+            format!("{base}/actions/{name}"),
+            json!({"post": {"operationId": format!("action_{name}"),
+                "summary": format!("run `{name}` on one {entity} record"),
+                "parameters": [key.clone(),
+                    {"name": "If-Match", "in": "header", "required": true, "schema": {"type": "string"},
+                        "description": "the record version the caller read, such as \"3\""}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object",
+                    "required": ["id"],
+                    "properties": {"id": {"type": "string", "description": "the record the action runs on"},
+                        "input": {"type": "object", "description": "arguments the action reads"}}}}}},
+                "responses": answers(
+                    json!({"200": {"description": "the record after the action",
+                        "content": {"application/json": {"schema": {"type": "object", "properties": {
+                            "data": record,
+                            "meta": {"type": "object", "properties": {
+                                "request_id": {"type": "string"}, "version": {"type": "integer"},
+                                "created": {"type": "array", "items": {"type": "object"}},
+                                "emitted": {"type": "array", "items": {"type": "string"}}}}}}}}}}),
+                    &with(&[
+                        ("409", "invalid_transition or version_conflict"),
+                        ("422", "validation_failed"),
+                        ("428", "precondition_required: If-Match or Idempotency-Key is missing"),
+                    ]))}}),
+        );
+    }
+
+    // period close and reopen
+    if crate::periods::enabled(m) {
+        for verb in ["close", "reopen"] {
+            paths.insert(
+                format!("{base}/period/{{id}}/{verb}"),
+                json!({"post": {"operationId": format!("period_{verb}"),
+                    "summary": format!("{verb} a period"),
+                    "parameters": [id.clone()],
+                    "responses": answers(
+                        json!({"200": {"description": "the period after the change",
+                            "content": {"application/json": {"schema": {"type": "object", "properties": {
+                                "data": {"$ref": "#/components/schemas/period"}, "meta": {"type": "object"}}}}}}}),
+                        &with(&[("409", "invalid_transition")]))}}),
+            );
+        }
+    }
+
+    // changeset decisions
+    if crate::changesets::enabled(m) {
+        for (verb, what) in [
+            ("merge", "apply the changeset's operations"),
+            ("reject", "close the changeset without applying it"),
+            ("revert", "undo a merged changeset"),
+            ("withdraw", "the submitter withdraws their own changeset"),
+            ("preview", "show what a merge would store, and keep nothing"),
+        ] {
+            paths.insert(
+                format!("{base}/changeset/{{id}}/{verb}"),
+                json!({"post": {"operationId": format!("changeset_{verb}"), "summary": what,
+                    "parameters": [id.clone()],
+                    "responses": answers(
+                        json!({"200": {"description": if verb == "preview" { "what a merge would store" } else { "the changeset after the decision" },
+                            "content": {"application/json": {"schema": {"type": "object", "properties": {
+                                "data": {"type": "object"}, "meta": {"type": "object"}}}}}}}),
+                        &with(&[("409", "invalid_transition"), ("422", "validation_failed")]))}}),
+            );
+        }
+    }
+
+    // outbound events
+    if crate::events::enabled(m) {
+        paths.insert(
+            format!("{base}/events/relay"),
+            json!({"post": {"operationId": "eventsRelay", "summary": "one delivery pass for the tenant",
+                "responses": answers(
+                    json!({"200": {"description": "counts for the pass",
+                        "content": {"application/json": {"schema": {"type": "object", "properties": {"data": {"type": "object",
+                            "properties": {"delivered": {"type": "integer"}, "retrying": {"type": "integer"},
+                                "dead_lettered": {"type": "integer"}}}}}}}}}),
+                    &with(&[("503", "unavailable")]))}}),
+        );
+        paths.insert(
+            format!("{base}/events/{{id}}/replay"),
+            json!({"post": {"operationId": "eventsReplay", "summary": "queue a delivered or dead-lettered event again",
+                "parameters": [id.clone()],
+                "responses": answers(
+                    json!({"200": {"description": "the event, queued again",
+                        "content": {"application/json": {"schema": {"type": "object"}}}}}),
+                    &with(&[("409", "invalid_transition")]))}}),
+        );
+    }
 }
