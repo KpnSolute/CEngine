@@ -418,7 +418,7 @@ async fn every_audit_event_names_the_plugin_that_ruled() {
     let Some(url) = url() else { return };
     let b = plugin(
         "lenient-rules",
-        "[[policy]]\nslot = \"over_pull\"\nrule = \"true\"\n",
+        "[[policy]]\nslot = \"ending_qty\"\nrule = \"opening_oh + received - pulled\"\n[[policy]]\nslot = \"over_pull\"\nrule = \"true\"\n",
     );
     let mut api = Api {
         app: app(&url, manifest(Some(&b))).await,
@@ -805,5 +805,196 @@ async fn an_observed_price_is_applied_or_held_for_review_by_the_inventory_rule()
         api.get("stock_line", &l6).await["data"]["unit_price"],
         "40.000000"
     );
+    close(api.app).await;
+}
+
+/// The legacy MJCC over-pull rule: stock may not go below zero, but a line that is already short
+/// stays editable as long as the shortfall does not grow.
+const GRANDFATHER: &str = r#"[[policy]]
+slot = "ending_qty"
+rule = "opening_oh + received - pulled"
+[[policy]]
+slot = "over_pull"
+rule = "opening_oh + received - pulled >= 0 or opening_oh + received - pulled >= coalesce(old.opening_oh, 0) + coalesce(old.received, 0) - coalesce(old.pulled, 0)"
+"#;
+
+#[tokio::test]
+async fn an_existing_shortfall_may_shrink_but_never_grow_under_the_legacy_over_pull_rule() {
+    let Some(url) = url() else { return };
+    let schema = format!(
+        "ce_plug_gf_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    );
+    let open = |m: Value, first: bool| {
+        let url = url.clone();
+        let schema = schema.clone();
+        tokio::task::spawn_blocking(move || {
+            let m = validate_composed(m.to_string().as_bytes()).unwrap();
+            // The second app reads the schema the first one installed.
+            let store = if first {
+                TypedPgStore::install(&url, &m, &schema).unwrap()
+            } else {
+                TypedPgStore::open(&url, &m, &schema).unwrap()
+            };
+            let mut st = AppState::new(store, Verifier::new(KEY).unwrap(), m, INST);
+            st.now = std::sync::Arc::new(|| 1000);
+            router(st)
+        })
+    };
+    // History written under a permissive policy: 10 on hand, 12 pulled.
+    let lenient = plugin(
+        "lenient",
+        "[[policy]]\nslot = \"ending_qty\"\nrule = \"opening_oh + received - pulled\"\n[[policy]]\nslot = \"over_pull\"\nrule = \"true\"\n",
+    );
+    let mut api = Api {
+        app: open(manifest(Some(&lenient)), true).await.unwrap(),
+        n: 0,
+    };
+    let (_, period) = api
+        .post(
+            "period",
+            json!({"label": "2026-W1", "starts_on": "2026-11-01", "ends_on": "2026-11-07"}),
+        )
+        .await;
+    let (_, item) = api
+        .post(
+            "stock_item",
+            json!({"sku": "X", "description": "x", "unit_price": "1"}),
+        )
+        .await;
+    let (_, line) = api
+        .post(
+            "stock_line",
+            json!({"item": id(&item), "period": id(&period), "opening_oh": "10", "unit_price": "1"}),
+        )
+        .await;
+    let (s, mv) = api
+        .post(
+            "stock_movement",
+            json!({"line": id(&line), "period": id(&period), "pulled": "12"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{mv}");
+    let (mid, mut ver) = (id(&mv), mv["data"]["version"].as_u64().unwrap());
+    let lid = id(&line);
+    assert_eq!(
+        api.get("stock_line", &lid).await["data"]["ending_qty"],
+        "-2.000"
+    );
+    let old_app = api.app.clone();
+    drop(api);
+
+    // The same data under the MJCC rule.
+    let rule = plugin("legacy-overpull", GRANDFATHER);
+    let mut api = Api {
+        app: open(manifest(Some(&rule)), false).await.unwrap(),
+        n: 100,
+    };
+    // Growing the shortfall (12 -> 13) is refused.
+    let (s, v) = api
+        .patch("stock_movement", &mid, ver, json!({"pulled": "13"}))
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    // Shrinking it (12 -> 11) and leaving it alone are both allowed.
+    let (s, v) = api
+        .patch("stock_movement", &mid, ver, json!({"pulled": "11"}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    ver = v["data"]["version"].as_u64().unwrap();
+    assert_eq!(
+        api.get("stock_line", &lid).await["data"]["ending_qty"],
+        "-1.000"
+    );
+    let (s, v) = api
+        .patch("stock_movement", &mid, ver, json!({"reason": "recount"}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // A brand new over-pull is still refused.
+    let (s, v) = api
+        .post(
+            "stock_movement",
+            json!({"line": lid, "period": id(&period), "pulled": "1"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    close(api.app).await;
+    close(old_app).await;
+}
+
+/// MJCC's valuation rules (a synthetic copy; the real plugin lives in the customer repo).
+const LEGACY_VALUATION: &str = r#"[[policy]]
+slot = "opening_value"
+rule = "when(opening_oh > 0, round(opening_oh * when(opening_unit_cost > 0, opening_unit_cost, price), 2), 0)"
+[[policy]]
+slot = "ending_value"
+rule = "when(ending_qty <= 0, 0, round(max(0, opening_value + received_value - pulled_value), 2))"
+"#;
+
+#[tokio::test]
+async fn rollover_carries_cost_so_a_new_price_does_not_revalue_what_was_on_hand() {
+    let Some(url) = url() else { return };
+    let rules = plugin("legacy-valuation", LEGACY_VALUATION);
+    let mut api = Api {
+        app: app(&url, manifest(Some(&rules))).await,
+        n: 0,
+    };
+    let (_, w1) = api
+        .post(
+            "period",
+            json!({"label": "W1", "starts_on": "2026-11-01", "ends_on": "2026-11-07"}),
+        )
+        .await;
+    let (_, w2) = api
+        .post(
+            "period",
+            json!({"label": "W2", "starts_on": "2026-11-08", "ends_on": "2026-11-14"}),
+        )
+        .await;
+    let (_, item) = api
+        .post(
+            "stock_item",
+            json!({"sku": "RICE", "description": "Rice", "unit_price": "2"}),
+        )
+        .await;
+    let (_, l1) = api
+        .post(
+            "stock_line",
+            json!({"item": id(&item), "period": id(&w1), "opening_oh": "10", "unit_price": "2"}),
+        )
+        .await;
+    let (s, _) = api
+        .post(
+            "stock_movement",
+            json!({"line": id(&l1), "period": id(&w1), "pulled": "4"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let closing = api.get("stock_line", &id(&l1)).await;
+    assert_eq!(closing["data"]["ending_qty"], "6.000");
+    assert_eq!(closing["data"]["ending_value"], "12.00");
+
+    // The client carries quantity and the closing cost (value / quantity); the supplier has
+    // since raised the price to 3.
+    let cost = "2.000000"; // 12.00 / 6.000
+    let (s, v) = api
+        .call(
+            "POST",
+            &format!("/v1/{INST}/_batch"),
+            None,
+            Some(
+                json!({"ops": [{"op": "create", "entity": "stock_line", "data": {
+                "item": id(&item), "period": id(&w2), "opening_oh": closing["data"]["ending_qty"],
+                "unit_price": "3", "opening_unit_cost": cost}}]}),
+            ),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let next = api
+        .get("stock_line", v["data"][0]["id"].as_str().unwrap())
+        .await;
+    // Opening stock stays at its carried cost (6 x 2), not at the new price (6 x 3).
+    assert_eq!(next["data"]["opening_value"], "12.00");
+    assert_eq!(next["data"]["ending_value"], "12.00");
     close(api.app).await;
 }
