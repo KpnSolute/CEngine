@@ -165,14 +165,6 @@ fn ops(tx: &dyn Store, scope: &TenantScope, cs: &str) -> Result<Vec<Record>, Sto
     Ok(page.records)
 }
 
-fn failure_problem(f: Failure) -> Problem {
-    match f {
-        Failure::Store(e) => crate::store_problem(e),
-        Failure::Rules(errors) => crate::invariant_problem(errors),
-        Failure::Locked => crate::locked_problem(),
-    }
-}
-
 /// Failures that mean the changeset no longer applies to the data (as against an outage).
 fn is_conflict(f: &Failure) -> bool {
     matches!(
@@ -340,7 +332,7 @@ fn apply<S: Store>(store: &S, env: &Env, id: &str, revert: bool) -> Result<Recor
                     Ok(())
                 });
             }
-            Err(failure_problem(f))
+            Err(crate::failure_problem(f))
         }
     }
 }

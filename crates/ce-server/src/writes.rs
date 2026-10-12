@@ -176,6 +176,41 @@ fn settle(
     }
 }
 
+/// Runs `f` with a resolver for the record `id` of `entity` (None while it does not exist yet),
+/// and tells a store failure met while resolving from a rule that did not hold.
+pub(crate) fn with_resolver<T>(
+    tx: &dyn Store,
+    env: &Env,
+    entity: &str,
+    id: Option<&str>,
+    f: impl FnOnce(&dyn Resolver) -> T,
+) -> Result<T, Failure> {
+    let r = StoreResolver {
+        store: tx,
+        env,
+        entity,
+        id,
+        failed: RefCell::new(None),
+        seen: RefCell::new(HashMap::new()),
+    };
+    let out = f(&r);
+    match r.failed.into_inner() {
+        Some(e) => Err(Failure::Store(e)),
+        None => Ok(out),
+    }
+}
+
+/// Refuses a move or write on a record frozen by `locked_when`.
+pub(crate) fn check_unlocked(
+    tx: &dyn Store,
+    env: &Env,
+    entity: &str,
+    id: &str,
+    record: &Map<String, Value>,
+) -> Result<(), Failure> {
+    guard_locked(tx, env, entity, Some(id), record, None)
+}
+
 /// Refuses the write when `locked_when` holds for the record, as stored or as it would become.
 /// A period close freezes the records that point at the period this way.
 fn guard_locked(

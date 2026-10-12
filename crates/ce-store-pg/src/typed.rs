@@ -681,6 +681,43 @@ impl TypedPgStore {
         }
     }
 
+    fn set_state_on(
+        &self,
+        c: &mut impl GenericClient,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+        state: &str,
+    ) -> Result<Record, StoreError> {
+        let ent = self.ent(entity)?;
+        let field = &ent.state.as_ref().ok_or(StoreError::Unsupported)?.field;
+        let (tenant, id) = Self::tenant_and_id(scope, id).ok_or(StoreError::NotFound)?;
+        let live = if ent.soft {
+            r#" AND "deleted_at" IS NULL"#
+        } else {
+            ""
+        };
+        let sch = &self.schema;
+        let sql = format!(
+            r#"UPDATE "{sch}"."{entity}" SET "{field}" = $4::text, "version" = "version" + 1,
+               "updated_at" = now() WHERE "tenant_id" = $1::text::uuid
+               AND "id" = $2::text::uuid AND "version" = $3::text::bigint{live}
+               RETURNING {}"#,
+            ent.select_list()
+        );
+        let params = vec![
+            Some(tenant.to_string()),
+            Some(id.to_string()),
+            Some(expected_version.to_string()),
+            Some(state.to_string()),
+        ];
+        match c.query_opt(&sql, &refs(&params)).map_err(db)? {
+            Some(row) => Ok(ent.record(entity, &row)),
+            None => Err(self.missed(c, ent, entity, tenant, id)?),
+        }
+    }
+
     fn delete_on(
         &self,
         c: &mut impl GenericClient,
@@ -832,6 +869,19 @@ impl Store for TypedPgStore {
         self.update_on(&mut *c, scope, entity, id, expected_version, data)
     }
 
+    fn set_state(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+        _field: &str,
+        state: &str,
+    ) -> Result<Record, StoreError> {
+        let mut c = self.lock()?;
+        self.set_state_on(&mut *c, scope, entity, id, expected_version, state)
+    }
+
     fn delete(
         &self,
         scope: &TenantScope,
@@ -965,6 +1015,25 @@ impl Store for TypedTx<'_> {
             id,
             expected_version,
             data,
+        )
+    }
+
+    fn set_state(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        id: &str,
+        expected_version: u64,
+        _field: &str,
+        state: &str,
+    ) -> Result<Record, StoreError> {
+        self.store.set_state_on(
+            &mut *self.tx.borrow_mut(),
+            scope,
+            entity,
+            id,
+            expected_version,
+            state,
         )
     }
 
