@@ -46,7 +46,7 @@ fn run(py: &str, dir: &std::path::Path, code: &str) -> String {
 fn every_example_generates_python_that_compiles() {
     let Some(py) = python3() else {
         assert!(
-            std::env::var("CE_REQUIRE_DB").is_err(),
+            std::env::var("CE_REQUIRE_TOOLS").is_err(),
             "python3 is required in CI"
         );
         return;
