@@ -105,7 +105,7 @@
         },
         "sort_keys": ["vendor", "vendor_sku"]
       },
-      "invoice": {
+      "supplier_invoice": {
         "governed": true,
         "fields": {
           "vendor": {"type": "string", "required": true, "max_length": 120, "indexed": true},
@@ -116,7 +116,7 @@
           "tax": {"type": "decimal", "precision": 14, "scale": 2, "default": 0},
           "vizient_discount": {"type": "decimal", "precision": 14, "scale": 2, "default": 0},
           "stated_total": {"type": "decimal", "precision": 14, "scale": 2, "required": true},
-          "goods_total": {"type": "decimal", "precision": 14, "scale": 2, "computed": "sum(children(invoice_line, invoice).ext_price)"},
+          "goods_total": {"type": "decimal", "precision": 14, "scale": 2, "computed": "sum(children(supplier_invoice_line, invoice).ext_price)"},
           "net_total": {"type": "decimal", "precision": 14, "scale": 2, "computed": "round(goods_total + fuel_charge + tax - vizient_discount, 2)"},
           "delta": {"type": "decimal", "precision": 14, "scale": 2, "computed": "round(stated_total - net_total, 2)"},
           "reconciled": {"type": "boolean", "computed": "abs(delta) < 0.01"},
@@ -125,10 +125,10 @@
         },
         "sort_keys": ["invoice_date", "vendor"]
       },
-      "invoice_line": {
+      "supplier_invoice_line": {
         "governed": true,
         "fields": {
-          "invoice": {"type": "ref", "ref": "invoice", "indexed": true, "required": true},
+          "invoice": {"type": "ref", "ref": "supplier_invoice", "indexed": true, "required": true},
           "line_no": {"type": "integer", "required": true, "indexed": true},
           "vendor_sku": {"type": "string", "max_length": 60, "indexed": true},
           "description": {"type": "string", "max_length": 200},

@@ -203,13 +203,13 @@ fn manifest() -> Value {
         "roles": {
             "owner": {"read": ["*"], "write": ["*"], "actions": ["*"]},
             "clerk": {"read": ["*"],
-                "write": ["invoice", "invoice_line", "stock_movement", "price_observation", "sku_alias"],
+                "write": ["supplier_invoice", "supplier_invoice_line", "stock_movement", "price_observation", "sku_alias"],
                 "actions": []},
             "reviewer": {"read": ["*"], "write": [],
                 "actions": ["merge_changeset", "settle_price_observation"]}
         }
     });
-    let shell = ce_tools::compose(&shell, &["period", "audit", "changesets"]).unwrap();
+    let shell = ce_tools::compose(&shell, &["period", "audit", "changesets", "invoicing"]).unwrap();
     let mut m = ce_plugin::compose(&shell, "business.inventory", None)
         .unwrap()
         .manifest;
@@ -240,7 +240,7 @@ const INVOICE: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 async fn stage(clerk: &mut Api, number: &str, line: &str, item: &str, period: &str) -> String {
     let (s, v) = clerk
         .post(
-            "invoice",
+            "supplier_invoice",
             json!({"id": INVOICE, "vendor": "Sysco", "invoice_no": number,
                 "invoice_date": "2026-11-03", "fuel_charge": "2.00", "stated_total": "272.50"}),
         )
@@ -249,12 +249,12 @@ async fn stage(clerk: &mut Api, number: &str, line: &str, item: &str, period: &s
     let cs = v["data"]["changeset_id"].as_str().unwrap().to_string();
     let rows = [
         (
-            "invoice_line",
+            "supplier_invoice_line",
             json!({"invoice": INVOICE, "line_no": 1, "vendor_sku": "S-1",
             "item": item, "qty": "5", "unit_price": "50"}),
         ),
         (
-            "invoice_line",
+            "supplier_invoice_line",
             json!({"invoice": INVOICE, "line_no": 2, "vendor_sku": "S-NEW",
             "description": "unknown product", "qty": "2", "unit_price": "10.25"}),
         ),
@@ -315,7 +315,7 @@ async fn an_invoice_is_staged_merged_once_and_settles_its_prices() {
 
     // Staged, nothing applied.
     let cs = stage(&mut clerk, "123", &line, &item, &period).await;
-    assert!(rev.list("invoice").await.is_empty());
+    assert!(rev.list("supplier_invoice").await.is_empty());
     assert!(rev.list("stock_movement").await.is_empty());
     // The clerk cannot approve their own work.
     let (s, _) = clerk.verb(&cs, "merge").await;
@@ -324,7 +324,7 @@ async fn an_invoice_is_staged_merged_once_and_settles_its_prices() {
     // The manager merges: the invoice, its lines, the stock and the observation land together.
     let (s, v) = rev.verb(&cs, "merge").await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    let invoices = rev.list("invoice").await;
+    let invoices = rev.list("supplier_invoice").await;
     assert_eq!(invoices.len(), 1);
     let inv = &invoices[0];
     assert_eq!(inv["id"], INVOICE);
@@ -332,10 +332,10 @@ async fn an_invoice_is_staged_merged_once_and_settles_its_prices() {
     assert_eq!(inv["net_total"], "272.50");
     assert_eq!(inv["delta"], "0.00");
     assert_eq!(inv["reconciled"], true);
-    assert_eq!(rev.list("invoice_line").await.len(), 2);
+    assert_eq!(rev.list("supplier_invoice_line").await.len(), 2);
     // The unknown product is queued: its line has no item yet.
     let unknown: Vec<_> = rev
-        .list("invoice_line")
+        .list("supplier_invoice_line")
         .await
         .into_iter()
         .filter(|l| l["item"].is_null())
@@ -364,7 +364,7 @@ async fn an_invoice_is_staged_merged_once_and_settles_its_prices() {
     // The same invoice again (any case or spacing) is refused whole: nothing is doubled.
     let (s, v) = clerk
         .post(
-            "invoice",
+            "supplier_invoice",
             json!({"id": "7c9e6679-7425-40de-944b-e07fc1f90ae8", "vendor": " SYSCO ",
                 "invoice_no": "123", "stated_total": "1"}),
         )
@@ -383,7 +383,7 @@ async fn an_invoice_is_staged_merged_once_and_settles_its_prices() {
     assert_eq!(s, StatusCode::ACCEPTED, "{v}");
     let (s, v) = rev.verb(&dup, "merge").await;
     assert!(!s.is_success(), "{s} {v}");
-    assert_eq!(rev.list("invoice").await.len(), 1);
+    assert_eq!(rev.list("supplier_invoice").await.len(), 1);
     assert_eq!(
         rev.list("stock_movement").await.len(),
         1,
@@ -394,7 +394,7 @@ async fn an_invoice_is_staged_merged_once_and_settles_its_prices() {
     // An invoice whose parts do not add up to its printed total is stored, and flagged.
     let (s, v) = owner
         .post(
-            "invoice",
+            "supplier_invoice",
             json!({"vendor": "Sysco", "invoice_no": "124", "stated_total": "100"}),
         )
         .await;
