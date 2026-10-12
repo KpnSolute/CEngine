@@ -33,5 +33,12 @@ Module ids, API majors, slot names and shapes, and the capability vocabulary liv
 
 A customer-editable lockfile is never proof of approval: the pin comes from the trusted installation record, not from the repository.
 
+## Modules and composition
+A module is a manifest fragment with named policy slots (`crates/ce-plugin/modules/*.json`). `business.inventory` (API 1) adds `stock_item`, `stock_line` and `stock_movement` over the `period` tool, with these slots: `price`, `ending_qty`, `opening_value`, `received_value`, `pulled_value`, `ending_value` (computed-field expressions) and `over_pull` (the line invariant; `true` allows negative stock). Every slot has a module default, so a template with no plugin still gets a working module.
+
+`ce_plugin::compose(template, module, plugin)` puts the module into a template, replaces each slot with the plugin's rule when it filled one, and validates the result with `ce-manifest`. A rule that does not type-check is refused at composition (install time), never at request time. It refuses an unknown module, a plugin written for another module or API major, a template missing a required entity (`period`), and an entity name the template already uses. The template's roles are never touched. The returned manifest has the usual canonical hash.
+
+The same module with two different plugins gives two different, correct behaviors with no engine change; `crates/ce-server/tests/plugins.rs` runs both through the HTTP API on Postgres (a pull that overdraws a line is refused under the defaults and accepted under a lenient plugin that also prices to four places).
+
 ## Not in this increment
-Persisting installation records, the `inventory` module, composing a plugin into the installed manifest, audit of plugin versions, upgrade and rollback, and failure-mode tests beyond descriptor validation.
+Persisting installation records, recording the plugin and module versions in the audit trail, rollover, price review, and failure-mode tests beyond descriptor and composition validation.
