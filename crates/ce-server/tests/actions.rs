@@ -194,6 +194,12 @@ fn manifest() -> Value {
                     ]
                 },
                 "pay": {"entity": "order", "effect": [{"transition": "paid"}]},
+                "credit": {
+                    "entity": "order",
+                    "effect": [
+                        {"update": {"entity": "account", "id": "account", "set": {"balance": "ref(account).balance + amount"}}}
+                    ]
+                },
                 "bill": {
                     "entity": "order",
                     "effect": [
@@ -408,5 +414,24 @@ async fn effects_run_only_when_their_condition_holds_and_can_update_another_reco
     let lid = lone["data"]["id"].as_str().unwrap();
     let (s, v) = owner.act("bill", lid, 1, json!({})).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+
+    // An action that only updates another record still advances its own, so a retry with the same
+    // version cannot apply the update twice.
+    let (_, c) = owner
+        .post(
+            "order",
+            json!({"name": "refund", "amount": "50.00", "account": acc_id}),
+        )
+        .await;
+    let cid = c["data"]["id"].as_str().unwrap();
+    let (s, v) = owner.act("credit", cid, 1, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["version"], 2);
+    let (s, v) = owner.act("credit", cid, 1, json!({})).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let (_, a) = owner
+        .call("GET", &format!("/v1/{INST}/account/{acc_id}"), None, None)
+        .await;
+    assert_eq!(a["data"]["balance"], "430.00", "credited once");
     close(vec![owner.app]).await;
 }

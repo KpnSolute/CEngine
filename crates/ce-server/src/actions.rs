@@ -364,6 +364,12 @@ fn run_in(tx: &dyn Store, env: &Env, r: &Run) -> Result<Done, Stop> {
             done.emitted.push(ev.to_string());
         }
     }
+    // An action that left its own record alone (only `update` effects, or every effect skipped by
+    // its `when`) still moves the record on, so a retry with the same version fails with
+    // `version_conflict` instead of applying the other records' changes twice.
+    if rec.version == r.expected {
+        rec = tx.update(env.scope, entity, &rec.id, rec.version, rec.data.clone())?;
+    }
     done.record = rec;
     Ok(done)
 }
