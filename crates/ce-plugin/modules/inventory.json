@@ -3,6 +3,7 @@
   "api": 1,
   "title": "Stock counts: items, counts per period, movements, and the calculations over them",
   "requires_entities": ["period"],
+  "requires_fields": {"period": ["week_1_locked", "week_2_locked", "week_3_locked", "week_4_locked"]},
   "read": ["stock.items", "stock.lines", "stock.movements", "stock.invoices"],
   "write": [],
   "emit": [],
@@ -85,7 +86,7 @@
           "received": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
           "pulled": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
           "txn_date": {"type": "date", "indexed": true},
-          "week": {"type": "integer", "indexed": true},
+          "week": {"type": "integer", "indexed": true, "joins_lock": true},
           "reason": {"type": "string", "max_length": 200}
         },
         "invariants": [

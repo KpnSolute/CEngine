@@ -475,14 +475,26 @@ async fn a_locked_week_freezes_its_movements_only() {
         StatusCode::NO_CONTENT
     );
     // Week 2 and an untagged movement are untouched.
-    assert_eq!(
-        api.post("stock_movement", mv(Some(2))).await.0,
-        StatusCode::CREATED
-    );
-    assert_eq!(
-        api.post("stock_movement", mv(None)).await.0,
-        StatusCode::CREATED
-    );
+    let (s, w2) = api.post("stock_movement", mv(Some(2))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, loose) = api.post("stock_movement", mv(None)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    // Moving a movement into the locked week is refused, tagged or not, and changes nothing.
+    for m in [&w2, &loose] {
+        let (s, r) = api
+            .patch(
+                "stock_movement",
+                &id(m),
+                1,
+                json!({"week": 1, "pulled": "9"}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{r}");
+    }
+    let (s, _) = api
+        .patch("stock_movement", &id(&w2), 1, json!({"week": 3}))
+        .await;
+    assert_eq!(s, StatusCode::OK);
     // Unlocking reopens week 1.
     let cur = api.get("period", &id(&p)).await;
     api.patch(

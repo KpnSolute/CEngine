@@ -14,7 +14,11 @@ fn shell() -> Value {
             "period": {
                 "fields": {
                     "label": {"type": "string", "required": true, "unique": true, "max_length": 80, "indexed": true},
-                    "status": {"type": "enum", "values": ["open", "closed"], "default": "open", "indexed": true}
+                    "status": {"type": "enum", "values": ["open", "closed"], "default": "open", "indexed": true},
+                    "week_1_locked": {"type": "boolean", "default": false},
+                    "week_2_locked": {"type": "boolean", "default": false},
+                    "week_3_locked": {"type": "boolean", "default": false},
+                    "week_4_locked": {"type": "boolean", "default": false}
                 },
                 "sort_keys": ["label"]
             }
@@ -139,6 +143,15 @@ fn composition_refuses_bad_setups() {
     assert_eq!(
         compose(&no_period, "business.inventory", None).unwrap_err(),
         ComposeError::MissingEntity("period".into())
+    );
+    let mut no_flag = shell();
+    no_flag["entities"]["period"]["fields"]
+        .as_object_mut()
+        .unwrap()
+        .remove("week_3_locked");
+    assert_eq!(
+        compose(&no_flag, "business.inventory", None).unwrap_err(),
+        ComposeError::MissingField("period".into(), "week_3_locked".into())
     );
     let mut clash = shell();
     clash["entities"]["stock_item"] = json!({"fields": {"x": {"type": "string"}}});

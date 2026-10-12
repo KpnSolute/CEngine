@@ -27,7 +27,11 @@ fn setup(dir: &Path, plugin: &str) {
         "template": {"name": "kitchen", "version": "0.1.0"},
         "entities": {"period": {"fields": {
             "label": {"type": "string", "required": true, "unique": true, "max_length": 80, "indexed": true},
-            "status": {"type": "enum", "values": ["open", "closed"], "default": "open", "indexed": true}
+            "status": {"type": "enum", "values": ["open", "closed"], "default": "open", "indexed": true},
+            "week_1_locked": {"type": "boolean", "default": false},
+            "week_2_locked": {"type": "boolean", "default": false},
+            "week_3_locked": {"type": "boolean", "default": false},
+            "week_4_locked": {"type": "boolean", "default": false}
         }, "sort_keys": ["label"]}},
         "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}}
     });

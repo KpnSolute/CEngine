@@ -29,7 +29,8 @@
         "ref": { "$ref": "#/$defs/name", "description": "Target entity for type=ref." },
         "default": {},
         "computed": { "type": "string", "description": "Expression in the fixed CEngine expression language. Evaluated in the same transaction as the write." },
-        "pii": { "type": "boolean", "default": false }
+        "pii": { "type": "boolean", "default": false },
+        "joins_lock": { "type": "boolean", "default": false, "description": "A write that sets this field is refused when the record would end up locked, as for a ref field (a plain field that picks the frozen window, such as a week number)." }
       },
       "allOf": [
         { "if": { "properties": { "type": { "const": "enum" } }, "required": ["type"] }, "then": { "required": ["values"] } },
