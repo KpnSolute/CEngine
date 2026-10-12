@@ -224,3 +224,14 @@ fn rejects_oversize_descriptors() {
     let big = format!("{GOOD}\n# {}", "x".repeat(70_000));
     assert_eq!(codes(&big), vec!["too_large"]);
 }
+
+#[test]
+fn rule_length_counts_characters_not_bytes() {
+    let ok = format!("concat('{}', 'x')", "é".repeat(900));
+    assert!(parse(&with("round(qty * price, 2)", &ok), &registry(), &ENGINE).is_ok());
+    let long = format!("concat('{}', 'x')", "a".repeat(2100));
+    assert_eq!(
+        codes(&with("round(qty * price, 2)", &long)),
+        vec!["rule_too_long"]
+    );
+}

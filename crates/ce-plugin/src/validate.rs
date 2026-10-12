@@ -351,7 +351,7 @@ fn policy_check(
             }
         }
         if let Some(rule) = &p.rule {
-            if rule.len() > MAX_RULE {
+            if rule.chars().count() > MAX_RULE {
                 bad.push(v(
                     "rule_too_long",
                     format!("{at}.rule"),
