@@ -15,7 +15,7 @@
 mod outbox;
 mod sign;
 
-pub use outbox::{Claimed, MemoryOutbox, OutboxError, Status, MAX_ATTEMPTS};
+pub use outbox::{backoff, Claimed, MemoryOutbox, OutboxError, Status, MAX_ATTEMPTS};
 pub use sign::{SignError, Signer, KEY_OVERLAP_SECS};
 
 use serde_json::{json, Value};

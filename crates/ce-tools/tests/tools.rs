@@ -32,7 +32,8 @@ fn every_tool_composes_into_a_valid_manifest_alone_and_together() {
             "invoicing",
             "audit",
             "changesets",
-            "period"
+            "period",
+            "events"
         ]
     );
     for n in &names {

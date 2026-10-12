@@ -286,6 +286,13 @@ fn run_in(tx: &dyn Store, env: &Env, r: &Run) -> Result<Done, Stop> {
             }
         }
         if let Some(ev) = eff["emit"].as_str() {
+            crate::events::enqueue(
+                tx,
+                env,
+                ev,
+                Some(&rec.id),
+                json!({"action": r.name, "entity": entity, "id": rec.id, "actor": env.ctx.actor_id, "record": rec.data}),
+            )?;
             done.emitted.push(ev.to_string());
         }
     }

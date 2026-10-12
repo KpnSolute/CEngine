@@ -113,7 +113,7 @@ through the same transactional store API as actions.
 - `set`: each value is an expression, evaluated against the record as it stands and written through the normal write path (rules, computed fields, `locked_when` and audit apply). Bindings: the record's fields, `input.<name>`, `actor.*`, `now`, `today`.
 - `transition`: moves the record to the named state if the state graph allows it from the current one (409 `invalid_transition` otherwise).
 - `create`: builds a record of another entity from expressions, with its initial state and defaults, and creates it. Its idempotency key is derived from the request's key.
-- `emit`: names an event. It is returned in `meta.emitted` and handed to the outbox when events out lands.
+- `emit`: names an event. It is returned in `meta.emitted`, and with the `events` tool it is stored in the outbox in the same transaction (spec/tools.md).
 
 `requires_state` is checked first (409 `invalid_transition`); the input is validated against the action's `input` fields (422). The response is the record after the last effect plus `meta.created` and `meta.emitted`. A retry of a finished action fails with 409 `version_conflict` because the record has moved on.
 
