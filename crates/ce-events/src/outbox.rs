@@ -54,7 +54,8 @@ pub struct MemoryOutbox {
     inner: Mutex<Inner>,
 }
 
-fn backoff(attempts: u32) -> u64 {
+/// Seconds to wait after the `attempts`-th failed delivery.
+pub fn backoff(attempts: u32) -> u64 {
     BASE_BACKOFF_SECS
         .saturating_mul(1u64 << attempts.saturating_sub(1).min(20))
         .min(MAX_BACKOFF_SECS)
