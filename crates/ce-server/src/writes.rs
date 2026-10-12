@@ -165,16 +165,18 @@ fn parent_keys(
     parents
 }
 
-/// Locks every record a write will change above its own row, top-down, before the write touches
-/// its own row. A writer that updates a child goes on to update the parent and then the
-/// grandparent; one that deletes a parent holds the parent and waits for its children. If each
-/// took its locks in its own order they would deadlock, so all of them take the same order: the
-/// highest ancestor first, then down, and the row itself last. (Writing a child row also takes a
-/// share lock on its parent, so locking the parent afterwards is the same hazard.)
+/// Locks, before a write touches anything, every record it will change: its own row (`own`, for
+/// a patch or delete) and everything above it. All writers sort what they lock by (entity, id)
+/// and take the locks in that one global order, so they cannot wait on each other in a circle:
+/// a child writer that goes on to update its parent and grandparent, and a parent delete that
+/// holds the parent and waits for its children, would otherwise each lock in their own order.
+/// (Writing a child row also takes a share lock on its parent, so locking the parent after the
+/// row is the same hazard.)
 fn lock_parents(
     tx: &dyn Store,
     env: &Env,
     child: &str,
+    own: Option<&str>,
     old: Option<&Map<String, Value>>,
     new: Option<&Map<String, Value>>,
 ) -> Result<(), Failure> {
@@ -182,9 +184,15 @@ fn lock_parents(
     // repeated; if it found more records the new ones are locked too (a few tries at most).
     let mut held: BTreeSet<(String, String)> = BTreeSet::new();
     for _ in 0..3 {
-        let levels = ancestor_levels(tx, env, child, old, new)?;
+        let mut want: BTreeSet<(String, String)> = ancestor_levels(tx, env, child, old, new)?
+            .into_iter()
+            .flatten()
+            .collect();
+        if let Some(id) = own {
+            want.insert((child.to_string(), id.to_string()));
+        }
         let mut locked_any = false;
-        for key in levels.iter().rev().flatten() {
+        for key in want {
             if held.insert(key.clone()) {
                 locked_any = true;
                 match tx.get_locked(env.scope, &key.0, &key.1) {
@@ -285,7 +293,7 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             // The derived fields are computed only if this call really creates the record: a
             // retry of the same request replays the first result even when the records they
             // read have changed since (or would now break a rule).
-            lock_parents(tx, env, entity, None, Some(data))?;
+            lock_parents(tx, env, entity, None, None, Some(data))?;
             let mut failed = None;
             let mut derived = false;
             let rec = tx.insert_with(
@@ -331,7 +339,14 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             let pre = tx.get(env.scope, entity, id)?;
             let mut moved = pre.data.clone();
             crate::merge_patch(&mut moved, &Value::Object(patch.clone()));
-            lock_parents(tx, env, entity, pre.data.as_object(), moved.as_object())?;
+            lock_parents(
+                tx,
+                env,
+                entity,
+                Some(id),
+                pre.data.as_object(),
+                moved.as_object(),
+            )?;
             let current = tx.get_locked(env.scope, entity, id)?;
             if current.version != *expected {
                 return Err(StoreError::VersionConflict {
@@ -352,7 +367,7 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
         }
         Op::Delete { id, expected } => {
             let pre = tx.get(env.scope, entity, id)?;
-            lock_parents(tx, env, entity, pre.data.as_object(), None)?;
+            lock_parents(tx, env, entity, Some(id), pre.data.as_object(), None)?;
             let current = tx.get_locked(env.scope, entity, id)?;
             tx.delete(env.scope, entity, id, *expected)?;
             refresh_parents(tx, env, entity, current.data.as_object(), None, 0)?;
