@@ -101,7 +101,7 @@
           "observed_price": {"type": "decimal", "precision": 12, "scale": 6, "required": true},
           "source": {"type": "string", "max_length": 200, "indexed": true},
           "previous_price": {"type": "decimal", "precision": 12, "scale": 6, "default": 0},
-          "change": {"type": "decimal", "precision": 12, "scale": 6, "computed": "when(previous_price > 0, round((observed_price - previous_price) / previous_price, 6), 0)"},
+          "change": {"type": "decimal", "precision": 20, "scale": 6, "computed": "when(previous_price > 0, round((observed_price - previous_price) / previous_price, 6), 0)"},
           "decision": {"type": "enum", "values": ["skip", "apply", "same", "hold"]},
           "applied_price": {"type": "decimal", "precision": 12, "scale": 6}
         },
@@ -124,6 +124,7 @@
         "entity": "price_observation",
         "requires_state": ["new"],
         "effect": [
+          {"update": {"entity": "stock_line", "id": "line", "set": {"unit_price": "ref(line).unit_price"}}},
           {"set": {"previous_price": "ref(line).unit_price"}},
           {"set": {"decision": {"$slot": "price_decision"}}},
           {"when": "decision == 'apply'", "set": {"applied_price": "observed_price"}},

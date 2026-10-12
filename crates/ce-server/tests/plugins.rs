@@ -771,6 +771,12 @@ async fn an_observed_price_is_applied_or_held_for_review_by_the_inventory_rule()
     assert_eq!(o["data"]["decision"], "apply");
     assert_eq!(price, "3.500000");
 
+    // The widest accepted move still settles (held), instead of overflowing `change`.
+    let l5b = priced_line(&mut api, &pid, "E2", "0.000001").await;
+    let (o, price) = observe(&mut api, &l5b, "999999.999999").await;
+    assert_eq!(o["data"]["decision"], "hold");
+    assert_eq!(price, "0.000001");
+
     // Once the period is closed the line is frozen: the observation cannot move its price, and
     // stays unsettled.
     let l6 = priced_line(&mut api, &pid, "F", "40.000000").await;

@@ -181,8 +181,11 @@ const KNOWN_FLOAT_HOLDS: [(&str, &str); 6] = [
 #[test]
 fn price_decisions_match_the_legacy_observed_price_protocol() {
     let m = manifest();
-    let rule = m.value["actions"]["settle_price_observation"]["effect"][1]["set"]["decision"]
-        .as_str()
+    let rule = m.value["actions"]["settle_price_observation"]["effect"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|e| e["set"]["decision"].as_str())
         .expect("the decision rule is a string")
         .to_string();
     let vectors: Value = serde_json::from_str(include_str!(
