@@ -21,13 +21,13 @@ use subtle::ConstantTimeEq;
 
 const FORMAT: &str = "kpn-scrypt";
 const KEY_BYTES: usize = 32;
-/// Most scrypt work a stored hash may demand (log2 N 16 is 64 MB), so a bad list cannot be a
-/// denial of service.
+/// Most scrypt work one stored hash may demand (log2 N 16 with r 8 is 64 MiB); the memory budget
+/// below caps how many such checks run at once.
 const MAX_LOG_N: u8 = 16;
 const MAX_R: u32 = 8;
 const MAX_P: u32 = 4;
-/// Most hash computations at once; more than this answers `Throttled`.
-const MAX_INFLIGHT: usize = 8;
+/// Most scrypt memory in use at once, across all sign-ins; more answers `Throttled`.
+const MEMORY_BUDGET: usize = 128 << 20;
 /// Most usernames tracked at once, guesses at made-up names included.
 const MAX_TRACKED: usize = 10_000;
 const MAX_USERNAME: usize = 120;
@@ -88,7 +88,11 @@ pub struct PinLogin {
     policy: PinPolicy,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
     tracks: Mutex<HashMap<String, Track>>,
-    inflight: AtomicUsize,
+    /// Scrypt memory in use now, in bytes.
+    in_use: AtomicUsize,
+    /// What an unknown username is checked against: the dearest hash in the list, so both cases
+    /// cost the same.
+    dummy: Parsed,
 }
 
 fn key_of(username: &str) -> String {
@@ -112,6 +116,8 @@ struct Parsed {
     params: scrypt::Params,
     salt: Vec<u8>,
     digest: Vec<u8>,
+    /// Bytes of memory one check needs: 128 * r * N.
+    memory: usize,
 }
 
 fn parse_hash(encoded: &str) -> Option<Parsed> {
@@ -139,6 +145,7 @@ fn parse_hash(encoded: &str) -> Option<Parsed> {
         params,
         salt,
         digest,
+        memory: 128 * r as usize * n as usize,
     })
 }
 
@@ -150,7 +157,7 @@ fn derive(pin: &str, params: &scrypt::Params, salt: &[u8], len: usize) -> Option
 
 /// Makes a hash for `pin` in the stored format, using `salt` (at least 8 bytes).
 pub fn hash_pin(pin: &str, salt: &[u8]) -> Option<String> {
-    if pin.is_empty() || salt.len() < 8 {
+    if pin.is_empty() || pin.len() > MAX_PIN || salt.len() < 8 {
         return None;
     }
     let params = scrypt::Params::new(14, 8, 1, KEY_BYTES).ok()?;
@@ -169,10 +176,7 @@ pub fn hash_pin_random(pin: &str) -> Option<String> {
     hash_pin(pin, &salt)
 }
 
-fn verify(pin: &str, encoded: &str) -> bool {
-    let Some(p) = parse_hash(encoded) else {
-        return false;
-    };
+fn verify(pin: &str, p: &Parsed) -> bool {
     match derive(pin, &p.params, &p.salt, p.digest.len()) {
         Some(got) => got.ct_eq(&p.digest).into(),
         None => false,
@@ -192,18 +196,22 @@ impl PinLogin {
             .as_array()
             .ok_or_else(|| DirectoryError::Shape("`users` must be a list".into()))?;
         let mut staff = HashMap::new();
+        let mut dearest: Option<Parsed> = None;
         for (i, u) in users.iter().enumerate() {
             let name = u["username"]
                 .as_str()
                 .map(key_of)
                 .filter(|n| !n.is_empty() && n.len() <= MAX_USERNAME)
                 .ok_or_else(|| DirectoryError::Shape(format!("users[{i}].username is missing")))?;
-            let hash = u["pin_hash"]
-                .as_str()
-                .filter(|h| parse_hash(h).is_some())
-                .ok_or_else(|| {
-                    DirectoryError::Shape(format!("users[{i}].pin_hash is not a kpn-scrypt hash"))
-                })?;
+            let hash = u["pin_hash"].as_str().ok_or_else(|| {
+                DirectoryError::Shape(format!("users[{i}].pin_hash is not a kpn-scrypt hash"))
+            })?;
+            let parsed = parse_hash(hash).ok_or_else(|| {
+                DirectoryError::Shape(format!("users[{i}].pin_hash is not a kpn-scrypt hash"))
+            })?;
+            if dearest.as_ref().is_none_or(|d| parsed.memory > d.memory) {
+                dearest = Some(parsed);
+            }
             let roles: Vec<String> = u["roles"]
                 .as_array()
                 .map(|a| {
@@ -237,7 +245,9 @@ impl PinLogin {
             policy,
             now,
             tracks: Mutex::new(HashMap::new()),
-            inflight: AtomicUsize::new(0),
+            in_use: AtomicUsize::new(0),
+            dummy: dearest
+                .unwrap_or_else(|| parse_hash(DUMMY).expect("the built-in dummy hash parses")),
         })
     }
 
@@ -308,8 +318,17 @@ impl Login for PinLogin {
         }
         let key = key_of(name);
         self.begin(&key)?;
-        if self.inflight.fetch_add(1, Ordering::SeqCst) >= MAX_INFLIGHT {
-            self.inflight.fetch_sub(1, Ordering::SeqCst);
+        let entry = self.staff.get(&key);
+        let parsed;
+        let target = match entry {
+            Some(e) => {
+                parsed = parse_hash(&e.hash).expect("checked when the list was read");
+                &parsed
+            }
+            None => &self.dummy,
+        };
+        if self.in_use.fetch_add(target.memory, Ordering::SeqCst) + target.memory > MEMORY_BUDGET {
+            self.in_use.fetch_sub(target.memory, Ordering::SeqCst);
             // Not the caller's wrong guess: give the attempt back.
             let mut tracks = self.tracks.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(t) = tracks.get_mut(&key) {
@@ -317,10 +336,9 @@ impl Login for PinLogin {
             }
             return Err(LoginError::Throttled);
         }
-        let entry = self.staff.get(&key);
-        let ok = verify(pin, entry.map_or(DUMMY, |e| e.hash.as_str()));
-        self.inflight.fetch_sub(1, Ordering::SeqCst);
-        match (ok, entry) {
+        let ok = verify(pin, target);
+        self.in_use.fetch_sub(target.memory, Ordering::SeqCst);
+        match (ok && entry.is_some(), entry) {
             (true, Some(e)) => {
                 self.pass(&key);
                 Ok(Identity {

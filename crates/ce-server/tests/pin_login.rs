@@ -179,3 +179,20 @@ async fn a_pin_login_gets_a_twelve_hour_token_that_the_server_accepts() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[test]
+fn a_pin_the_login_would_refuse_is_not_hashed() {
+    assert!(hash_pin(&"9".repeat(64), b"saltsalt").is_some());
+    assert!(hash_pin(&"9".repeat(65), b"saltsalt").is_none());
+}
+
+#[test]
+fn the_heaviest_accepted_hash_still_works_and_unknown_names_are_denied() {
+    // N = 2^16, r = 8: the most the login accepts (64 MiB per check).
+    let heavy = "kpn-scrypt$1$65536$8$1$00112233445566778899aabbccddeeff$b6d7b25490e38da607318d53065a8f439acf84b3dbcbfe521c82b944d649b57a";
+    let text =
+        format!(r#"{{"users":[{{"username":"big","pin_hash":"{heavy}","roles":["staff"]}}]}}"#);
+    let l = login_at(Arc::new(AtomicU64::new(1000)), &text);
+    assert!(l.login(&creds("big", "2468")).is_ok());
+    assert_eq!(l.login(&creds("nobody", "2468")), Err(LoginError::Denied));
+}
