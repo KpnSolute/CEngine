@@ -306,8 +306,10 @@ dependencies = [
 name = "ce-plugin"
 version = "0.2.0"
 dependencies = [
+ "bigdecimal",
  "ce-expr",
  "ce-manifest",
+ "ce-validate",
  "libc",
  "semver",
  "serde",
