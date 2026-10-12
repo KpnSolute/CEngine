@@ -16,7 +16,8 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --no-create-home --uid 10001 ce
+    && groupadd --gid 1000 render \
+    && useradd --system --no-create-home --uid 10001 --groups render ce
 COPY --from=build /src/target/release/ce-serve /usr/local/bin/ce-serve
 COPY spec/examples/inventory.json /opt/ce/manifest.json
 COPY deploy/render/plugins /opt/ce/plugins

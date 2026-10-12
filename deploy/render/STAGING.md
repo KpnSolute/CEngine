@@ -34,7 +34,7 @@ Values are never in the repo. Secrets are `sync: false`: Render asks for them at
 | `CE_JWT_KEY` | HS256 signing key, at least 32 bytes | Owner generates a staging-only key, e.g. `openssl rand -hex 32` (sync: false) |
 | `CE_DB_TLS` | `off`, `webpki` or `ca` | Owner, depending on the database (sync: false). Never `off` over a public network |
 | `CE_DB_CA` | Path to CA PEM, only with `CE_DB_TLS=ca` | Owner uploads the CA as a Render secret file, e.g. `/etc/secrets/db-ca.pem` (sync: false) |
-| `CE_SCHEMA` | Postgres schema name (default `ce_` + installation id) | Optional; not set |
+| `CE_SCHEMA` | Postgres schema name (default `ce_` + installation id) | Optional on first boot; MUST be a new name for the plugin phase, and the same on the install command and the service |
 | `CE_TEMPLATE`, `CE_MODULE`, `CE_PLUGIN`, `CE_PLUGIN_ROOT`, `CE_INSTALLS` | Plugin phase only; do not set `CE_MANIFEST` together with `CE_TEMPLATE` | See below |
 
 ## Database requirements
@@ -68,7 +68,7 @@ Procedure for the plugin phase (after the first boot below works):
 1. Put the plugin folder at `deploy/render/plugins/.cengine/plugins/<id>/` (the plugin lives in a separate private repo; copy the reviewed bytes at the exact pinned version).
 2. Locally: `CE_PLUGIN_ROOT=deploy/render/plugins CE_INSTALLS=deploy/render/install-record/installs.json ce-serve plugin digest <id>`, review the digest, then `... plugin approve <id> <digest>`. Commit the plugin folder and `installs.json` to a staging branch.
 3. Change the Blueprint service to `dockerfilePath: ./deploy/render/Dockerfile`, remove `CE_MANIFEST`, and set `CE_TEMPLATE`, `CE_MODULE`, `CE_PLUGIN`, `CE_PLUGIN_ROOT=/opt/ce/plugins`, `CE_INSTALLS=/opt/ce/install-record/installs.json`. The template JSON must also be in the image; the real MJCC template is not in this repo (see questions). The plugin-phase Dockerfile bakes the repo's `spec/examples/inventory.json` as `/opt/ce/manifest.json` only.
-4. Run `ce-serve install` (it composes from the same approved bytes), then deploy.
+4. Run `ce-serve install` (it composes from the same approved bytes) with a NEW `CE_SCHEMA` (for example `ce_mjcc_staging_plugin`), because the first-boot schema already exists and install is not idempotent. Set the same `CE_SCHEMA` on the Render service, then deploy.
 
 The private plugin repo is not readable from the build, so no credential is placed in the build. If the plugin must not be committed to this repo, the owner needs a different mechanism (a decision for the owner).
 
@@ -78,7 +78,7 @@ The private plugin repo is not readable from the build, so no credential is plac
 
 Order:
 1. Create the staging database; collect the connection URL, TLS mode and CA.
-2. Run the install once, from the owner's machine or CI, against the staging database. With the image: `docker run --rm -e CE_DATABASE_URL=... -e CE_DB_TLS=... -e CE_JWT_KEY=... -e CE_INSTALLATION=mjcc-staging -e CE_MANIFEST=/manifest.json -v ./manifest.json:/manifest.json:ro cengine install` (add `-v` for `CE_DB_CA` if used). It prints `installed schema ce_mjcc_staging` (or the name derived from the installation id).
+2. Run the install once, from the owner's machine or CI, against the staging database. With the image: `docker run --rm -e CE_DATABASE_URL=... -e CE_DB_TLS=... -e CE_JWT_KEY=... -e CE_INSTALLATION=mjcc-staging -e CE_MANIFEST=/manifest.json -v ./manifest.json:/manifest.json:ro cengine install` (with `CE_DB_TLS=ca` also add `-v ./db-ca.pem:/db-ca.pem:ro -e CE_DB_CA=/db-ca.pem`; without `CE_DB_CA` the install exits with `CE_DB_CA is required`). It prints `installed schema ce_mjcc_staging` (or the name derived from the installation id).
 3. In the Render Dashboard create the Blueprint, enter the `sync: false` values, and upload the secret file `manifest.json` (same bytes used in step 2; for now `spec/examples/inventory.json`).
 4. Deploy manually, wait for the health check, run the smoke tests.
 
@@ -138,3 +138,7 @@ The bodies above match `spec/examples/inventory.json` (role `manager`). With ano
 7. Whether to accept the free plan's sleep and cold starts for acceptance runs, or move to a paid plan (disk, always on).
 8. Branch to deploy (Blueprint says `main`) and whether a staging branch is preferred.
 9. Whether SIGTERM handling should be added to `ce-serve` (small Rust change, separate PR).
+
+## Secret files and the service user
+
+Render mounts secret files readable by group 1000. Both images add the non-root `ce` user to a group with gid 1000 so `CE_MANIFEST` and `CE_DB_CA` secret files can be read. Not verified on Render (no Docker daemon here).
