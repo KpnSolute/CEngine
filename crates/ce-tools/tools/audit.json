@@ -1,0 +1,23 @@
+{
+  "tool": "audit",
+  "version": "0.1.0",
+  "title": "Audit trail: who changed which record, when, from what to what",
+  "entities": {
+    "audit_event": {
+      "fields": {
+        "entity": {"type": "string", "required": true, "max_length": 64, "indexed": true},
+        "record_id": {"type": "string", "required": true, "max_length": 64, "indexed": true},
+        "operation": {"type": "enum", "values": ["create", "update", "delete"], "required": true, "indexed": true},
+        "actor": {"type": "string", "required": true, "max_length": 120, "indexed": true},
+        "request_id": {"type": "string", "max_length": 64},
+        "at": {"type": "integer", "required": true, "indexed": true},
+        "from_version": {"type": "integer"},
+        "to_version": {"type": "integer"},
+        "before": {"type": "json"},
+        "after": {"type": "json"}
+      },
+      "sort_keys": ["at", "entity", "record_id"]
+    }
+  },
+  "actions": {}
+}
