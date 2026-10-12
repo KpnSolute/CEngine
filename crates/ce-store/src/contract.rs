@@ -156,6 +156,34 @@ pub fn run_all<S: Store>(make: &dyn Fn() -> S) {
     idempotency_keys_are_per_tenant(&make());
     non_object_data_is_refused(&make());
     idempotent_replay_returns_the_original_result_after_changes(&make());
+    a_chosen_id_is_used_replays_and_cannot_be_reused(&make());
+}
+
+fn a_chosen_id_is_used_replays_and_cannot_be_reused<S: Store>(s: &S) {
+    let id = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    let first = s
+        .insert(&scope(A), "item", json!({"id": id, "n": 1}), Some("kc"))
+        .unwrap();
+    assert_eq!(first.id, id);
+    // The same request replays; a different id under the same key is a reused key.
+    assert_eq!(
+        s.insert(&scope(A), "item", json!({"id": id, "n": 1}), Some("kc")),
+        Ok(first.clone())
+    );
+    assert_eq!(
+        s.insert(&scope(A), "item", json!({"n": 1}), Some("kc")),
+        Err(StoreError::IdempotencyKeyReused)
+    );
+    // Another request cannot take the id; another tenant is unaffected.
+    assert_eq!(
+        s.insert(&scope(A), "item", json!({"id": id, "n": 2}), Some("kd")),
+        Err(StoreError::Constraint("unique"))
+    );
+    assert_eq!(s.get(&scope(A), "item", id).unwrap().data["n"], 1);
+    let other = s
+        .insert(&scope(B), "item", json!({"id": id, "n": 3}), None)
+        .unwrap();
+    assert_eq!(other.id, id);
 }
 
 // ---- Transactions and child reads. Only for backends whose `atomic` is supported. ----

@@ -158,6 +158,10 @@ fn manifest() -> Value {
                     "name": {"type": "string", "required": true, "unique": true},
                     "qty": {"type": "integer"}
                 }},
+                "part": {"fields": {
+                    "name": {"type": "string", "required": true},
+                    "widget": {"type": "ref", "ref": "widget", "required": true, "indexed": true}
+                }},
                 "secret": {"fields": {"v": {"type": "string"}}}
             },
             "roles": {
@@ -368,4 +372,72 @@ async fn batches_that_touch_the_same_records_in_opposite_orders_both_finish() {
         assert!(s == StatusCode::OK || s == StatusCode::CONFLICT, "{s}");
     }
     close(vec![api.app, one.app, two.app]).await;
+}
+
+const W1: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+const P1: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae8";
+
+#[tokio::test]
+async fn a_batch_can_create_a_record_and_others_that_point_at_it() {
+    let Some(mut api) = setup().await else { return };
+    let (s, v) = api
+        .batch(json!([
+            {"op": "create", "entity": "widget", "data": {"id": W1, "name": "frame"}},
+            {"op": "create", "entity": "part", "data": {"id": P1, "name": "bolt", "widget": W1}},
+        ]))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"][0]["id"], W1);
+    assert_eq!(v["data"][1]["id"], P1);
+    let (s, p) = api
+        .call("GET", &format!("/v1/{INST}/part/{P1}"), None, None)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{p}");
+    assert_eq!(p["data"]["widget"], W1);
+
+    // The id is taken: a second batch using it fails whole, and nothing else of it is kept.
+    let (s, v) = api
+        .batch(json!([
+            {"op": "create", "entity": "widget", "data": {"name": "other"}},
+            {"op": "create", "entity": "widget", "data": {"id": W1, "name": "again"}},
+        ]))
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let (_, l) = api
+        .call("GET", &format!("/v1/{INST}/widget?limit=100"), None, None)
+        .await;
+    assert_eq!(l["data"].as_array().unwrap().len(), 1);
+
+    // Only a lowercase, non-nil UUID is accepted, and a chosen id is for create only.
+    for bad in [
+        "rec-1",
+        "0000000000000000000000000000000",
+        "7C9E6679-7425-40DE-944B-E07FC1F90AE9",
+        "00000000-0000-0000-0000-000000000000",
+    ] {
+        let (s, v) = api
+            .batch(json!([{"op": "create", "entity": "widget", "data": {"id": bad, "name": "x"}}]))
+            .await;
+        assert!(s.is_client_error(), "{bad}: {s} {v}");
+    }
+    let (s, v) = api
+        .call(
+            "PATCH",
+            &format!("/v1/{INST}/widget/{W1}"),
+            Some(1),
+            Some(json!({"id": P1})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let (s, v) = api
+        .call(
+            "POST",
+            &format!("/v1/{INST}/widget"),
+            None,
+            Some(json!({"id": "7c9e6679-7425-40de-944b-e07fc1f90af0", "name": "direct"})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(v["data"]["id"], "7c9e6679-7425-40de-944b-e07fc1f90af0");
+    close(vec![api.app]).await;
 }

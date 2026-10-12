@@ -326,6 +326,25 @@ fn parse_object(body: &Bytes) -> Result<Map<String, Value>, Problem> {
     }
 }
 
+/// The id a caller chose for a record it creates: a lowercase hyphenated UUID, never the nil
+/// one. A valid one is taken out of the body before field validation (`id` is not a field) and
+/// put back afterwards so the store uses it. It lets one batch or changeset create a record and
+/// others that point at it. Ids are per tenant, so choosing one cannot reach another tenant's
+/// record; one already in use fails with 409. Any other `id` is left in the body, where
+/// validation reports it as `reserved_field`.
+pub(crate) fn take_client_id(obj: &mut Map<String, Value>) -> Option<Value> {
+    let ok = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|s| uuid::Uuid::parse_str(s).ok().map(|u| (u, s)))
+        .is_some_and(|(u, s)| !u.is_nil() && u.hyphenated().to_string() == s);
+    if ok {
+        obj.remove("id")
+    } else {
+        None
+    }
+}
+
 /// Field-level validation against the manifest, shared with every other host.
 fn validate_body<S>(
     st: &AppState<S>,
@@ -968,8 +987,12 @@ async fn batch<S: Store + Send + Sync + 'static>(
             let op = match item["op"].as_str() {
                 Some("create") => {
                     let mut obj = data.ok_or_else(|| bad("create needs data"))?;
+                    let chosen = take_client_id(&mut obj);
                     let check = obj.clone();
                     prepare_create(&st.manifest, entity, &mut obj);
+                    if let Some(id) = chosen {
+                        obj.insert("id".into(), id);
+                    }
                     pending.push((entity.to_string(), check, ce_validate::Mode::Create));
                     writes::Op::Create {
                         data: obj,
@@ -1194,8 +1217,12 @@ async fn create<S: Store + Send + Sync + 'static>(
         let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
         let key = idempotency_key(&headers)?;
         let mut obj = parse_object(&body.map_err(body_problem)?)?;
+        let chosen = take_client_id(&mut obj);
         validate_body(&st, &entity, &obj, ce_validate::Mode::Create)?;
         prepare_create(&st.manifest, &entity, &mut obj);
+        if let Some(id) = chosen {
+            obj.insert("id".into(), id);
+        }
         if let Some(res) = stage_if_governed(
             &st,
             &who,

@@ -565,6 +565,8 @@ impl TypedPgStore {
         if let Some(s) = &ent.state {
             obj.remove(&s.field);
         }
+        // A caller-chosen id (validated by the host) is stored as given; it must be unused.
+        let chosen = obj.remove("id").and_then(|v| v.as_str().map(String::from));
         let obj = &obj;
         self.check_body(entity, obj, Mode::Create)?;
 
@@ -594,6 +596,10 @@ impl TypedPgStore {
             params.push(Some(s.initial.clone()));
             cols.push(format!("\"{}\"", s.field));
             vals.push(format!("${}::text", params.len()));
+        }
+        if let Some(id) = chosen {
+            params.push(Some(id));
+            vals[0] = format!("${}::text::uuid", params.len());
         }
 
         let sql = format!(

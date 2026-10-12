@@ -119,6 +119,9 @@ through the same transactional store API as actions.
 
 `requires_state` is checked first (409 `invalid_transition`); the input is validated against the action's `input` fields (422). The response is the record after the last effect plus `meta.created` and `meta.emitted`. A retry of a finished action fails with 409 `version_conflict` because the record has moved on.
 
+## Chosen ids
+A create (`POST /v1/{inst}/{entity}`, a batch `create`, or a write staged in a changeset) may carry `"id"` in its body: a lowercase hyphenated UUID, not the nil one. The record gets that id. This lets one batch or changeset create a record and others that point at it (an invoice and its lines) without a second round trip. Ids are per tenant, so a chosen id cannot reach another tenant's record; an id already in use fails the write with 409 (and a batch or merge with it applies nothing). Anything else in `id` is 422 `reserved_field` like before, and `id` is never accepted on update. Chosen ids are not available through CSV import or AI drafts.
+
 ## Batch writes
 `POST /v1/{inst}/_batch` with `{"ops": [...]}` (1 to 100) and an `Idempotency-Key`. Each operation is `{"op": "create", "entity", "data"}`, `{"op": "update", "entity", "id", "version", "data"}` (a merge patch) or `{"op": "delete", "entity", "id", "version"}`. All operations are checked (roles, shape, server-only records) before anything is written, then applied in order in one transaction with audit; any failure undoes all of them and returns that operation's error. Later operations see the earlier ones. Governed entities are refused for callers who cannot merge. The response is `{"data": [record or null, ...]}` in the order sent. Creates derive their idempotency keys from the request's key.
 

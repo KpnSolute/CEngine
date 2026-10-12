@@ -41,6 +41,9 @@ fn valid_ident(s: &str) -> bool {
 }
 
 fn db(e: postgres::Error) -> StoreError {
+    if e.code().map(|c| c.code()) == Some("23505") {
+        return StoreError::Constraint("unique");
+    }
     StoreError::Backend(e.to_string())
 }
 
@@ -198,16 +201,31 @@ impl Store for PgStore {
             }
         }
 
-        let row = tx
-            .query_one(
+        // A caller-chosen id (validated by the host) is stored as given; it must be unused.
+        let mut data = data;
+        let chosen = data
+            .as_object_mut()
+            .and_then(|o| o.remove("id"))
+            .and_then(|v| v.as_str().map(String::from));
+        let row = match &chosen {
+            Some(id) => tx.query_one(
+                &format!(
+                    r#"INSERT INTO "{s}".ce_records (tenant_id, entity, id, data)
+                       VALUES ($1::text::uuid, $2, $3::text::uuid, $4)
+                       RETURNING id::text, version"#
+                ),
+                &[&tenant, &entity, id, &data],
+            ),
+            None => tx.query_one(
                 &format!(
                     r#"INSERT INTO "{s}".ce_records (tenant_id, entity, data)
                        VALUES ($1::text::uuid, $2, $3)
                        RETURNING id::text, version"#
                 ),
                 &[&tenant, &entity, &data],
-            )
-            .map_err(db)?;
+            ),
+        }
+        .map_err(db)?;
         let record = to_record(entity, row.get(0), row.get(1), data);
         if let Some(key) = idempotency_key {
             tx.execute(

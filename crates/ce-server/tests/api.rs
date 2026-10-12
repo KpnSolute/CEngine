@@ -581,6 +581,19 @@ async fn manifest_and_openapi_are_served_to_authenticated_callers() {
     }
     let post = &doc["paths"][format!("/v1/{INST}/item")]["post"];
     assert_eq!(post["parameters"][0]["name"], "Idempotency-Key");
+    // The create body takes an optional writable `id`; the record schema keeps it read-only.
+    assert_eq!(
+        post["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/itemCreate"
+    );
+    let create = &doc["components"]["schemas"]["itemCreate"];
+    assert_eq!(create["properties"]["id"]["format"], "uuid");
+    assert!(create["properties"]["id"]["readOnly"].is_null());
+    assert!(create["properties"]["version"].is_null());
+    assert_eq!(
+        doc["components"]["schemas"]["item"]["properties"]["id"]["readOnly"],
+        true
+    );
     assert!(post["responses"]["409"].is_object() && post["responses"]["428"].is_object());
     let item = &doc["components"]["schemas"]["item"];
     assert_eq!(item["properties"]["name"]["maxLength"], 120);

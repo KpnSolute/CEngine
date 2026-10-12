@@ -61,8 +61,21 @@ impl Inner {
                 return Ok(original.clone());
             }
         }
-        self.next_id += 1;
-        let id = format!("rec-{}", self.next_id);
+        // A caller-chosen id (validated by the host) is used as given; it must be unused.
+        let payload = caller.cloned().unwrap_or_else(|| data.clone());
+        let mut data = data;
+        let id = match data.as_object_mut().and_then(|o| o.remove("id")) {
+            Some(Value::String(chosen)) => {
+                if self.records.contains_key(&key(scope, entity, &chosen)) {
+                    return Err(StoreError::Constraint("unique"));
+                }
+                chosen
+            }
+            _ => {
+                self.next_id += 1;
+                format!("rec-{}", self.next_id)
+            }
+        };
         let record = Record {
             id: id.clone(),
             entity: entity.into(),
@@ -77,8 +90,7 @@ impl Inner {
             },
         );
         if let Some(k) = idem {
-            self.keys
-                .insert(k, (caller.unwrap_or(&data).clone(), record.clone()));
+            self.keys.insert(k, (payload, record.clone()));
         }
         Ok(record)
     }
