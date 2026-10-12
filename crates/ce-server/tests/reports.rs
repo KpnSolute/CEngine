@@ -282,7 +282,7 @@ async fn groups_are_computed_exactly_and_only_for_this_tenant() {
     assert_eq!(rows.len(), 3, "{v}");
     assert_eq!(rows[0]["category"], "soup");
     assert_eq!(rows[0]["n"], 2);
-    assert_eq!(rows[0]["units"], 5);
+    assert_eq!(rows[0]["units"], "5");
     assert_eq!(rows[0]["total"], "12.75");
     assert_eq!(rows[0]["first_day"], "2026-09-01");
     assert_eq!(rows[0]["top"], "12.50");

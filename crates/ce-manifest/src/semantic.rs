@@ -659,8 +659,15 @@ fn check_report(out: &mut Vec<Issue>, rn: &str, r: &Value, entities: &Obj, empty
         ));
         return;
     };
-    let fields = obj(ent, "fields").unwrap_or(empty);
+    // An engine-managed state field is not declared in `fields` but reports may use it (a string).
+    let mut all = obj(ent, "fields").unwrap_or(empty).clone();
+    if let Some(sf) = ent["state"]["field"].as_str() {
+        all.entry(sf.to_string())
+            .or_insert_with(|| serde_json::json!({"type": "string"}));
+    }
+    let fields = &all;
     let ty = |f: &str| fields.get(f).and_then(|x| x["type"].as_str());
+    let pii = |f: &str| fields.get(f).is_some_and(|x| x["pii"] == true);
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for (i, g) in r["group_by"].as_array().into_iter().flatten().enumerate() {
         let g = g.as_str().unwrap_or("");
@@ -675,7 +682,7 @@ fn check_report(out: &mut Vec<Issue>, rn: &str, r: &Value, entities: &Obj, empty
                 "invalid_group",
                 format!("`{g}` cannot be grouped by"),
             )),
-            Some(_) if fields[g]["pii"] == true => out.push(issue(
+            Some(_) if pii(g) => out.push(issue(
                 format!("{pp}/group_by/{i}"),
                 "pii_in_report",
                 format!("`{g}` is marked pii"),
@@ -716,7 +723,7 @@ fn check_report(out: &mut Vec<Issue>, rn: &str, r: &Value, entities: &Obj, empty
                             "invalid_measure",
                             format!("`{func}` cannot be computed over a {t} field"),
                         ));
-                    } else if fields[f]["pii"] == true {
+                    } else if pii(f) {
                         out.push(issue(
                             format!("{mp}/field"),
                             "pii_in_report",
@@ -734,7 +741,14 @@ fn check_report(out: &mut Vec<Issue>, rn: &str, r: &Value, entities: &Obj, empty
     }
     for (i, p) in r["params"].as_array().into_iter().flatten().enumerate() {
         let p = p.as_str().unwrap_or("");
-        if !matches!(
+        if p == "format" {
+            out.push(issue(
+                format!("{pp}/params/{i}"),
+                "invalid_param",
+                "`format` selects the output (json, csv, html) and cannot be a parameter"
+                    .to_string(),
+            ));
+        } else if !matches!(
             ty(p),
             Some("string" | "integer" | "boolean" | "enum" | "date" | "ref" | "decimal")
         ) {

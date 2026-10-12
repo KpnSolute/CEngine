@@ -170,4 +170,18 @@ fn reports_are_checked_against_the_entity() {
     assert!(with(&|r| r["filter"] = json!("name == 3")).contains(&"invalid_filter"));
     assert!(with(&|r| r["filter"] = json!("ref(period).x == 1")).contains(&"unsupported_filter"));
     assert!(with(&|r| r["measures"] = json!([])).contains(&"schema"));
+
+    // `format` picks the output representation, so it cannot also narrow the report.
+    let mut m = base();
+    m["entities"]["item"]["fields"]["format"] = json!({"type": "string"});
+    m["reports"]["stock"]["params"] = json!(["format"]);
+    assert!(codes(&m).contains(&"invalid_param"));
+
+    // An engine-managed state field (not declared in `fields`) can be grouped and filtered.
+    let mut m = base();
+    m["entities"]["item"]["state"] =
+        json!({"field": "phase", "initial": "new", "states": {"new": {"code": 100}}});
+    m["reports"]["stock"]["group_by"] = json!(["phase"]);
+    m["reports"]["stock"]["filter"] = json!("phase == 'new'");
+    assert_eq!(codes(&m), Vec::<&str>::new());
 }

@@ -469,7 +469,8 @@ pub fn plan_aggregate(
                 let ty = ctx.field_type(f)?;
                 let col = ctx.column(f)?;
                 match (func, ty.as_str()) {
-                    (AggFn::Sum, "integer") => (format!("sum({col})"), ColKind::Int),
+                    // A sum of bigints is numeric and can pass the bigint range: return it as exact text.
+                    (AggFn::Sum, "integer") => (format!("sum({col})"), ColKind::Dec),
                     (AggFn::Sum, "decimal") => (format!("sum({col})"), ColKind::Dec),
                     (AggFn::Avg, "integer" | "decimal") => (format!("avg({col})"), ColKind::Dec),
                     (AggFn::Min, "decimal") => (format!("min({col})"), ColKind::Dec),
