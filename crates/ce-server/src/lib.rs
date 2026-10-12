@@ -155,6 +155,8 @@ where
         .route("/v1/{inst}/_batch", post(batch::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
+        .route("/v1/{inst}/{entity}/_export", get(export_csv::<S>))
+        .route("/v1/{inst}/{entity}/_import", post(import_csv::<S>))
         .route("/v1/{inst}/events/relay", post(events_relay::<S>))
         .route("/v1/{inst}/events/{id}/replay", post(events_replay::<S>))
         .route("/v1/{inst}/{entity}", get(list::<S>).post(create::<S>))
@@ -1502,6 +1504,171 @@ async fn events_relay<S: Store + Send + Sync + 'static>(
                 .map_err(store_problem)?;
         let body = json!({"data": {"delivered": r.delivered, "retrying": r.retrying, "dead_lettered": r.dead_lettered}, "meta": {"request_id": rid}});
         Ok((StatusCode::OK, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
+}
+
+/// The most rows one export returns; a bigger result must be narrowed with `filter`.
+const EXPORT_ROWS: usize = ce_io::MAX_ROWS;
+/// The most rows one import creates (all in one transaction).
+const IMPORT_ROWS: usize = 1000;
+
+/// `GET .../{entity}/_export?filter=..&sort=..`: the entity's records as CSV (see `ce-io`).
+async fn export_csv<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, entity)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = guard(&st, &headers, &inst, &entity, Access::Read)?;
+        let mut req = list_request(&q)?;
+        req.select = None;
+        req.limit = Some(200);
+        req.after = None;
+        let scope = who.scope().clone();
+        let ent = entity.clone();
+        let records = blocking(&st, move |s| {
+            let mut all: Vec<Value> = Vec::new();
+            loop {
+                let page = s.list(&scope, &ent, &req)?;
+                all.extend(page.records.iter().map(record_json));
+                if all.len() > EXPORT_ROWS {
+                    return Ok(None);
+                }
+                match page.next {
+                    Some(c) => req.after = Some(c),
+                    None => return Ok(Some(all)),
+                }
+            }
+        })
+        .await?
+        .ok_or_else(|| {
+            Problem::validation(
+                format!("more than {EXPORT_ROWS} rows; narrow the export with filter"),
+                Vec::new(),
+            )
+        })?;
+        let csv =
+            ce_io::export_csv(&st.manifest, &entity, &records).map_err(|_| Problem::not_found())?;
+        let mut res = (StatusCode::OK, csv).into_response();
+        let h = res.headers_mut();
+        h.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/csv; charset=utf-8"),
+        );
+        if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{entity}.csv\"")) {
+            h.insert(header::CONTENT_DISPOSITION, v);
+        }
+        Ok(res)
+    };
+    finish(&rid, run.await)
+}
+
+/// `POST .../{entity}/_import[?dry_run=true]` with a CSV body: every row is checked, and if all
+/// pass they are created in one transaction (all or none). Any bad row answers 422 with the
+/// report and creates nothing; `dry_run` answers the report and creates nothing.
+async fn import_csv<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, entity)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
+        let key = idempotency_key(&headers)?;
+        let dry = q.get("dry_run").is_some_and(|v| v == "true");
+        if changesets::governed(&st.manifest, &entity)
+            && !st.policy.can_run(&who.roles, changesets::MERGE_ACTION)
+        {
+            return Err(Problem::validation(
+                "this entity is governed; propose the rows as a changeset",
+                Vec::new(),
+            ));
+        }
+        let bytes = body.map_err(body_problem)?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| Problem::validation("the file must be UTF-8", Vec::new()))?;
+        let file_problems = |errs: Vec<ce_io::IoError>| {
+            Problem::validation(
+                "the file cannot be imported",
+                errs.into_iter()
+                    .map(|e| json!({"path": format!("/{}", e.column), "code": e.code, "detail": e.detail}))
+                    .collect(),
+            )
+        };
+        let report = ce_io::import_csv(&st.manifest, &entity, text).map_err(file_problems)?;
+        if report.rows.len() > IMPORT_ROWS {
+            return Err(Problem::validation(
+                format!("an import holds at most {IMPORT_ROWS} rows"),
+                Vec::new(),
+            ));
+        }
+        let rows: Vec<Value> = report
+            .rows
+            .iter()
+            .map(|r| {
+                json!({"row": r.row, "ok": r.errors.is_empty(), "errors": r.errors.iter()
+                    .map(|e| json!({"column": e.column, "code": e.code, "detail": e.detail}))
+                    .collect::<Vec<_>>()})
+            })
+            .collect();
+        if report.rejected().next().is_some() {
+            let mut p =
+                Problem::validation("some rows are invalid; nothing was imported", Vec::new());
+            p.extra.push(("rows", Value::Array(rows)));
+            return Err(p);
+        }
+        // Row keys carry a digest of the whole file, so a retry of the same file replays every
+        // row and a different file under the same key never mixes with it.
+        let digest = {
+            use sha2::{Digest, Sha256};
+            let d = Sha256::digest(bytes.as_ref());
+            d.iter()
+                .take(8)
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        let mut ops: Vec<(String, writes::Op)> = Vec::new();
+        for r in &report.rows {
+            let mut obj = r.body.clone();
+            prepare_create(&st.manifest, &entity, &mut obj);
+            let op = writes::Op::Create {
+                data: obj,
+                key: format!("import:{key}:{digest}:{}", r.row),
+            };
+            check_server_only(&st.manifest, &entity, &op)?;
+            ops.push((entity.clone(), op));
+        }
+        let ctx = invariant_context(&st, &who);
+        let scope = who.scope().clone();
+        let (store, manifest, rid2) = (st.store.clone(), st.manifest.clone(), rid.clone());
+        let made = tokio::task::spawn_blocking(move || {
+            let env = writes::Env {
+                manifest: &manifest,
+                scope: &scope,
+                ctx: &ctx,
+                request_id: &rid2,
+            };
+            writes::execute_all_with(&*store, &env, &ops, dry)
+        })
+        .await
+        .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+        .map_err(failure_problem)?;
+        if dry {
+            let n = rows.len();
+            return Ok((
+                StatusCode::OK,
+                Json(json!({"data": {"rows": rows, "created": 0}, "meta": {"request_id": rid, "dry_run": true, "count": n}})),
+            )
+                .into_response());
+        }
+        let ids: Vec<Value> = made.iter().flatten().map(|r| json!(r.id)).collect();
+        let body = json!({"data": {"created": ids.len(), "ids": ids}, "meta": {"request_id": rid}});
+        Ok((StatusCode::CREATED, Json(body)).into_response())
     };
     finish(&rid, run.await)
 }

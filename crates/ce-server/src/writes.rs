@@ -592,6 +592,17 @@ pub(crate) fn execute_all<S: Store>(
     env: &Env,
     ops: &[(String, Op)],
 ) -> Result<Vec<Option<Record>>, Failure> {
+    execute_all_with(store, env, ops, false)
+}
+
+/// Like [`execute_all`]; with `rehearse` every rule runs but the transaction is rolled back at the
+/// end, so a success keeps nothing.
+pub(crate) fn execute_all_with<S: Store>(
+    store: &S,
+    env: &Env,
+    ops: &[(String, Op)],
+    rehearse: bool,
+) -> Result<Vec<Option<Record>>, Failure> {
     let mut done = Vec::new();
     let mut failed = None;
     let out = store.atomic(&mut |tx| {
@@ -626,10 +637,14 @@ pub(crate) fn execute_all<S: Store>(
                 }
             }
         }
+        if rehearse {
+            return Err(StoreError::Aborted);
+        }
         Ok(())
     });
     match out {
         Ok(()) => Ok(done),
+        Err(StoreError::Aborted) if rehearse && failed.is_none() => Ok(done),
         Err(e) => Err(failed.unwrap_or(Failure::Store(e))),
     }
 }
