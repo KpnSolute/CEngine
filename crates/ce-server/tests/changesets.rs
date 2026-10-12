@@ -79,6 +79,8 @@ struct Api {
     app: Router,
     n: u32,
     role: &'static str,
+    /// The token's subject when it should differ from the role name.
+    sub: Option<&'static str>,
     extra: Option<String>,
 }
 
@@ -122,7 +124,10 @@ impl Api {
             .uri(uri)
             .header(
                 header::AUTHORIZATION,
-                format!("Bearer {}", token(T1, self.role, self.role)),
+                format!(
+                    "Bearer {}",
+                    token(T1, self.role, self.sub.unwrap_or(self.role))
+                ),
             )
             .header("idempotency-key", key);
         if let Some(c) = &self.extra {
@@ -210,6 +215,7 @@ async fn api(role: &'static str, app: Router) -> Api {
         app,
         n: 0,
         role,
+        sub: None,
         extra: None,
     }
 }
@@ -220,6 +226,7 @@ fn as_role(a: &Api, role: &'static str) -> Api {
         app: a.app.clone(),
         n: 1000,
         role,
+        sub: None,
         extra: None,
     }
 }
@@ -227,6 +234,28 @@ fn as_role(a: &Api, role: &'static str) -> Api {
 async fn setup() -> Option<Api> {
     let url = url()?;
     Some(api("clerk", app(&url, manifest()).await).await)
+}
+
+#[tokio::test]
+async fn the_person_who_staged_a_changeset_cannot_merge_it_even_after_a_promotion() {
+    let Some(mut clerk) = setup().await else {
+        return;
+    };
+    let (s, v) = clerk.post("widget", json!({"name": "a", "qty": 1})).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    let cs = v["data"]["changeset_id"].as_str().unwrap().to_string();
+    // The same person (same subject), now holding the reviewer role.
+    let mut same = as_role(&clerk, "reviewer");
+    same.sub = Some("clerk");
+    let (s, v) = same.verb(&cs, "merge").await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["code"], "self_merge", "{v}");
+    assert!(clerk.list("widget").await.is_empty());
+    // A different reviewer can.
+    let mut rev = as_role(&clerk, "reviewer");
+    let (s, _) = rev.verb(&cs, "merge").await;
+    assert_eq!(s, StatusCode::OK);
+    close(vec![clerk.app, same.app, rev.app]).await;
 }
 
 #[tokio::test]
