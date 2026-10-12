@@ -202,7 +202,9 @@ impl Store for MemoryStore {
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
         // The first result is looked up before `derive` runs, and no lock is held while it does
-        // (it reads through this same store).
+        // (it reads through this same store). Two direct callers with one new key can therefore
+        // both derive; the server never does that, because it calls this inside `atomic`, which
+        // holds the store's lock for the whole write.
         if let Some(key) = idempotency_key {
             if let Some(first) = self.lock().replay(scope, entity, &caller, key)? {
                 return Ok(first);
@@ -298,7 +300,9 @@ impl Store for MemoryTx {
         idempotency_key: Option<&str>,
     ) -> Result<Record, StoreError> {
         // The first result is looked up before `derive` runs, and no lock is held while it does
-        // (it reads through this same store).
+        // (it reads through this same store). Two direct callers with one new key can therefore
+        // both derive; the server never does that, because it calls this inside `atomic`, which
+        // holds the store's lock for the whole write.
         if let Some(key) = idempotency_key {
             if let Some(first) = self.inner.borrow().replay(scope, entity, &caller, key)? {
                 return Ok(first);

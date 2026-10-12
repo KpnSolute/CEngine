@@ -178,12 +178,41 @@ fn lock_parents(
     old: Option<&Map<String, Value>>,
     new: Option<&Map<String, Value>>,
 ) -> Result<(), Failure> {
-    let mut levels: Vec<BTreeSet<(String, String)>> = Vec::new();
+    // A parent can move while its links are read without a lock, so after locking, the walk is
+    // repeated; if it found more records the new ones are locked too (a few tries at most).
+    let mut held: BTreeSet<(String, String)> = BTreeSet::new();
+    for _ in 0..3 {
+        let levels = ancestor_levels(tx, env, child, old, new);
+        let mut locked_any = false;
+        for key in levels.iter().rev().flatten() {
+            if held.insert(key.clone()) {
+                locked_any = true;
+                match tx.get_locked(env.scope, &key.0, &key.1) {
+                    Ok(_) | Err(StoreError::NotFound) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        if !locked_any {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The records above a write, nearest first: level 0 are its parents, level 1 theirs, and so on.
+fn ancestor_levels(
+    tx: &dyn Store,
+    env: &Env,
+    child: &str,
+    old: Option<&Map<String, Value>>,
+    new: Option<&Map<String, Value>>,
+) -> Vec<BTreeSet<(String, String)>> {
+    let mut levels = Vec::new();
     let mut frontier = parent_keys(env, child, old, new);
     while !frontier.is_empty() && levels.len() < MAX_DEPTH {
         let mut next = BTreeSet::new();
         for (entity, id) in &frontier {
-            // Only to find the next level up; the lock follows, top-down.
             if let Ok(r) = tx.get(env.scope, entity, id) {
                 next.extend(parent_keys(env, entity, r.data.as_object(), None));
             }
@@ -191,18 +220,7 @@ fn lock_parents(
         levels.push(std::mem::take(&mut frontier));
         frontier = next;
     }
-    // A record reachable at two heights is locked at the higher one.
-    let mut placed: BTreeSet<(String, String)> = BTreeSet::new();
-    for level in levels.iter().rev() {
-        for key in level.iter().filter(|k| !placed.contains(*k)) {
-            match tx.get_locked(env.scope, &key.0, &key.1) {
-                Ok(_) | Err(StoreError::NotFound) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-        placed.extend(level.iter().cloned());
-    }
-    Ok(())
+    levels
 }
 
 /// Brings every parent of a changed child up to date. `old` and `new` are the child's data
