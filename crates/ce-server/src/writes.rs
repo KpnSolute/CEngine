@@ -575,6 +575,22 @@ pub(crate) fn execute_all<S: Store>(
     let mut failed = None;
     let out = store.atomic(&mut |tx| {
         done.clear();
+        // Lock the records the batch updates or deletes in one global (entity, id) order before
+        // running the operations in the caller's order, so two batches that touch the same
+        // records in opposite orders take turns instead of waiting on each other in a circle.
+        // (A missing record is left for its own operation to report.)
+        let mut own: BTreeSet<(&str, &str)> = BTreeSet::new();
+        for (entity, op) in ops {
+            if let Op::Patch { id, .. } | Op::Delete { id, .. } = op {
+                own.insert((entity.as_str(), id.as_str()));
+            }
+        }
+        for (entity, id) in own {
+            match tx.get_locked(env.scope, entity, id) {
+                Ok(_) | Err(StoreError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
         for (entity, op) in ops {
             match step(tx, env, entity, op).and_then(|o| audit(tx, env, entity, op, &o).map(|()| o))
             {

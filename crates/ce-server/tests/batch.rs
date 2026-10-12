@@ -162,7 +162,8 @@ fn manifest() -> Value {
             },
             "roles": {
                 "owner": {"read": ["*"], "write": ["*"], "actions": ["*"]},
-                "clerk": {"read": ["*"], "write": ["widget"], "actions": []}
+                "clerk": {"read": ["*"], "write": ["widget"], "actions": []},
+                "dropbox": {"read": [], "write": ["widget"], "actions": []}
             }
         }),
         &["audit"],
@@ -288,4 +289,83 @@ async fn a_batch_is_checked_before_anything_is_written() {
     assert_eq!(s, StatusCode::FORBIDDEN);
     assert!(owner.list("widget").await.is_empty());
     close(vec![owner.app, clerk.app]).await;
+}
+
+#[tokio::test]
+async fn a_caller_without_read_access_gets_only_id_and_version() {
+    let Some(owner) = setup().await else { return };
+    let mut drop = Api {
+        app: owner.app.clone(),
+        n: 1000,
+        role: "dropbox",
+        extra: None,
+    };
+    let (s, v) = drop
+        .batch(json!([{"op": "create", "entity": "widget", "data": {"name": "a", "qty": 5}}]))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let r = v["data"][0].as_object().unwrap();
+    assert!(r.contains_key("id") && r.contains_key("version"));
+    assert!(!r.contains_key("name") && !r.contains_key("qty"), "{r:?}");
+    close(vec![owner.app, drop.app]).await;
+}
+
+#[tokio::test]
+async fn batches_that_touch_the_same_records_in_opposite_orders_both_finish() {
+    let Some(mut api) = setup().await else {
+        return;
+    };
+    let (_, v) = api
+        .batch(json!([
+            {"op": "create", "entity": "widget", "data": {"name": "a"}},
+            {"op": "create", "entity": "widget", "data": {"name": "b"}},
+        ]))
+        .await;
+    let a = v["data"][0]["id"].as_str().unwrap().to_string();
+    let b = v["data"][1]["id"].as_str().unwrap().to_string();
+    let mut one = Api {
+        app: api.app.clone(),
+        n: 2000,
+        role: "owner",
+        extra: None,
+    };
+    let mut two = Api {
+        app: api.app.clone(),
+        n: 3000,
+        role: "owner",
+        extra: None,
+    };
+    let (x, y) = tokio::join!(
+        async {
+            let mut codes = Vec::new();
+            for i in 0..5 {
+                let (s, _) = one
+                    .batch(json!([
+                        {"op": "update", "entity": "widget", "id": a, "version": 1 + 2 * i, "data": {"qty": i}},
+                        {"op": "update", "entity": "widget", "id": b, "version": 1 + 2 * i, "data": {"qty": i}},
+                    ]))
+                    .await;
+                codes.push(s);
+            }
+            codes
+        },
+        async {
+            let mut codes = Vec::new();
+            for i in 0..5 {
+                let (s, _) = two
+                    .batch(json!([
+                        {"op": "update", "entity": "widget", "id": b, "version": 1 + 2 * i, "data": {"qty": 9}},
+                        {"op": "update", "entity": "widget", "id": a, "version": 1 + 2 * i, "data": {"qty": 9}},
+                    ]))
+                    .await;
+                codes.push(s);
+            }
+            codes
+        }
+    );
+    // Versions may clash (409) but no request may fail with a server error from a deadlock.
+    for s in x.into_iter().chain(y) {
+        assert!(s == StatusCode::OK || s == StatusCode::CONFLICT, "{s}");
+    }
+    close(vec![api.app, one.app, two.app]).await;
 }

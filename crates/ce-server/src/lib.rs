@@ -421,6 +421,15 @@ fn record_json(r: &Record) -> Value {
 
 /// Callers without read access to the entity get only the id and version back, so a
 /// write grant never discloses stored fields.
+/// The record as the caller may see it: everything with read access, else only id and version.
+fn view(r: &Record, can_read: bool) -> Value {
+    if can_read {
+        record_json(r)
+    } else {
+        json!({"id": r.id, "version": r.version})
+    }
+}
+
 fn record_response(status: StatusCode, r: &Record, rid: &str, can_read: bool) -> Response {
     let data = if can_read {
         record_json(r)
@@ -627,6 +636,7 @@ async fn batch<S: Store + Send + Sync + 'static>(
             }
             ops.push((entity.to_string(), op));
         }
+        let entities: Vec<String> = ops.iter().map(|(e, _)| e.clone()).collect();
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
         let (store, manifest, rid2) = (st.store.clone(), st.manifest.clone(), rid.clone());
@@ -644,7 +654,11 @@ async fn batch<S: Store + Send + Sync + 'static>(
         .map_err(failure_problem)?;
         let data: Vec<Value> = records
             .iter()
-            .map(|r| r.as_ref().map_or(Value::Null, record_json))
+            .zip(&entities)
+            .map(|(r, e)| {
+                let readable = st.policy.can_read(&who.roles, e);
+                r.as_ref().map_or(Value::Null, |r| view(r, readable))
+            })
             .collect();
         let body = json!({"data": data, "meta": {"request_id": rid, "count": data.len()}});
         Ok((StatusCode::OK, Json(body)).into_response())
@@ -692,6 +706,9 @@ async fn run_action<S: Store + Send + Sync + 'static>(
         };
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
+        let readable = st.manifest.value["actions"][name.as_str()]["entity"]
+            .as_str()
+            .is_some_and(|e| st.policy.can_read(&who.roles, e));
         let (store, manifest, rid2) = (st.store.clone(), st.manifest.clone(), rid.clone());
         let done = tokio::task::spawn_blocking(move || {
             let env = writes::Env {
@@ -714,7 +731,7 @@ async fn run_action<S: Store + Send + Sync + 'static>(
         })
         .await
         .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
-        let body = json!({"data": record_json(&done.record), "meta": {
+        let body = json!({"data": view(&done.record, readable), "meta": {
             "request_id": rid, "version": done.record.version,
             "created": done.created, "emitted": done.emitted}});
         Ok((StatusCode::OK, Json(body)).into_response())
@@ -754,8 +771,7 @@ async fn period_verb<S: Store + Send + Sync + 'static>(
         })
         .await
         .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
-        let body =
-            json!({"data": record_json(&rec), "meta": {"request_id": rid, "version": rec.version}});
+        let body = json!({"data": view(&rec, st.policy.can_read(&who.roles, periods::PERIOD)), "meta": {"request_id": rid, "version": rec.version}});
         Ok((StatusCode::OK, Json(body)).into_response())
     };
     finish(&rid, run.await)
@@ -800,8 +816,7 @@ async fn changeset_verb<S: Store + Send + Sync + 'static>(
         })
         .await
         .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
-        let body =
-            json!({"data": record_json(&rec), "meta": {"request_id": rid, "version": rec.version}});
+        let body = json!({"data": view(&rec, st.policy.can_read(&who.roles, changesets::CHANGESET)), "meta": {"request_id": rid, "version": rec.version}});
         Ok((StatusCode::OK, Json(body)).into_response())
     };
     finish(&rid, run.await)
