@@ -26,6 +26,8 @@ mod pin_login;
 mod problem;
 mod reports;
 mod slots;
+mod staff;
+mod staff_routes;
 mod writes;
 
 pub use files::{BlobStore, MemoryBlobs};
@@ -50,7 +52,13 @@ use std::{collections::HashMap, sync::Arc};
 pub use ce_provider::{Provider, ProviderError, ProviderRequest, ProviderResponse};
 pub use events::{relay_once, Deliver, Delivery, Relay, Report as RelayReport};
 pub use login::{Identity, Issuing, Login, LoginError};
-pub use pin_login::{hash_pin, hash_pin_random, DirectoryError, PinLogin, PinPolicy};
+pub use pin_login::{
+    hash_pin, hash_pin_random, parse_staff_file, weak_pin, DirectoryError, PinLogin, PinPolicy,
+};
+pub use staff::{
+    AdminError, DirectoryFailure, MemoryDirectory, StaffAdmin, StaffDirectory, StaffInfo,
+    StaffRecord,
+};
 
 const MAX_BODY: usize = 1024 * 1024;
 
@@ -64,6 +72,7 @@ pub struct AppState<S> {
     pub now: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// Where file bytes live; without one the file endpoints answer 503.
     pub blobs: Option<Arc<dyn BlobStore>>,
+    pub staff_admin_role: String,
     /// Turns the workspace name in a public URL into a tenant id; without one the public
     /// endpoints answer 404. The host's directory decides, never the caller.
     pub public_tenants: Option<PublicTenants>,
@@ -88,6 +97,7 @@ impl<S> Clone for AppState<S> {
             installation: self.installation.clone(),
             now: self.now.clone(),
             blobs: self.blobs.clone(),
+            staff_admin_role: self.staff_admin_role.clone(),
             public_tenants: self.public_tenants.clone(),
             relay: self.relay.clone(),
             issuing: self.issuing.clone(),
@@ -111,6 +121,7 @@ impl<S> AppState<S> {
                     .unwrap_or(0)
             }),
             blobs: None,
+            staff_admin_role: "admin".to_string(),
             public_tenants: None,
             relay: None,
             issuing: None,
@@ -150,6 +161,12 @@ impl<S> AppState<S> {
             ttl_secs,
         }));
         Ok(self)
+    }
+
+    /// The role that may administer staff (`/_staff`); `admin` unless set.
+    pub fn with_staff_admin_role(mut self, role: &str) -> Self {
+        self.staff_admin_role = role.to_string();
+        self
     }
 
     /// Lets public projections resolve workspace names to tenants.
@@ -206,6 +223,25 @@ where
         .route(
             "/v1/{inst}/_ai/entry",
             post(ai_entry::<S>).layer(DefaultBodyLimit::max(ai::MAX_BODY)),
+        )
+        .route(
+            "/v1/{inst}/_auth/pin",
+            post(staff_routes::change_pin::<S>).layer(DefaultBodyLimit::max(LOGIN_BYTES)),
+        )
+        .route(
+            "/v1/{inst}/_staff",
+            get(staff_routes::staff_list::<S>)
+                .post(staff_routes::staff_create::<S>)
+                .layer(DefaultBodyLimit::max(LOGIN_BYTES)),
+        )
+        .route(
+            "/v1/{inst}/_staff/{username}",
+            axum::routing::patch(staff_routes::staff_update::<S>)
+                .layer(DefaultBodyLimit::max(LOGIN_BYTES)),
+        )
+        .route(
+            "/v1/{inst}/_staff/{username}/reset_pin",
+            post(staff_routes::staff_reset_pin::<S>).layer(DefaultBodyLimit::max(LOGIN_BYTES)),
         )
         .route("/v1/{inst}/_slots", get(free_slots::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
@@ -2046,7 +2082,13 @@ async fn issue_token<S: Store + Send + Sync + 'static>(
                 return Err(p);
             }
         };
-        let roles = login::known_roles(&st.manifest, &who.roles);
+        // A forced PIN change gets a token with one role no template defines, good only for
+        // `POST .../_auth/pin`.
+        let roles = if who.must_rotate {
+            vec!["_rotate_pin".to_string()]
+        } else {
+            login::known_roles(&st.manifest, &who.roles)
+        };
         if roles.is_empty() {
             // Signed in but holding nothing this template defines: same answer as a bad login.
             return Err(Problem::new(
@@ -2060,7 +2102,7 @@ async fn issue_token<S: Store + Send + Sync + 'static>(
             .verifier
             .sign_token(&who.sub, &issuing.tenant, &roles, now, issuing.ttl_secs)
             .map_err(|_| store_problem(StoreError::Backend("cannot sign".into())))?;
-        let body = json!({"data": {"token": token, "expires_at": now + issuing.ttl_secs, "roles": roles, "sub": who.sub},
+        let body = json!({"data": {"token": token, "expires_at": now + issuing.ttl_secs, "roles": roles, "sub": who.sub, "must_rotate": who.must_rotate},
             "meta": {"request_id": rid}});
         Ok((StatusCode::OK, Json(body)).into_response())
     };

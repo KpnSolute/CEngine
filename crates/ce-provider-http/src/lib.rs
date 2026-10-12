@@ -94,6 +94,10 @@ impl Provider for HttpProvider {
             .send_json(body);
         match sent {
             Ok(resp) => {
+                // Redirects are off, so a 3xx arrives here; only 200 is a provider answer.
+                if resp.status() != 200 {
+                    return Err(fixed());
+                }
                 let mut buf = Vec::new();
                 resp.into_reader()
                     .take(MAX_REPLY + 1)

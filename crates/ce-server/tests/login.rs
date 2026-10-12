@@ -30,6 +30,7 @@ impl Login for Pins {
         let ok = |sub: &str, roles: &[&str]| Identity {
             sub: sub.into(),
             roles: roles.iter().map(|r| r.to_string()).collect(),
+            must_rotate: false,
         };
         match (
             c.get("user").and_then(Value::as_str),

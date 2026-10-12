@@ -9,10 +9,19 @@
 //! (a correct PIN does not unlock it early), unknown usernames are counted and cost the same
 //! work as known ones, and a role grants every role below it on the ladder.
 //!
+//! Staff records come from a [`StaffDirectory`]: the file (read-only) or a database table the host
+//! supplies, in which case the same type also answers the staff-administration calls
+//! ([`StaffAdmin`]): change one's own PIN, create staff, change roles, switch accounts off, reset
+//! a PIN (which forces the person to pick their own).
+//!
 //! Lockout state lives in this process. One instance is exact; several instances each keep
 //! their own count, so run one until the counter moves into the database.
 
 use crate::login::{Identity, Login, LoginError};
+use crate::staff::{
+    AdminError, DirectoryFailure, MemoryDirectory, StaffAdmin, StaffDirectory, StaffInfo,
+    StaffRecord,
+};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,12 +41,6 @@ const MEMORY_BUDGET: usize = 128 << 20;
 const MAX_TRACKED: usize = 10_000;
 const MAX_USERNAME: usize = 120;
 const MAX_PIN: usize = 64;
-
-#[derive(Debug, Clone)]
-struct StaffEntry {
-    hash: String,
-    roles: Vec<String>,
-}
 
 /// Why a staff list was refused.
 #[derive(Debug, PartialEq, Eq)]
@@ -62,6 +65,8 @@ pub struct PinPolicy {
     pub lockout_secs: u64,
     /// Role names from lowest to highest; a role also grants all the ones before it.
     pub ladder: Vec<String>,
+    /// Shortest PIN a person or an admin may set (the legacy sign-in used 6).
+    pub min_pin_len: usize,
 }
 
 impl Default for PinPolicy {
@@ -73,6 +78,7 @@ impl Default for PinPolicy {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            min_pin_len: 6,
         }
     }
 }
@@ -84,14 +90,14 @@ struct Track {
 }
 
 pub struct PinLogin {
-    staff: HashMap<String, StaffEntry>,
+    dir: Arc<dyn StaffDirectory>,
     policy: PinPolicy,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
     tracks: Mutex<HashMap<String, Track>>,
     /// Scrypt memory in use now, in bytes.
     in_use: AtomicUsize,
-    /// What an unknown username is checked against: the dearest hash in the list, so both cases
-    /// cost the same.
+    /// What an unknown username is checked against: the dearest hash in the list (or a built-in one
+    /// for a database directory), so both cases cost the same.
     dummy: Parsed,
 }
 
@@ -191,64 +197,41 @@ impl PinLogin {
         policy: PinPolicy,
         now: Arc<dyn Fn() -> u64 + Send + Sync>,
     ) -> Result<Self, DirectoryError> {
-        let v: Value = serde_json::from_str(text).map_err(|_| DirectoryError::NotJson)?;
-        let users = v["users"]
-            .as_array()
-            .ok_or_else(|| DirectoryError::Shape("`users` must be a list".into()))?;
-        let mut staff = HashMap::new();
-        let mut dearest: Option<Parsed> = None;
-        for (i, u) in users.iter().enumerate() {
-            let name = u["username"]
-                .as_str()
-                .map(key_of)
-                .filter(|n| !n.is_empty() && n.len() <= MAX_USERNAME)
-                .ok_or_else(|| DirectoryError::Shape(format!("users[{i}].username is missing")))?;
-            let hash = u["pin_hash"].as_str().ok_or_else(|| {
-                DirectoryError::Shape(format!("users[{i}].pin_hash is not a kpn-scrypt hash"))
-            })?;
-            let parsed = parse_hash(hash).ok_or_else(|| {
-                DirectoryError::Shape(format!("users[{i}].pin_hash is not a kpn-scrypt hash"))
-            })?;
-            if dearest.as_ref().is_none_or(|d| parsed.memory > d.memory) {
-                dearest = Some(parsed);
-            }
-            let roles: Vec<String> = u["roles"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|r| r.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if roles.is_empty() || roles.iter().any(|r| !policy.ladder.contains(r)) {
-                return Err(DirectoryError::Shape(format!(
-                    "users[{i}].roles must be on the role ladder"
-                )));
-            }
-            if staff
-                .insert(
-                    name,
-                    StaffEntry {
-                        hash: hash.to_string(),
-                        roles,
-                    },
-                )
-                .is_some()
-            {
-                return Err(DirectoryError::Shape(format!(
-                    "users[{i}].username repeats an earlier one"
-                )));
-            }
-        }
-        Ok(PinLogin {
-            staff,
+        let records = parse_staff_file(text, &policy)?;
+        let dummy = records
+            .iter()
+            .filter_map(|r| parse_hash(&r.hash))
+            .max_by_key(|p| p.memory)
+            .unwrap_or_else(|| parse_hash(DUMMY).expect("the built-in dummy hash parses"));
+        let dir = MemoryDirectory::read_only(records);
+        Ok(Self::build(Arc::new(dir), policy, now, dummy))
+    }
+
+    /// A login over any directory (a database table, for instance). Unknown usernames are checked
+    /// against a built-in hash with the legacy cost.
+    pub fn with_directory(
+        dir: Arc<dyn StaffDirectory>,
+        policy: PinPolicy,
+        now: Arc<dyn Fn() -> u64 + Send + Sync>,
+    ) -> Self {
+        let dummy = parse_hash(DUMMY).expect("the built-in dummy hash parses");
+        Self::build(dir, policy, now, dummy)
+    }
+
+    fn build(
+        dir: Arc<dyn StaffDirectory>,
+        policy: PinPolicy,
+        now: Arc<dyn Fn() -> u64 + Send + Sync>,
+        dummy: Parsed,
+    ) -> Self {
+        PinLogin {
+            dir,
             policy,
             now,
             tracks: Mutex::new(HashMap::new()),
             in_use: AtomicUsize::new(0),
-            dummy: dearest
-                .unwrap_or_else(|| parse_hash(DUMMY).expect("the built-in dummy hash parses")),
-        })
+            dummy,
+        }
     }
 
     /// Roles for a user: each role they hold plus every lower one, lowest first.
@@ -309,6 +292,42 @@ impl PinLogin {
 /// A made-up hash, checked when the username is unknown so that both cases cost the same.
 const DUMMY: &str = "kpn-scrypt$1$16384$8$1$0011223344556677$0000000000000000000000000000000000000000000000000000000000000000";
 
+impl PinLogin {
+    /// Counts the attempt, checks the PIN against the account (or the dummy hash) and records the
+    /// result. Returns the record only for an active account with the right PIN.
+    fn check(&self, key: &str, pin: &str) -> Result<StaffRecord, LoginError> {
+        self.begin(key)?;
+        let entry = self
+            .dir
+            .get(key)
+            .map_err(|_| LoginError::Unavailable)?
+            .filter(|r| r.active);
+        let known = entry.as_ref().and_then(|e| parse_hash(&e.hash));
+        let target = known.as_ref().unwrap_or(&self.dummy);
+        if self.in_use.fetch_add(target.memory, Ordering::SeqCst) + target.memory > MEMORY_BUDGET {
+            self.in_use.fetch_sub(target.memory, Ordering::SeqCst);
+            // Not the caller's wrong guess: give the attempt back.
+            let mut tracks = self.tracks.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = tracks.get_mut(key) {
+                t.fails = t.fails.saturating_sub(1);
+            }
+            return Err(LoginError::Throttled);
+        }
+        let ok = verify(pin, target);
+        self.in_use.fetch_sub(target.memory, Ordering::SeqCst);
+        match entry {
+            Some(e) if ok && known.is_some() => {
+                self.pass(key);
+                Ok(e)
+            }
+            _ => {
+                self.fail(key);
+                Err(LoginError::Denied)
+            }
+        }
+    }
+}
+
 impl Login for PinLogin {
     fn login(&self, c: &Map<String, Value>) -> Result<Identity, LoginError> {
         let name = c.get("username").and_then(Value::as_str).unwrap_or("");
@@ -317,39 +336,289 @@ impl Login for PinLogin {
             return Err(LoginError::Denied);
         }
         let key = key_of(name);
-        self.begin(&key)?;
-        let entry = self.staff.get(&key);
-        let parsed;
-        let target = match entry {
-            Some(e) => {
-                parsed = parse_hash(&e.hash).expect("checked when the list was read");
-                &parsed
-            }
-            None => &self.dummy,
-        };
-        if self.in_use.fetch_add(target.memory, Ordering::SeqCst) + target.memory > MEMORY_BUDGET {
-            self.in_use.fetch_sub(target.memory, Ordering::SeqCst);
-            // Not the caller's wrong guess: give the attempt back.
-            let mut tracks = self.tracks.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(t) = tracks.get_mut(&key) {
-                t.fails = t.fails.saturating_sub(1);
-            }
-            return Err(LoginError::Throttled);
+        let e = self.check(&key, pin)?;
+        Ok(Identity {
+            sub: key,
+            roles: self.expand(&e.roles),
+            must_rotate: e.must_rotate,
+        })
+    }
+
+    fn admin(&self) -> Option<&dyn StaffAdmin> {
+        Some(self)
+    }
+}
+
+/// Reads a staff file into records (see [`PinLogin::from_json`] for the shape and the checks).
+pub fn parse_staff_file(
+    text: &str,
+    policy: &PinPolicy,
+) -> Result<Vec<StaffRecord>, DirectoryError> {
+    let v: Value = serde_json::from_str(text).map_err(|_| DirectoryError::NotJson)?;
+    let users = v["users"]
+        .as_array()
+        .ok_or_else(|| DirectoryError::Shape("`users` must be a list".into()))?;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (i, u) in users.iter().enumerate() {
+        let name = u["username"]
+            .as_str()
+            .map(key_of)
+            .filter(|n| !n.is_empty() && n.len() <= MAX_USERNAME)
+            .ok_or_else(|| DirectoryError::Shape(format!("users[{i}].username is missing")))?;
+        let hash = u["pin_hash"]
+            .as_str()
+            .filter(|h| parse_hash(h).is_some())
+            .ok_or_else(|| {
+                DirectoryError::Shape(format!("users[{i}].pin_hash is not a kpn-scrypt hash"))
+            })?;
+        let roles: Vec<String> = u["roles"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|r| r.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if roles.is_empty() || roles.iter().any(|r| !policy.ladder.contains(r)) {
+            return Err(DirectoryError::Shape(format!(
+                "users[{i}].roles must be on the role ladder"
+            )));
         }
-        let ok = verify(pin, target);
-        self.in_use.fetch_sub(target.memory, Ordering::SeqCst);
-        match (ok && entry.is_some(), entry) {
-            (true, Some(e)) => {
-                self.pass(&key);
-                Ok(Identity {
-                    sub: key,
-                    roles: self.expand(&e.roles),
-                })
-            }
-            _ => {
-                self.fail(&key);
-                Err(LoginError::Denied)
+        if !seen.insert(name.clone()) {
+            return Err(DirectoryError::Shape(format!(
+                "users[{i}].username repeats an earlier one"
+            )));
+        }
+        out.push(StaffRecord {
+            username: name,
+            hash: hash.to_string(),
+            roles,
+            active: u["active"].as_bool().unwrap_or(true),
+            must_rotate: u["must_rotate"].as_bool().unwrap_or(false),
+            pin_updated_at: 0,
+        });
+    }
+    Ok(out)
+}
+
+/// A PIN that is too short, a single repeated digit, a straight run or one of the common choices.
+/// Same list as the legacy backend's `weak_staff_pin`.
+pub fn weak_pin(pin: &str, min_len: usize) -> bool {
+    if pin.chars().count() < min_len {
+        return true;
+    }
+    const COMMON: [&str; 10] = [
+        "0000", "1111", "1234", "2222", "4321", "9999", "000000", "111111", "123456", "654321",
+    ];
+    if COMMON.contains(&pin) {
+        return true;
+    }
+    let first = pin.chars().next();
+    if pin.chars().all(|c| Some(c) == first) {
+        return true;
+    }
+    "01234567890123456789".contains(pin) || "98765432109876543210".contains(pin)
+}
+
+fn info(r: &StaffRecord) -> StaffInfo {
+    StaffInfo {
+        username: r.username.clone(),
+        roles: r.roles.clone(),
+        active: r.active,
+        must_rotate: r.must_rotate,
+        pin_updated_at: r.pin_updated_at,
+    }
+}
+
+fn fail_of(f: DirectoryFailure) -> AdminError {
+    match f {
+        DirectoryFailure::Missing => AdminError::Missing,
+        DirectoryFailure::Exists => AdminError::Exists,
+        DirectoryFailure::ReadOnly => AdminError::ReadOnly,
+        DirectoryFailure::Backend => AdminError::Unavailable,
+    }
+}
+
+impl PinLogin {
+    fn rank(&self, roles: &[String]) -> Option<usize> {
+        roles
+            .iter()
+            .filter_map(|r| self.policy.ladder.iter().position(|l| l == r))
+            .max()
+    }
+
+    /// The roles to store: each must be on the ladder and no higher than the actor's top role.
+    fn grantable(
+        &self,
+        actor_roles: &[String],
+        roles: &[String],
+    ) -> Result<Vec<String>, AdminError> {
+        if roles.is_empty() || roles.iter().any(|r| !self.policy.ladder.contains(r)) {
+            return Err(AdminError::Invalid(
+                "roles must be on the role ladder".into(),
+            ));
+        }
+        let ceiling = self.rank(actor_roles);
+        let want = self.rank(roles);
+        if want.is_none() || want > ceiling {
+            return Err(AdminError::Forbidden(
+                "you cannot grant a role above your own".into(),
+            ));
+        }
+        let mut out: Vec<String> = Vec::new();
+        for r in roles {
+            if !out.contains(r) {
+                out.push(r.clone());
             }
         }
+        Ok(out)
+    }
+
+    fn pin_ok(&self, pin: &str) -> Result<String, AdminError> {
+        if pin.len() > MAX_PIN {
+            return Err(AdminError::Invalid(format!(
+                "a PIN is at most {MAX_PIN} characters"
+            )));
+        }
+        if weak_pin(pin, self.policy.min_pin_len) {
+            return Err(AdminError::Invalid(format!(
+                "choose a PIN of at least {} characters that is not a repeat, a run or a common choice",
+                self.policy.min_pin_len
+            )));
+        }
+        hash_pin_random(pin).ok_or(AdminError::Unavailable)
+    }
+
+    /// The target's record, if the actor outranks or equals it (nobody edits someone above them).
+    fn manageable(&self, actor_roles: &[String], key: &str) -> Result<StaffRecord, AdminError> {
+        let r = self
+            .dir
+            .get(key)
+            .map_err(fail_of)?
+            .ok_or(AdminError::Missing)?;
+        if self.rank(&r.roles) > self.rank(actor_roles) {
+            return Err(AdminError::Forbidden(
+                "that account has a role above yours".into(),
+            ));
+        }
+        Ok(r)
+    }
+
+    fn refreshed(&self, key: &str) -> Result<StaffInfo, AdminError> {
+        self.dir
+            .get(key)
+            .map_err(fail_of)?
+            .map(|r| info(&r))
+            .ok_or(AdminError::Missing)
+    }
+}
+
+impl StaffAdmin for PinLogin {
+    fn change_pin(&self, username: &str, current: &str, new: &str) -> Result<(), AdminError> {
+        let key = key_of(username);
+        if current.is_empty() || current.len() > MAX_PIN {
+            return Err(AdminError::WrongPin);
+        }
+        // The current PIN goes through the same counting and lockout as a sign-in.
+        self.check(&key, current).map_err(|e| match e {
+            LoginError::Denied => AdminError::WrongPin,
+            LoginError::Throttled => AdminError::Throttled,
+            LoginError::Unavailable => AdminError::Unavailable,
+        })?;
+        if new == current {
+            return Err(AdminError::Invalid(
+                "the new PIN must differ from the current one".into(),
+            ));
+        }
+        let hash = self.pin_ok(new)?;
+        self.dir
+            .set_pin(&key, &hash, false, (self.now)(), &key)
+            .map_err(fail_of)
+    }
+
+    fn list(&self) -> Result<Vec<StaffInfo>, AdminError> {
+        Ok(self.dir.list().map_err(fail_of)?.iter().map(info).collect())
+    }
+
+    fn create(
+        &self,
+        actor: &str,
+        actor_roles: &[String],
+        username: &str,
+        roles: &[String],
+        pin: &str,
+    ) -> Result<StaffInfo, AdminError> {
+        let key = key_of(username);
+        if key.is_empty()
+            || key.len() > MAX_USERNAME
+            || key.chars().any(|c| c.is_control() || c.is_whitespace())
+        {
+            return Err(AdminError::Invalid(
+                "a username is 1 to 120 characters without spaces".into(),
+            ));
+        }
+        let roles = self.grantable(actor_roles, roles)?;
+        let hash = self.pin_ok(pin)?;
+        self.dir
+            .create(
+                StaffRecord {
+                    username: key.clone(),
+                    hash,
+                    roles,
+                    active: true,
+                    must_rotate: true,
+                    pin_updated_at: (self.now)(),
+                },
+                actor,
+            )
+            .map_err(fail_of)?;
+        self.refreshed(&key)
+    }
+
+    fn update(
+        &self,
+        actor: &str,
+        actor_roles: &[String],
+        username: &str,
+        roles: Option<&[String]>,
+        active: Option<bool>,
+    ) -> Result<StaffInfo, AdminError> {
+        let key = key_of(username);
+        self.manageable(actor_roles, &key)?;
+        if key == key_of(actor) {
+            return Err(AdminError::Forbidden(
+                "you cannot change your own roles or switch yourself off".into(),
+            ));
+        }
+        if roles.is_none() && active.is_none() {
+            return Err(AdminError::Invalid("send roles or active".into()));
+        }
+        let roles = roles.map(|r| self.grantable(actor_roles, r)).transpose()?;
+        if let Some(r) = roles {
+            self.dir.set_roles(&key, &r, actor).map_err(fail_of)?;
+        }
+        if let Some(a) = active {
+            self.dir.set_active(&key, a, actor).map_err(fail_of)?;
+        }
+        self.refreshed(&key)
+    }
+
+    fn reset_pin(
+        &self,
+        actor: &str,
+        actor_roles: &[String],
+        username: &str,
+        pin: &str,
+    ) -> Result<StaffInfo, AdminError> {
+        let key = key_of(username);
+        self.manageable(actor_roles, &key)?;
+        let hash = self.pin_ok(pin)?;
+        self.dir
+            .set_pin(&key, &hash, true, (self.now)(), actor)
+            .map_err(fail_of)?;
+        // A reset also clears the lock, so the person can sign in with the temporary PIN.
+        self.pass(&key);
+        self.refreshed(&key)
     }
 }

@@ -18,9 +18,11 @@
 
 mod blobs;
 mod pool;
+mod staff;
 mod tls;
 mod typed;
 pub use blobs::PgBlobs;
+pub use staff::{PgStaff, StaffError, StaffRow};
 pub use tls::{connect, Tls};
 pub use typed::{PoolConfig, TypedPgStore};
 

@@ -12,6 +12,9 @@ use serde_json::{Map, Value};
 pub struct Identity {
     pub sub: String,
     pub roles: Vec<String>,
+    /// The person must set a new PIN before doing anything else: the token carries no roles, only
+    /// the right to call `POST .../_auth/pin`.
+    pub must_rotate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +31,11 @@ pub enum LoginError {
 /// belong here: the server cannot tell a PIN guess from a first try.
 pub trait Login: Send + Sync {
     fn login(&self, credentials: &Map<String, Value>) -> Result<Identity, LoginError>;
+
+    /// The staff-administration calls, when this login keeps staff records it can change.
+    fn admin(&self) -> Option<&dyn crate::staff::StaffAdmin> {
+        None
+    }
 }
 
 /// The login a server was given, the tenant it issues for and how long tokens last.
