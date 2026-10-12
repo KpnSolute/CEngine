@@ -21,6 +21,7 @@ mod files;
 mod openapi;
 mod periods;
 mod problem;
+mod reports;
 mod slots;
 mod writes;
 
@@ -155,6 +156,7 @@ where
         )
         .route("/v1/{inst}/_batch", post(batch::<S>))
         .route("/v1/{inst}/_barcode", get(barcode::<S>))
+        .route("/v1/{inst}/_report/{name}", get(report::<S>))
         .route("/v1/{inst}/_slots", get(free_slots::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
@@ -1757,6 +1759,108 @@ async fn barcode<S: Store + Send + Sync + 'static>(
             header::CONTENT_TYPE,
             HeaderValue::from_static("image/svg+xml"),
         );
+        Ok(res)
+    };
+    finish(&rid, run.await)
+}
+
+/// `GET .../_report/{name}[?format=json|csv|html&<param>=<value>]`: a declared report. Needs read
+/// access to the report's entity. At most 1,000 groups come back; beyond that the answer says so
+/// (`meta.truncated`, or the `X-CE-Truncated` header for CSV and HTML).
+async fn report<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authenticate(&st, &headers)?;
+        if inst != st.installation || !reports::exists(&st.manifest, &name) {
+            return Err(Problem::not_found());
+        }
+        let ent = reports::entity(&st.manifest, &name);
+        st.policy
+            .authorize(&who, Access::Read, &ent)
+            .map_err(|_| Problem::forbidden())?;
+        let format = q.get("format").map_or("json", String::as_str);
+        if !matches!(format, "json" | "csv" | "html") {
+            return Err(Problem::validation(
+                "format: one of json, csv, html",
+                vec![
+                    json!({"path": "/format", "code": "invalid", "detail": "one of json, csv, html"}),
+                ],
+            ));
+        }
+        let req = reports::request(&st.manifest, &name, &q)?;
+        let scope = who.scope().clone();
+        let mut rows = blocking(&st, move |s| s.aggregate(&scope, &ent, &req))
+            .await
+            .map_err(|p| {
+                if p.status == StatusCode::NOT_IMPLEMENTED
+                    || p.status == StatusCode::SERVICE_UNAVAILABLE
+                {
+                    reports::unsupported()
+                } else {
+                    p
+                }
+            })?;
+        let truncated = rows.len() > ce_store::MAX_GROUPS;
+        rows.truncate(ce_store::MAX_GROUPS);
+        let cols = reports::columns(&st.manifest, &name);
+        let title = reports::title(&st.manifest, &name);
+        let cells = reports::rows_as_cells(&cols, &rows);
+        let mut res = match format {
+            "csv" => {
+                let header: Vec<String> = cols.iter().map(|c| c.0.clone()).collect();
+                let textual: Vec<bool> = cols.iter().map(|c| c.1).collect();
+                let mut r =
+                    (StatusCode::OK, ce_io::table_csv(&header, &textual, &cells)).into_response();
+                r.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/csv; charset=utf-8"),
+                );
+                if let Ok(v) =
+                    HeaderValue::from_str(&format!("attachment; filename=\"{name}.csv\""))
+                {
+                    r.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+                }
+                r
+            }
+            "html" => {
+                let generated = ce_events::rfc3339((st.now)());
+                let mut r = (
+                    StatusCode::OK,
+                    reports::html(&title, &generated, &cols, &cells, truncated),
+                )
+                    .into_response();
+                let h = r.headers_mut();
+                h.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=utf-8"),
+                );
+                h.insert(
+                    header::CONTENT_SECURITY_POLICY,
+                    HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'"),
+                );
+                h.insert(
+                    header::X_CONTENT_TYPE_OPTIONS,
+                    HeaderValue::from_static("nosniff"),
+                );
+                r
+            }
+            _ => {
+                let body = json!({
+                    "data": {"title": title, "columns": cols.iter().map(|c| c.0.clone()).collect::<Vec<_>>(), "rows": rows},
+                    "meta": {"request_id": rid, "count": rows.len(), "truncated": truncated}
+                });
+                (StatusCode::OK, Json(body)).into_response()
+            }
+        };
+        if truncated && format != "json" {
+            res.headers_mut()
+                .insert("x-ce-truncated", HeaderValue::from_static("true"));
+        }
         Ok(res)
     };
     finish(&rid, run.await)

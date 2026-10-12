@@ -532,3 +532,77 @@ fn only_text_fields_can_be_searchable() {
         "{issues:?}"
     );
 }
+
+fn measure(func: AggFn, field: Option<&str>, name: &str) -> Measure {
+    Measure {
+        func,
+        field: field.map(String::from),
+        name: name.into(),
+    }
+}
+
+#[test]
+fn an_aggregate_is_tenant_scoped_grouped_and_typed() {
+    let m = manifest("inventory");
+    let req = AggRequest {
+        group_by: vec!["category".into()],
+        measures: vec![
+            measure(AggFn::Count, None, "n"),
+            measure(AggFn::Sum, Some("unit_cost"), "cost"),
+        ],
+        filter: Some(json!({"field": "category", "op": "eq", "value": "dry"})),
+    };
+    let p = plan_aggregate(&m, &target("item"), &scope(), &req).unwrap();
+    assert!(
+        p.sql.contains("\"tenant_id\" = $1::text::uuid"),
+        "{}",
+        p.sql
+    );
+    assert!(p.sql.contains("\"deleted_at\" IS NULL"), "{}", p.sql);
+    assert!(p.sql.contains("GROUP BY \"category\""), "{}", p.sql);
+    assert!(
+        p.sql.contains("ORDER BY \"category\" ASC NULLS LAST"),
+        "{}",
+        p.sql
+    );
+    assert!(p.sql.contains("LIMIT 1001"), "{}", p.sql);
+    assert_eq!(
+        p.columns,
+        vec![
+            ("category".to_string(), ColKind::Json),
+            ("n".to_string(), ColKind::Int),
+            ("cost".to_string(), ColKind::Dec)
+        ]
+    );
+    // The filter value is a bound parameter, not text in the statement.
+    assert!(!p.sql.contains("'dry'"));
+    assert_eq!(p.params.len(), 2);
+}
+
+#[test]
+fn an_aggregate_refuses_what_it_cannot_compute() {
+    let m = manifest("inventory");
+    let run = |group: &[&str], ms: Vec<Measure>| {
+        plan_aggregate(
+            &m,
+            &target("item"),
+            &scope(),
+            &AggRequest {
+                group_by: group.iter().map(|s| s.to_string()).collect(),
+                measures: ms,
+                filter: None,
+            },
+        )
+    };
+    // Sum over text, unknown field, a missing field, a clashing or odd name, no measures.
+    assert!(run(&[], vec![measure(AggFn::Sum, Some("name"), "x")]).is_err());
+    assert!(run(&[], vec![measure(AggFn::Sum, Some("nope"), "x")]).is_err());
+    assert!(run(&[], vec![measure(AggFn::Sum, None, "x")]).is_err());
+    assert!(run(&["category"], vec![measure(AggFn::Count, None, "category")]).is_err());
+    assert!(run(&[], vec![measure(AggFn::Count, None, "bad name; drop")]).is_err());
+    assert!(run(&[], vec![]).is_err());
+    assert!(run(&["id"], vec![measure(AggFn::Count, None, "n")]).is_err());
+    // Without groups there is one row, so no GROUP BY.
+    let p = run(&[], vec![measure(AggFn::Count, None, "n")]).unwrap();
+    assert!(!p.sql.contains("GROUP BY"), "{}", p.sql);
+}

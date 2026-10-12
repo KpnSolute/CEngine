@@ -18,7 +18,9 @@ pub mod contract;
 mod memory;
 
 pub use ce_auth::TenantScope;
-pub use ce_query::{ListRequest, QueryError, SortDir, SortKey};
+pub use ce_query::{
+    AggFn, AggRequest, ColKind, ListRequest, Measure, QueryError, SortDir, SortKey, MAX_GROUPS,
+};
 pub use memory::MemoryStore;
 use serde_json::{Map, Value};
 
@@ -69,6 +71,19 @@ pub trait Store {
         _entity: &str,
         _req: &ListRequest,
     ) -> Result<Page, StoreError> {
+        Err(StoreError::Unsupported)
+    }
+
+    /// Groups one tenant's live records of `entity` and computes the measures over each group.
+    /// One JSON object per group (group fields, then measures), ordered by the group fields;
+    /// at most [`MAX_GROUPS`] + 1 rows (the caller reports the cap). Stores that cannot
+    /// aggregate return `Unsupported`.
+    fn aggregate(
+        &self,
+        _scope: &TenantScope,
+        _entity: &str,
+        _req: &AggRequest,
+    ) -> Result<Vec<Map<String, Value>>, StoreError> {
         Err(StoreError::Unsupported)
     }
 

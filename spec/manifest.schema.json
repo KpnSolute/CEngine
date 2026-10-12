@@ -122,6 +122,29 @@
         "filter": { "type": "string" }
       }
     },
+    "report": {
+      "type": "object",
+      "required": ["entity", "measures"],
+      "additionalProperties": false,
+      "properties": {
+        "entity": { "$ref": "#/$defs/name" },
+        "title": { "type": "string", "maxLength": 120 },
+        "group_by": { "type": "array", "items": { "$ref": "#/$defs/name" }, "maxItems": 4, "uniqueItems": true },
+        "measures": {
+          "type": "array", "minItems": 1, "maxItems": 12,
+          "items": {
+            "type": "object", "required": ["fn", "as"], "additionalProperties": false,
+            "properties": {
+              "fn": { "enum": ["count", "sum", "avg", "min", "max"] },
+              "field": { "$ref": "#/$defs/name" },
+              "as": { "$ref": "#/$defs/name" }
+            }
+          }
+        },
+        "filter": { "type": "string" },
+        "params": { "type": "array", "items": { "$ref": "#/$defs/name" }, "maxItems": 6, "uniqueItems": true }
+      }
+    },
     "runtime": {
       "type": "object",
       "description": "Needs only. Never provider names, hosts or credentials.",
@@ -151,6 +174,7 @@
     "actions": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/action" } },
     "roles": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "type": "object", "additionalProperties": false, "properties": { "read": { "type": "array", "items": { "type": "string" } }, "write": { "type": "array", "items": { "type": "string" } }, "actions": { "type": "array", "items": { "type": "string" } } } } },
     "projections": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/projection" } },
+    "reports": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/report" } },
     "runtime": { "$ref": "#/$defs/runtime" }
   }
 }
