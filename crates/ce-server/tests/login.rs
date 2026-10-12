@@ -165,7 +165,7 @@ async fn throttling_unavailability_and_misuse_have_their_own_answers() {
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
     let big = format!(r#"{{"pin":"{}"}}"#, "9".repeat(5000));
     let (s, _) = login(&app, &big).await;
-    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
     let (s, _) = call(&app, "POST", "/v1/other/_auth/token", None, "{}").await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }

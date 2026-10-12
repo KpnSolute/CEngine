@@ -183,7 +183,10 @@ where
         )
         .route("/v1/{inst}/_batch", post(batch::<S>))
         .route("/v1/{inst}/_barcode", get(barcode::<S>))
-        .route("/v1/{inst}/_auth/token", post(issue_token::<S>))
+        .route(
+            "/v1/{inst}/_auth/token",
+            post(issue_token::<S>).layer(DefaultBodyLimit::max(LOGIN_BYTES)),
+        )
         .route("/v1/{inst}/_report/{name}", get(report::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
@@ -1893,7 +1896,8 @@ async fn report<S: Store + Send + Sync + 'static>(
     finish(&rid, run.await)
 }
 
-/// The most bytes of credentials one login request may carry.
+/// The most bytes of credentials one login request may carry; enforced while the body is read,
+/// because the route is open to callers with no token.
 const LOGIN_BYTES: usize = 4096;
 
 /// `POST .../_auth/token` with the host's credentials as a JSON object: answers a signed token
@@ -1916,15 +1920,17 @@ async fn issue_token<S: Store + Send + Sync + 'static>(
                 "no login is configured",
             ));
         };
-        let body = body.map_err(body_problem)?;
-        if body.len() > LOGIN_BYTES {
-            return Err(Problem::validation(
-                "the credentials are too large",
-                vec![
-                    json!({"path": "", "code": "too_large", "detail": format!("at most {LOGIN_BYTES} bytes")}),
-                ],
-            ));
-        }
+        let body = body.map_err(|e| {
+            if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                Problem::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!("the credentials may be at most {LOGIN_BYTES} bytes"),
+                )
+            } else {
+                body_problem(e)
+            }
+        })?;
         let credentials = parse_object(&body)?;
         let checked = tokio::task::spawn_blocking({
             let issuing = issuing.clone();
