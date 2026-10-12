@@ -23,6 +23,7 @@ mod openapi;
 mod periods;
 mod problem;
 mod reports;
+mod slots;
 mod writes;
 
 pub use files::{BlobStore, MemoryBlobs};
@@ -188,6 +189,7 @@ where
             post(issue_token::<S>).layer(DefaultBodyLimit::max(LOGIN_BYTES)),
         )
         .route("/v1/{inst}/_report/{name}", get(report::<S>))
+        .route("/v1/{inst}/_slots", get(free_slots::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
         .route("/v1/{inst}/{entity}/_export", get(export_csv::<S>))
@@ -1983,6 +1985,107 @@ async fn issue_token<S: Store + Send + Sync + 'static>(
         let body = json!({"data": {"token": token, "expires_at": now + issuing.ttl_secs, "roles": roles, "sub": who.sub},
             "meta": {"request_id": rid}});
         Ok((StatusCode::OK, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
+}
+
+/// The most bookings of one resource read to work out its free slots.
+const SLOT_BOOKINGS: usize = 2000;
+
+/// `GET .../_slots?resource=<id>&from=<time>&to=<time>&duration=<minutes>[&step=<minutes>]`: the
+/// bookable slots of one resource inside its opening hours, avoiding its requested and confirmed
+/// bookings (recurring ones expanded) plus the resource's buffer. Needs read access to `resource`
+/// and `booking`. `step` defaults to `duration`. At most 1,000 slots, in time order.
+async fn free_slots<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        if !slots::enabled(&st.manifest) {
+            authenticate(&st, &headers)?;
+            return Err(Problem::not_found());
+        }
+        let who = guard(&st, &headers, &inst, "booking", Access::Read)?;
+        st.policy
+            .authorize(&who, Access::Read, "resource")
+            .map_err(|_| Problem::forbidden())?;
+        let invalid = |(path, detail): slots::Bad| {
+            Problem::validation(
+                format!("{path}: {detail}"),
+                vec![json!({"path": path, "code": "invalid", "detail": detail})],
+            )
+        };
+        let need = |name: &str| {
+            q.get(name)
+                .ok_or_else(|| invalid((format!("/{name}"), "required".into())))
+        };
+        let minutes =
+            |name: &str, default: Option<i64>| -> Result<ce_calendar::Duration, Problem> {
+                let n = match (q.get(name), default) {
+                    (Some(v), _) => v.parse::<i64>().map_err(|_| {
+                        invalid((format!("/{name}"), "a whole number of minutes".into()))
+                    })?,
+                    (None, Some(d)) => d,
+                    (None, None) => return Err(invalid((format!("/{name}"), "required".into()))),
+                };
+                if !(1..=1440).contains(&n) {
+                    return Err(invalid((format!("/{name}"), "1 to 1440 minutes".into())));
+                }
+                Ok(ce_calendar::Duration::minutes(n))
+            };
+        let id = need("resource")?.clone();
+        let from = slots::instant("/from", need("from")?).map_err(invalid)?;
+        let to = slots::instant("/to", need("to")?).map_err(invalid)?;
+        let window = ce_calendar::Interval::new(from, to)
+            .map_err(|_| invalid(("/to".into(), "must be after from".into())))?;
+        let duration = minutes("duration", None)?;
+        let step = match q.get("step") {
+            Some(_) => minutes("step", None)?,
+            None => duration,
+        };
+        let scope = who.scope().clone();
+        let (resource, bookings) = blocking(&st, move |s| {
+            let resource = s.get(&scope, "resource", &id)?;
+            let filter = json!({"and": [
+                {"field": "resource", "op": "eq", "value": id},
+                {"field": "status", "op": "in", "value": ["requested", "confirmed"]}]});
+            let mut rows = Vec::new();
+            let mut after = None;
+            loop {
+                let req = ListRequest {
+                    filter: Some(filter.clone()),
+                    limit: Some(200),
+                    after: after.clone(),
+                    ..ListRequest::default()
+                };
+                let page = s.list(&scope, "booking", &req)?;
+                rows.extend(page.records.into_iter().map(|r| r.data));
+                if rows.len() > SLOT_BOOKINGS {
+                    return Err(StoreError::BadData(
+                        "the resource has too many open bookings to compute slots",
+                    ));
+                }
+                match page.next {
+                    Some(n) => after = Some(n),
+                    None => break,
+                }
+            }
+            Ok((resource.data, rows))
+        })
+        .await?;
+        let found = slots::free(&resource, &bookings, &window, duration, step).map_err(invalid)?;
+        let data: Vec<Value> = found
+            .iter()
+            .map(|s| json!({"starts_at": s.start.to_rfc3339(), "ends_at": s.end.to_rfc3339()}))
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(json!({"data": data, "meta": {"request_id": rid}})),
+        )
+            .into_response())
     };
     finish(&rid, run.await)
 }
