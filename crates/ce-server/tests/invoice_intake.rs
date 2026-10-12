@@ -321,6 +321,25 @@ async fn an_invoice_is_staged_merged_once_and_settles_its_prices() {
     let (s, _) = clerk.verb(&cs, "merge").await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 
+    // A reviewer can see what the merge would store, reconciliation included, before deciding.
+    let (s, _) = clerk.verb(&cs, "preview").await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, v) = rev.verb(&cs, "preview").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["mergeable"], true, "{v}");
+    assert!(v["data"]["failure"].is_null());
+    let results = v["data"]["results"].as_array().unwrap();
+    let inv_op = results
+        .iter()
+        .find(|r| r["entity"] == "supplier_invoice")
+        .expect("the invoice is in the preview");
+    assert_eq!(inv_op["record"]["data"]["goods_total"], "270.50");
+    assert_eq!(inv_op["record"]["data"]["delta"], "0.00");
+    assert_eq!(inv_op["record"]["data"]["reconciled"], true);
+    // ...and previewing kept nothing: no records, and the changeset is still open.
+    assert!(rev.list("supplier_invoice").await.is_empty());
+    assert!(rev.list("stock_movement").await.is_empty());
+
     // The manager merges: the invoice, its lines, the stock and the observation land together.
     let (s, v) = rev.verb(&cs, "merge").await;
     assert_eq!(s, StatusCode::OK, "{v}");
@@ -381,6 +400,11 @@ async fn an_invoice_is_staged_merged_once_and_settles_its_prices() {
         )
         .await;
     assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    // The preview says so before anyone merges: it names the operation that fails.
+    let (s, v) = rev.verb(&dup, "preview").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["mergeable"], false, "{v}");
+    assert_eq!(v["data"]["failure"]["entity"], "supplier_invoice", "{v}");
     let (s, v) = rev.verb(&dup, "merge").await;
     assert!(!s.is_success(), "{s} {v}");
     assert_eq!(rev.list("supplier_invoice").await.len(), 1);
