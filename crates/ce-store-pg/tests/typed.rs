@@ -31,7 +31,7 @@ fn manifest() -> ce_manifest::Manifest {
         "line": {"fields": {"parent": {"type": "ref", "ref": "parent", "required": true}, "n": {"type": "integer"}}},
         "part": {
           "fields": {
-            "name": {"type": "string", "required": true, "max_length": 20, "unique": true, "indexed": true},
+            "name": {"type": "string", "required": true, "max_length": 20, "unique": true, "indexed": true, "searchable": true},
             "price": {"type": "decimal", "precision": 10, "scale": 2, "default": 0, "indexed": true},
             "kind": {"type": "enum", "values": ["a", "b"], "default": "a"},
             "owner": {"type": "ref", "ref": "item"},
@@ -605,6 +605,47 @@ fn an_exhausted_pool_is_an_error_not_a_hang() {
     s.drop_schema().unwrap();
 }
 
+#[test]
+fn text_search_matches_anywhere_ignores_case_and_stays_in_the_tenant() {
+    let Some(url) = url() else { return };
+    let s = fresh(&url);
+    let (a, b) = (
+        scope_of("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        scope_of("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+    );
+    for name in ["Blue Widget", "red widget", "50%_off", "plain"] {
+        s.insert(&a, "part", json!({"name": name}), None).unwrap();
+    }
+    s.insert(&b, "part", json!({"name": "other widget"}), None)
+        .unwrap();
+    let find = |sc: &TenantScope, q: &str| -> Vec<String> {
+        let page = s
+            .list(
+                sc,
+                "part",
+                &ce_query::ListRequest {
+                    search: Some(q.into()),
+                    sort: vec![ce_query::SortKey {
+                        field: "name".into(),
+                        dir: ce_query::SortDir::Asc,
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        page.records
+            .iter()
+            .map(|r| r.data["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(find(&a, "WIDGET"), ["Blue Widget", "red widget"]);
+    assert_eq!(find(&b, "widget"), ["other widget"]);
+    // Wildcards in the text are literal: `%` finds only the name that contains one.
+    assert_eq!(find(&a, "%"), ["50%_off"]);
+    assert_eq!(find(&a, "_o"), ["50%_off"]);
+    assert!(find(&a, "nothing").is_empty());
+    s.drop_schema().unwrap();
+}
 /// Needs a Postgres with TLS whose certificate is valid for the host in `CE_TEST_DATABASE_URL`
 /// and signed by the CA in the PEM file named by `CE_TEST_TLS_CA`; skipped otherwise.
 #[test]

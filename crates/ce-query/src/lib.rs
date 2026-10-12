@@ -16,5 +16,5 @@ mod plan;
 
 pub use plan::{
     plan_list, ListRequest, Param, Planned, QueryError, SortDir, SortKey, Target, DEFAULT_LIMIT,
-    MAX_LIMIT,
+    MAX_LIMIT, MAX_SEARCH_LEN,
 };
