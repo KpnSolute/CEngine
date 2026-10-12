@@ -951,50 +951,74 @@ async fn rollover_carries_cost_so_a_new_price_does_not_revalue_what_was_on_hand(
             json!({"label": "W2", "starts_on": "2026-11-08", "ends_on": "2026-11-14"}),
         )
         .await;
-    let (_, item) = api
-        .post(
-            "stock_item",
-            json!({"sku": "RICE", "description": "Rice", "unit_price": "2"}),
-        )
-        .await;
-    let (_, l1) = api
-        .post(
-            "stock_line",
-            json!({"item": id(&item), "period": id(&w1), "opening_oh": "10", "unit_price": "2"}),
-        )
-        .await;
-    let (s, _) = api
-        .post(
-            "stock_movement",
-            json!({"line": id(&l1), "period": id(&w1), "pulled": "4"}),
-        )
-        .await;
-    assert_eq!(s, StatusCode::CREATED);
-    let closing = api.get("stock_line", &id(&l1)).await;
-    assert_eq!(closing["data"]["ending_qty"], "6.000");
-    assert_eq!(closing["data"]["ending_value"], "12.00");
+    // Rice: 7 at 1.428571, one pulled; oil: 2 at 5, both pulled.
+    let mut closing = Vec::new();
+    for (sku, open, price, pull) in [("RICE", "7", "1.428571", "1"), ("OIL", "2", "5", "2")] {
+        let (_, item) = api
+            .post(
+                "stock_item",
+                json!({"sku": sku, "description": sku, "unit_price": price}),
+            )
+            .await;
+        let (_, line) = api
+            .post(
+                "stock_line",
+                json!({"item": id(&item), "period": id(&w1), "opening_oh": open, "unit_price": price}),
+            )
+            .await;
+        let (s, _) = api
+            .post(
+                "stock_movement",
+                json!({"line": id(&line), "period": id(&w1), "pulled": pull}),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CREATED);
+        closing.push((
+            id(&item),
+            api.get("stock_line", &id(&line)).await["data"].clone(),
+        ));
+    }
+    assert_eq!(closing[0].1["ending_qty"], "6.000");
+    assert_eq!(closing[0].1["ending_value"], "8.57");
+    assert_eq!(closing[1].1["ending_qty"], "0.000");
+    assert_eq!(closing[1].1["ending_value"], "0.00");
 
-    // The client carries quantity and the closing cost (value / quantity); the supplier has
-    // since raised the price to 3.
-    let cost = "2.000000"; // 12.00 / 6.000
+    // The client derives each line's carried cost: closing value / closing quantity to six
+    // places (1.428333, not exact), and nothing for a line with no stock. The supplier has
+    // since raised both prices to 3.
+    let ops: Vec<Value> = closing
+        .iter()
+        .map(|(item, c)| {
+            let qty: f64 = c["ending_qty"].as_str().unwrap().parse().unwrap();
+            let value: f64 = c["ending_value"].as_str().unwrap().parse().unwrap();
+            let mut data = json!({"item": item, "period": id(&w2), "opening_oh": c["ending_qty"],
+                "unit_price": "3"});
+            if qty > 0.0 {
+                data["opening_unit_cost"] = json!(format!("{:.6}", value / qty));
+            }
+            json!({"op": "create", "entity": "stock_line", "data": data})
+        })
+        .collect();
+    assert_eq!(ops[0]["data"]["opening_unit_cost"], "1.428333");
+    assert!(ops[1]["data"]["opening_unit_cost"].is_null());
     let (s, v) = api
         .call(
             "POST",
             &format!("/v1/{INST}/_batch"),
             None,
-            Some(
-                json!({"ops": [{"op": "create", "entity": "stock_line", "data": {
-                "item": id(&item), "period": id(&w2), "opening_oh": closing["data"]["ending_qty"],
-                "unit_price": "3", "opening_unit_cost": cost}}]}),
-            ),
+            Some(json!({ "ops": ops })),
         )
         .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    let next = api
+    let rice = api
         .get("stock_line", v["data"][0]["id"].as_str().unwrap())
         .await;
-    // Opening stock stays at its carried cost (6 x 2), not at the new price (6 x 3).
-    assert_eq!(next["data"]["opening_value"], "12.00");
-    assert_eq!(next["data"]["ending_value"], "12.00");
+    let oil = api
+        .get("stock_line", v["data"][1]["id"].as_str().unwrap())
+        .await;
+    // 6 x 1.428333 = 8.569998, so the opening stays 8.57, not 6 x 3 = 18.00.
+    assert_eq!(rice["data"]["opening_value"], "8.57");
+    assert_eq!(rice["data"]["ending_value"], "8.57");
+    assert_eq!(oil["data"]["opening_value"], "0.00");
     close(api.app).await;
 }
