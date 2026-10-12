@@ -21,6 +21,7 @@
         "required": { "type": "boolean", "default": false },
         "unique": { "type": "boolean", "default": false },
         "indexed": { "type": "boolean", "default": false },
+        "searchable": { "type": "boolean", "default": false, "description": "Included in the `q` text search of list requests. string and text fields only." },
         "max_length": { "type": "integer", "minimum": 1 },
         "precision": { "type": "integer", "minimum": 1, "maximum": 38 },
         "scale": { "type": "integer", "minimum": 0, "maximum": 18 },

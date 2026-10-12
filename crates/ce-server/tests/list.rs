@@ -169,6 +169,26 @@ async fn list_pages_in_order_and_is_tenant_scoped() {
         }
     }
     assert_eq!(names, ["apple", "bread", "cherry", "dates", "eggs"]);
+
+    // `q` finds text anywhere in the searchable fields, in this tenant only.
+    let (st, found) = call(
+        &a,
+        "GET",
+        &format!("/v1/{INST}/item?q=ER&sort=name"),
+        &t1,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{found}");
+    let found: Vec<&str> = found["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(found, ["cherry"]);
+    let (_, none) = call(&a, "GET", &format!("/v1/{INST}/item?q=ER"), &t2, None).await;
+    assert!(none["data"].as_array().unwrap().is_empty());
     close(a).await;
 }
 
@@ -183,6 +203,7 @@ async fn bad_list_requests_are_422_problems_naming_the_parameter() {
         ("limit=abc", "limit", "invalid_value"),
         ("filter=%7Bnot", "filter", "invalid_value"),
         ("after=%21%21", "after", "invalid_value"),
+        ("q=", "q", "bad_search"),
     ] {
         let (st, p) = call(&a, "GET", &format!("/v1/{INST}/item?{q}"), &t1, None).await;
         assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{q}: {p}");

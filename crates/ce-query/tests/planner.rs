@@ -452,3 +452,83 @@ fn engine_managed_state_is_selected_by_default() {
     let p = plan(&m, "request", &ListRequest::default()).unwrap();
     assert!(p.columns.contains(&"state".to_string()));
 }
+
+fn searchable() -> Manifest {
+    validate(
+        json!({
+          "manifest_version": 1,
+          "template": {"name": "s", "version": "0.1.0"},
+          "entities": {
+            "note": {"fields": {
+              "title": {"type": "string", "searchable": true},
+              "body": {"type": "text", "searchable": true},
+              "qty": {"type": "integer"}
+            }},
+            "plain": {"fields": {"title": {"type": "string"}}}
+          }
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .expect("valid")
+}
+
+fn search(m: &Manifest, entity: &str, text: &str) -> Result<Planned, QueryError> {
+    plan_list(
+        m,
+        &target(entity),
+        &scope(),
+        &ListRequest {
+            search: Some(text.into()),
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn search_is_bound_escaped_and_inside_the_tenant_predicate() {
+    let m = searchable();
+    let p = search(&m, "note", "50%_off\\ '; DROP TABLE note; --").unwrap();
+    assert_tenant_scoped(&p);
+    assert!(
+        p.sql
+            .contains("AND (\"body\" ILIKE $2 ESCAPE '\\' OR \"title\" ILIKE $2 ESCAPE '\\')"),
+        "{}",
+        p.sql
+    );
+    assert!(!p.sql.contains("DROP"), "{}", p.sql);
+    // The user's wildcards and backslash are literal.
+    assert_eq!(
+        p.params[1],
+        Param::Text("%50\\%\\_off\\\\ '; DROP TABLE note; --%".into())
+    );
+}
+
+#[test]
+fn search_needs_searchable_fields_and_sensible_text() {
+    let m = searchable();
+    assert_eq!(
+        search(&m, "plain", "x").unwrap_err(),
+        QueryError::NotSearchable("plain".into())
+    );
+    assert_eq!(search(&m, "note", "  ").unwrap_err(), QueryError::BadSearch);
+    assert_eq!(
+        search(&m, "note", &"a".repeat(MAX_SEARCH_LEN + 1)).unwrap_err(),
+        QueryError::BadSearch
+    );
+    assert!(search(&m, "note", &"a".repeat(MAX_SEARCH_LEN)).is_ok());
+}
+
+#[test]
+fn only_text_fields_can_be_searchable() {
+    let bad = json!({
+      "manifest_version": 1,
+      "template": {"name": "s", "version": "0.1.0"},
+      "entities": {"n": {"fields": {"qty": {"type": "integer", "searchable": true}}}}
+    });
+    let issues = validate(bad.to_string().as_bytes()).unwrap_err();
+    assert!(
+        issues.iter().any(|i| i.code == "not_searchable"),
+        "{issues:?}"
+    );
+}

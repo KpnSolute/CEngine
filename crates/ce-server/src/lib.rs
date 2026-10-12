@@ -529,6 +529,16 @@ fn query_problem(e: QueryError) -> Problem {
             "bad_cursor",
             "the cursor does not match this request".to_string(),
         ),
+        QueryError::NotSearchable(e) => (
+            "q",
+            "not_searchable",
+            format!("{e} has no searchable fields"),
+        ),
+        QueryError::BadSearch => (
+            "q",
+            "bad_search",
+            "the search text must be 1 to 100 characters".to_string(),
+        ),
         QueryError::BadSchema => {
             return store_problem(StoreError::Backend("bad schema".into()));
         }
@@ -546,7 +556,7 @@ fn bad_param(path: &str, detail: &str) -> Problem {
     )
 }
 
-/// Builds the planner request from `?select=a,b&sort=-price,name&limit=50&after=..&filter=..`.
+/// Builds the planner request from `?select=a,b&sort=-price,name&limit=50&after=..&filter=..&q=text`.
 fn list_request(q: &HashMap<String, String>) -> Result<ListRequest, Problem> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
     if q.values().any(|v| v.len() > 8192) {
@@ -600,6 +610,7 @@ fn list_request(q: &HashMap<String, String>) -> Result<ListRequest, Problem> {
     Ok(ListRequest {
         select: q.get("select").map(|v| names(v)),
         filter,
+        search: q.get("q").cloned(),
         sort,
         limit,
         after,

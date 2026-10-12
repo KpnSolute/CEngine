@@ -12,7 +12,8 @@
           "type": "string",
           "required": true,
           "max_length": 120,
-          "indexed": true
+          "indexed": true,
+          "searchable": true
         },
         "category": {
           "type": "enum",

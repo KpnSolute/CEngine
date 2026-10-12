@@ -748,3 +748,30 @@ async fn computed_fields_are_filled_on_create_and_refreshed_on_patch() {
     .await;
     assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+#[tokio::test]
+async fn openapi_lists_q_only_for_searchable_entities() {
+    let names = |doc: &Value, p: &str| -> Vec<String> {
+        doc["paths"][p]["get"]["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let path = format!("/v1/{INST}/item");
+    let a = app_with(|v| v["entities"]["item"]["fields"]["name"]["searchable"] = true.into());
+    let r = call(&a, "GET", "/_meta/openapi", Some(&manager(T1)), &[], None).await;
+    assert!(names(&r.body, &path).contains(&"q".to_string()));
+    let a = app_with(|v| {
+        for f in v["entities"]["item"]["fields"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            f.as_object_mut().unwrap().remove("searchable");
+        }
+    });
+    let r = call(&a, "GET", "/_meta/openapi", Some(&manager(T1)), &[], None).await;
+    assert!(!names(&r.body, &path).contains(&"q".to_string()));
+}
