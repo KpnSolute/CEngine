@@ -75,6 +75,15 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
             schema_name.clone(),
             json!({"type": "object", "properties": props, "required": required}),
         );
+        // The create body: the same fields, but `id` is an optional writable UUID (a chosen id)
+        // and there is no `version`.
+        let create_props = props_for_create(&schemas[&schema_name]);
+        let create_name = format!("{schema_name}Create");
+        schemas.insert(
+            create_name.clone(),
+            json!({"type": "object", "properties": create_props, "required": schemas[&schema_name]["required"]}),
+        );
+        let create_ref = json!({"$ref": format!("#/components/schemas/{create_name}")});
         let reference = json!({"$ref": format!("#/components/schemas/{schema_name}")});
         let single = json!({"description": "the record", "headers": {"ETag": {"schema": {"type": "string"}}},
             "content": {"application/json": {"schema": {"type": "object", "properties": {
@@ -166,7 +175,7 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
             }, "post": {
                 "operationId": format!("create_{name}"),
                 "parameters": [{"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string"}}],
-                "requestBody": {"required": true, "content": {"application/json": {"schema": reference}}},
+                "requestBody": {"required": true, "content": {"application/json": {"schema": create_ref}}},
                 "responses": post_responses
             }}),
         );
@@ -427,4 +436,16 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
             "schemas": schemas
         }
     })
+}
+
+/// The properties of a record schema as a create body takes them.
+fn props_for_create(record: &Value) -> Option<Value> {
+    let mut props = record["properties"].as_object()?.clone();
+    props.remove("version");
+    props.insert(
+        "id".into(),
+        json!({"type": "string", "format": "uuid",
+            "description": "optional: the id to give the new record (unique per tenant and entity)"}),
+    );
+    Some(Value::Object(props))
 }

@@ -62,6 +62,7 @@ impl Inner {
             }
         }
         // A caller-chosen id (validated by the host) is used as given; it must be unused.
+        let payload = caller.cloned().unwrap_or_else(|| data.clone());
         let mut data = data;
         let id = match data.as_object_mut().and_then(|o| o.remove("id")) {
             Some(Value::String(chosen)) => {
@@ -89,8 +90,7 @@ impl Inner {
             },
         );
         if let Some(k) = idem {
-            self.keys
-                .insert(k, (caller.unwrap_or(&data).clone(), record.clone()));
+            self.keys.insert(k, (payload, record.clone()));
         }
         Ok(record)
     }

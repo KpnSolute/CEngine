@@ -41,6 +41,9 @@ fn valid_ident(s: &str) -> bool {
 }
 
 fn db(e: postgres::Error) -> StoreError {
+    if e.code().map(|c| c.code()) == Some("23505") {
+        return StoreError::Constraint("unique");
+    }
     StoreError::Backend(e.to_string())
 }
 
