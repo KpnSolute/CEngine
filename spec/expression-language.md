@@ -116,3 +116,6 @@ through the same transactional store API as actions.
 - `emit`: names an event. It is returned in `meta.emitted` and handed to the outbox when events out lands.
 
 `requires_state` is checked first (409 `invalid_transition`); the input is validated against the action's `input` fields (422). The response is the record after the last effect plus `meta.created` and `meta.emitted`. A retry of a finished action fails with 409 `version_conflict` because the record has moved on.
+
+## Batch writes
+`POST /v1/{inst}/_batch` with `{"ops": [...]}` (1 to 100) and an `Idempotency-Key`. Each operation is `{"op": "create", "entity", "data"}`, `{"op": "update", "entity", "id", "version", "data"}` (a merge patch) or `{"op": "delete", "entity", "id", "version"}`. All operations are checked (roles, shape, server-only records) before anything is written, then applied in order in one transaction with audit; any failure undoes all of them and returns that operation's error. Later operations see the earlier ones. Governed entities are refused for callers who cannot merge. The response is `{"data": [record or null, ...]}` in the order sent. Creates derive their idempotency keys from the request's key.
