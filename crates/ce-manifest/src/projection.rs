@@ -23,11 +23,14 @@ fn field(e: &Expr) -> Option<&str> {
     }
 }
 
-fn node(e: &Expr) -> Result<Value, String> {
+/// `negated` is true under an odd number of `not`s. A test against null is two-valued in SQL but
+/// three-valued in the expression language (`not (x == null)` is never true), so it is refused
+/// under `not`, and `x != null` is refused outright: neither could mean what it says here.
+fn node(e: &Expr, negated: bool) -> Result<Value, String> {
     match e {
-        Expr::Not(inner) => Ok(json!({"not": node(inner)?})),
-        Expr::Bin(Op::And, a, b) => Ok(json!({"and": [node(a)?, node(b)?]})),
-        Expr::Bin(Op::Or, a, b) => Ok(json!({"or": [node(a)?, node(b)?]})),
+        Expr::Not(inner) => Ok(json!({"not": node(inner, !negated)?})),
+        Expr::Bin(Op::And, a, b) => Ok(json!({"and": [node(a, negated)?, node(b, negated)?]})),
+        Expr::Bin(Op::Or, a, b) => Ok(json!({"or": [node(a, negated)?, node(b, negated)?]})),
         Expr::Bin(Op::In, a, b) => {
             let f = field(a).ok_or("`in` needs a field on the left")?;
             let Expr::List(items) = &**b else {
@@ -55,9 +58,9 @@ fn node(e: &Expr) -> Result<Value, String> {
             };
             if matches!(lit, Expr::Null) {
                 return match op {
-                    Op::Eq => Ok(json!({"field": f, "op": "null", "value": true})),
-                    Op::Ne => Ok(json!({"field": f, "op": "null", "value": false})),
-                    _ => Err("null can only be compared with == or !=".into()),
+                    Op::Eq if !negated => Ok(json!({"field": f, "op": "null", "value": true})),
+                    Op::Eq => Err("`== null` cannot be used under `not`".into()),
+                    _ => Err("only `field == null` can test for null; `!= null` and ordering are never true".into()),
                 };
             }
             let v = literal(lit).ok_or("a comparison needs a literal")?;
@@ -67,15 +70,66 @@ fn node(e: &Expr) -> Result<Value, String> {
     }
 }
 
+/// Checks a translated filter against the entity's fields the way the query planner will: the
+/// field must exist and be filterable, ordering needs an orderable type, and a literal must fit
+/// the field's type (and be one of an enum's values).
+pub fn check_types(filter: &Value, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+    if let Some(list) = filter
+        .get("and")
+        .or_else(|| filter.get("or"))
+        .and_then(Value::as_array)
+    {
+        return list.iter().try_for_each(|f| check_types(f, fields));
+    }
+    if let Some(inner) = filter.get("not") {
+        return check_types(inner, fields);
+    }
+    let name = filter["field"].as_str().unwrap_or_default();
+    let op = filter["op"].as_str().unwrap_or_default();
+    let def = fields
+        .get(name)
+        .ok_or_else(|| format!("no field `{name}`"))?;
+    let ty = def["type"].as_str().unwrap_or_default();
+    if matches!(ty, "json" | "file") {
+        return Err(format!("`{name}` ({ty}) cannot be filtered"));
+    }
+    if op == "null" {
+        return Ok(());
+    }
+    if matches!(op, "lt" | "lte" | "gt" | "gte") && matches!(ty, "boolean" | "enum" | "ref") {
+        return Err(format!("`{name}` ({ty}) cannot be ordered"));
+    }
+    let fits = |v: &Value| match ty {
+        "string" | "text" | "date" | "datetime" | "ref" => v.is_string(),
+        "enum" => v.as_str().is_some_and(|s| {
+            def["values"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x == s))
+        }),
+        "integer" => v.is_i64(),
+        "decimal" => v.is_number() || v.as_str().is_some_and(|s| s.parse::<f64>().is_ok()),
+        "boolean" => v.is_boolean(),
+        _ => false,
+    };
+    let values: Vec<&Value> = match filter["value"].as_array() {
+        Some(a) if op == "in" => a.iter().collect(),
+        _ => vec![&filter["value"]],
+    };
+    match values.iter().find(|v| !fits(v)) {
+        Some(v) => Err(format!("{v} does not fit `{name}` ({ty})")),
+        None => Ok(()),
+    }
+}
+
 /// The JSON filter for a projection's `filter` expression.
 pub fn filter_json(src: &str) -> Result<Value, String> {
     let e = parse(src).map_err(|e| format!("{e:?}"))?;
-    node(&e)
+    node(&e, false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::filter_json;
+    use super::{check_types, filter_json};
     use serde_json::json;
 
     #[test]
@@ -94,15 +148,41 @@ mod tests {
             json!({"field": "qty", "op": "gt", "value": 3})
         );
         assert_eq!(
-            filter_json("note != null").unwrap(),
-            json!({"field": "note", "op": "null", "value": false})
+            filter_json("note == null").unwrap(),
+            json!({"field": "note", "op": "null", "value": true})
         );
     }
 
     #[test]
     fn anything_else_is_refused() {
-        for bad in ["qty + 1 > 3", "ref(x).y == 1", "a == b", "qty < null"] {
+        for bad in [
+            "qty + 1 > 3",
+            "ref(x).y == 1",
+            "a == b",
+            "qty < null",
+            "note != null",
+            "not (note == null)",
+        ] {
             assert!(filter_json(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn types_are_checked_against_fields() {
+        let fields = json!({
+            "qty": {"type": "integer"},
+            "on": {"type": "boolean"},
+            "meta": {"type": "json"},
+            "kind": {"type": "enum", "values": ["a", "b"]}
+        });
+        let f = fields.as_object().unwrap();
+        let ok = |s: &str| check_types(&filter_json(s).unwrap(), f);
+        assert!(ok("qty > 3").is_ok());
+        assert!(ok("kind == 'a'").is_ok());
+        assert!(ok("on > true").is_err());
+        assert!(ok("meta == 'x'").is_err());
+        assert!(ok("kind == 'z'").is_err());
+        assert!(ok("qty == 'x'").is_err());
+        assert!(ok("nope == 1").is_err());
     }
 }
