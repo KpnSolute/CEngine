@@ -46,5 +46,20 @@ The same module with two different plugins gives two different, correct behavior
 ## Rollover
 Rollover (next period's opening = prior period's ending) needs no engine feature. A client reads the closed period's lines, builds one `create` per line with `opening_oh` set to the old `ending_qty` and `unit_price` to the old `price`, and sends them through `_batch` in chunks (at most 100 operations each). Each chunk carries its own `Idempotency-Key`, so repeating a chunk after a lost response creates nothing twice. `crates/ce-server/tests/plugins.rs` (`rollover_carries_each_ending_...`) runs this on Postgres: five items in two-line chunks, run twice, five lines, openings equal to the prior endings, the closed period untouched. The client carries the old line's raw `unit_price`, not its computed `price`, so a plugin's price rule is applied once to the new line and is not required to be idempotent. A second run under a new key conflicts on the unique `line_key` (item and period) instead of duplicating. A negative ending (possible only under a plugin that allows over-pulling) cannot be carried: `opening_oh` is never negative, so the batch is refused whole; the shortfall must be settled in the closing period first.
 
+## Installing and running a plugin (`ce-serve`)
+The approval record is plain JSON (`Installed::to_json` / `from_json`): every pin ever approved per plugin (append-only), which positions were active (for rollback) and whether the plugin is disabled. Reading is strict: an unknown field, bad plugin id, malformed digest or version, or an `active` position outside the log refuses the whole file. `ce-serve` writes it through a temporary file and a rename.
+
+Owner commands (they need `CE_PLUGIN_ROOT` and `CE_INSTALLS`, no database):
+
+```text
+ce-serve plugin digest <slug>             print the digest of what is on disk
+ce-serve plugin approve <slug> <digest>   approve it; refuses unless the disk still has that digest
+ce-serve plugin status | rollback <slug> | disable <slug> | enable <slug>
+```
+
+To run a template with a plugin, set `CE_TEMPLATE` (a template JSON, not a finished manifest), `CE_MODULE`, `CE_PLUGIN`, `CE_PLUGIN_ROOT` and `CE_INSTALLS` instead of `CE_MANIFEST`. Both `ce-serve install` and `ce-serve` call `ce_plugin::resolve`, so the schema and the served rules come from the same approved bytes. It fails closed: a plugin that was never approved or is disabled, a descriptor edited after approval, a missing folder, or a rule that does not type-check each stop the server with a message; none falls back to the defaults. Without `CE_PLUGIN` the module runs on its defaults. Rolling back needs the older version's bytes back on disk, because the digest pin is checked against the file.
+
+Tests: `crates/ce-plugin/tests/install.rs` (record, resolve, failure modes) and `crates/ce-serve/tests/plugin_cli.rs` (the binary, including `install` against Postgres).
+
 ## Not in this increment
-Persisting installation records, price review, and failure-mode tests beyond descriptor, loader and composition validation.
+Price review, fetching plugin folders from a customer repository (the host places the folder), a plugin release approval workflow beyond the owner commands, and the HTTP deploy.
