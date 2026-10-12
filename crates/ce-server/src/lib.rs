@@ -94,6 +94,7 @@ where
             "/v1/{inst}/changeset/{id}/{verb}",
             post(changeset_verb::<S>),
         )
+        .route("/v1/{inst}/_batch", post(batch::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
         .route("/v1/{inst}/{entity}", get(list::<S>).post(create::<S>))
@@ -351,6 +352,28 @@ where
         .map_err(store_problem)
 }
 
+/// Refuses writes to what only the server writes: the audit trail, the changeset records and the
+/// status fields of a period.
+fn check_server_only(m: &Manifest, entity: &str, op: &writes::Op) -> Result<(), Problem> {
+    // The audit trail is written by the server alone; nobody edits it through the API.
+    if entity == writes::AUDIT_ENTITY || (changesets::enabled(m) && changesets::is_internal(entity))
+    {
+        return Err(Problem::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this record is written by the server only",
+        ));
+    }
+    if entity == periods::PERIOD && periods::enabled(m) && periods::touches_server_fields(op) {
+        return Err(Problem::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "a period is closed and reopened through its close and reopen endpoints",
+        ));
+    }
+    Ok(())
+}
+
 /// Runs a create, patch or delete with everything it changes as one transaction.
 async fn write<S>(
     st: &AppState<S>,
@@ -363,26 +386,7 @@ async fn write<S>(
 where
     S: Store + Send + Sync + 'static,
 {
-    // The audit trail is written by the server alone; nobody edits it through the API.
-    if entity == writes::AUDIT_ENTITY
-        || (changesets::enabled(&st.manifest) && changesets::is_internal(&entity))
-    {
-        return Err(Problem::new(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "this record is written by the server only",
-        ));
-    }
-    if entity == periods::PERIOD
-        && periods::enabled(&st.manifest)
-        && periods::touches_server_fields(&op)
-    {
-        return Err(Problem::new(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "a period is closed and reopened through its close and reopen endpoints",
-        ));
-    }
+    check_server_only(&st.manifest, &entity, &op)?;
     let rid = rid.to_string();
     let store = st.store.clone();
     let manifest = st.manifest.clone();
@@ -417,6 +421,15 @@ fn record_json(r: &Record) -> Value {
 
 /// Callers without read access to the entity get only the id and version back, so a
 /// write grant never discloses stored fields.
+/// The record as the caller may see it: everything with read access, else only id and version.
+fn view(r: &Record, can_read: bool) -> Value {
+    if can_read {
+        record_json(r)
+    } else {
+        json!({"id": r.id, "version": r.version})
+    }
+}
+
 fn record_response(status: StatusCode, r: &Record, rid: &str, can_read: bool) -> Response {
     let data = if can_read {
         record_json(r)
@@ -530,6 +543,129 @@ async fn stage_if_governed<S: Store + Send + Sync + 'static>(
     Ok(Some((StatusCode::ACCEPTED, Json(body)).into_response()))
 }
 
+const MAX_BATCH: usize = 100;
+
+/// `POST .../_batch` with `{"ops": [{"op": "create"|"update"|"delete", "entity": ..., ...}]}`:
+/// every operation applies in one transaction, or none does.
+async fn batch<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authenticate(&st, &headers)?;
+        if inst != st.installation {
+            return Err(Problem::not_found());
+        }
+        let key = idempotency_key(&headers)?;
+        let body = parse_object(&body.map_err(body_problem)?)?;
+        let list = body.get("ops").and_then(Value::as_array).ok_or_else(|| {
+            Problem::validation(
+                "the body needs an ops list",
+                vec![json!({"path": "/ops", "code": "required", "detail": "a list of operations"})],
+            )
+        })?;
+        if list.is_empty() || list.len() > MAX_BATCH {
+            return Err(Problem::validation(
+                format!("a batch holds 1 to {MAX_BATCH} operations"),
+                vec![
+                    json!({"path": "/ops", "code": "out_of_range", "detail": "wrong number of operations"}),
+                ],
+            ));
+        }
+        let can_merge = st.policy.can_run(&who.roles, changesets::MERGE_ACTION);
+        let mut ops: Vec<(String, writes::Op)> = Vec::new();
+        let mut pending = Vec::new();
+        for (i, item) in list.iter().enumerate() {
+            let bad = |what: &str| {
+                Problem::validation(
+                    format!("operation {i}: {what}"),
+                    vec![
+                        json!({"path": format!("/ops/{i}"), "code": "invalid_operation", "detail": what}),
+                    ],
+                )
+            };
+            let entity = item["entity"]
+                .as_str()
+                .ok_or_else(|| bad("needs an entity"))?;
+            if !st.manifest.value["entities"][entity].is_object() {
+                return Err(bad("unknown entity"));
+            }
+            st.policy
+                .authorize(&who, Access::Write, entity)
+                .map_err(|_| Problem::forbidden())?;
+            if changesets::governed(&st.manifest, entity) && !can_merge {
+                return Err(bad(
+                    "this entity is governed; propose the change as a changeset",
+                ));
+            }
+            let id = item["id"].as_str().map(String::from);
+            let version = item["version"].as_u64();
+            let data = item["data"].as_object().cloned();
+            let op = match item["op"].as_str() {
+                Some("create") => {
+                    let mut obj = data.ok_or_else(|| bad("create needs data"))?;
+                    let check = obj.clone();
+                    prepare_create(&st.manifest, entity, &mut obj);
+                    pending.push((entity.to_string(), check, ce_validate::Mode::Create));
+                    writes::Op::Create {
+                        data: obj,
+                        key: format!("batch:{key}:{i}"),
+                    }
+                }
+                Some("update") => {
+                    let patch = data.ok_or_else(|| bad("update needs data"))?;
+                    pending.push((entity.to_string(), patch.clone(), ce_validate::Mode::Patch));
+                    writes::Op::Patch {
+                        id: id.ok_or_else(|| bad("update needs an id"))?,
+                        expected: version.ok_or_else(|| bad("update needs the record version"))?,
+                        patch,
+                    }
+                }
+                Some("delete") => writes::Op::Delete {
+                    id: id.ok_or_else(|| bad("delete needs an id"))?,
+                    expected: version.ok_or_else(|| bad("delete needs the record version"))?,
+                },
+                _ => return Err(bad("op must be create, update or delete")),
+            };
+            check_server_only(&st.manifest, entity, &op)?;
+            for (e, body, mode) in pending.drain(..) {
+                validate_body(&st, &e, &body, mode)?;
+            }
+            ops.push((entity.to_string(), op));
+        }
+        let entities: Vec<String> = ops.iter().map(|(e, _)| e.clone()).collect();
+        let ctx = invariant_context(&st, &who);
+        let scope = who.scope().clone();
+        let (store, manifest, rid2) = (st.store.clone(), st.manifest.clone(), rid.clone());
+        let records = tokio::task::spawn_blocking(move || {
+            let env = writes::Env {
+                manifest: &manifest,
+                scope: &scope,
+                ctx: &ctx,
+                request_id: &rid2,
+            };
+            writes::execute_all(&*store, &env, &ops)
+        })
+        .await
+        .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+        .map_err(failure_problem)?;
+        let data: Vec<Value> = records
+            .iter()
+            .zip(&entities)
+            .map(|(r, e)| {
+                let readable = st.policy.can_read(&who.roles, e);
+                r.as_ref().map_or(Value::Null, |r| view(r, readable))
+            })
+            .collect();
+        let body = json!({"data": data, "meta": {"request_id": rid, "count": data.len()}});
+        Ok((StatusCode::OK, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
+}
+
 /// `POST .../actions/{name}` with `{"id": ..., "input": {...}}`, `If-Match` and `Idempotency-Key`.
 async fn run_action<S: Store + Send + Sync + 'static>(
     State(st): State<AppState<S>>,
@@ -570,6 +706,9 @@ async fn run_action<S: Store + Send + Sync + 'static>(
         };
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
+        let readable = st.manifest.value["actions"][name.as_str()]["entity"]
+            .as_str()
+            .is_some_and(|e| st.policy.can_read(&who.roles, e));
         let (store, manifest, rid2) = (st.store.clone(), st.manifest.clone(), rid.clone());
         let done = tokio::task::spawn_blocking(move || {
             let env = writes::Env {
@@ -592,7 +731,7 @@ async fn run_action<S: Store + Send + Sync + 'static>(
         })
         .await
         .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
-        let body = json!({"data": record_json(&done.record), "meta": {
+        let body = json!({"data": view(&done.record, readable), "meta": {
             "request_id": rid, "version": done.record.version,
             "created": done.created, "emitted": done.emitted}});
         Ok((StatusCode::OK, Json(body)).into_response())
@@ -632,8 +771,7 @@ async fn period_verb<S: Store + Send + Sync + 'static>(
         })
         .await
         .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
-        let body =
-            json!({"data": record_json(&rec), "meta": {"request_id": rid, "version": rec.version}});
+        let body = json!({"data": view(&rec, st.policy.can_read(&who.roles, periods::PERIOD)), "meta": {"request_id": rid, "version": rec.version}});
         Ok((StatusCode::OK, Json(body)).into_response())
     };
     finish(&rid, run.await)
@@ -678,8 +816,7 @@ async fn changeset_verb<S: Store + Send + Sync + 'static>(
         })
         .await
         .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
-        let body =
-            json!({"data": record_json(&rec), "meta": {"request_id": rid, "version": rec.version}});
+        let body = json!({"data": view(&rec, st.policy.can_read(&who.roles, changesets::CHANGESET)), "meta": {"request_id": rid, "version": rec.version}});
         Ok((StatusCode::OK, Json(body)).into_response())
     };
     finish(&rid, run.await)
