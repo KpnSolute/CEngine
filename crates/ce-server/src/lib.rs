@@ -282,7 +282,18 @@ where
     }
 }
 
+/// A verified token that may use the API. A token issued for a forced PIN change carries only
+/// the role `_rotate_pin` and is refused everywhere except `POST .../_auth/pin`.
 fn authenticate<S>(st: &AppState<S>, headers: &HeaderMap) -> Result<Principal, Problem> {
+    let who = authenticate_any(st, headers)?;
+    if who.has_role(login::ROTATE_ROLE) {
+        return Err(Problem::forbidden());
+    }
+    Ok(who)
+}
+
+/// Like [`authenticate`], but also accepts the forced-PIN-change token.
+fn authenticate_any<S>(st: &AppState<S>, headers: &HeaderMap) -> Result<Principal, Problem> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -2085,7 +2096,7 @@ async fn issue_token<S: Store + Send + Sync + 'static>(
         // A forced PIN change gets a token with one role no template defines, good only for
         // `POST .../_auth/pin`.
         let roles = if who.must_rotate {
-            vec!["_rotate_pin".to_string()]
+            vec![login::ROTATE_ROLE.to_string()]
         } else {
             login::known_roles(&st.manifest, &who.roles)
         };

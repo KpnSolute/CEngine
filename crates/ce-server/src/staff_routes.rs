@@ -3,7 +3,7 @@
 //! administration needs the admin role (`Issuing::admin_role`, `admin` unless the host says
 //! otherwise) and a caller can only grant or touch roles at or below their own.
 
-use super::{authenticate, finish, parse_object, request_id, AppState, Problem};
+use super::{authenticate, authenticate_any, finish, parse_object, request_id, AppState, Problem};
 use crate::login::Issuing;
 use crate::staff::{AdminError, StaffAdmin, StaffInfo};
 use axum::{
@@ -83,6 +83,9 @@ fn require_admin<S>(
 ) -> Result<(Arc<Issuing>, Principal), Problem> {
     let i = issuing(st, inst)?;
     let who = authenticate(st, headers)?;
+    if who.scope().tenant_id() != i.tenant {
+        return Err(Problem::forbidden());
+    }
     if !who.has_role(&st.staff_admin_role) {
         return Err(Problem::forbidden());
     }
@@ -153,7 +156,10 @@ pub(crate) async fn change_pin<S: Store + Send + Sync + 'static>(
     let rid = request_id();
     let go = async {
         let i = issuing(&st, &inst)?;
-        let who = authenticate(&st, &headers)?;
+        let who = authenticate_any(&st, &headers)?;
+        if who.scope().tenant_id() != i.tenant {
+            return Err(Problem::forbidden());
+        }
         let o = parse_object(&body)?;
         let (cur, new) = (
             text(&o, "current_pin")?.to_string(),

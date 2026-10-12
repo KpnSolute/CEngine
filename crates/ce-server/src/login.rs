@@ -7,6 +7,9 @@
 
 use serde_json::{Map, Value};
 
+/// The only role of a token issued for a forced PIN change.
+pub(crate) const ROTATE_ROLE: &str = "_rotate_pin";
+
 /// Who the host's login says the caller is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {

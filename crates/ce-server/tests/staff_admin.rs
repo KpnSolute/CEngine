@@ -366,3 +366,136 @@ fn weak_pins() {
         assert!(!weak_pin(ok, 6), "{ok}");
     }
 }
+
+#[tokio::test]
+async fn a_forced_change_token_opens_nothing_else() {
+    let a = app(true);
+    let boss = token(&a, "boss", "739142").await;
+    call(
+        &a,
+        "POST",
+        "/_staff",
+        Some(&boss),
+        json!({"username": "n", "roles": ["staff"], "pin": "482915"}),
+    )
+    .await;
+    let (_, b) = sign_in(&a, "n", "482915").await;
+    let tmp = b["data"]["token"].as_str().unwrap().to_string();
+    for path in ["/_meta/manifest", "/_meta/openapi", "/v1/s/note"] {
+        let res = a
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {tmp}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    // The same routes accept a normal token.
+    let ok = token(&a, "boss", "739142").await;
+    let res = a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_meta/manifest")
+                .header(header::AUTHORIZATION, format!("Bearer {ok}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_admin_token_for_another_tenant_cannot_administer_staff() {
+    let a = app(true);
+    let v = Verifier::new(b"0123456789abcdef0123456789abcdef").unwrap();
+    let other = v
+        .sign_token(
+            "boss",
+            "22222222-2222-2222-2222-222222222222",
+            &["admin".to_string()],
+            1000,
+            3600,
+        )
+        .unwrap();
+    assert_eq!(
+        call(&a, "GET", "/_staff", Some(&other), Value::Null)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (st, _) = call(
+        &a,
+        "POST",
+        "/_auth/pin",
+        Some(&other),
+        json!({"current_pin": "739142", "new_pin": "846213"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+/// A directory that fails its first lookups, then works.
+struct Flaky {
+    inner: MemoryDirectory,
+    failures: std::sync::atomic::AtomicU32,
+}
+impl ce_server::StaffDirectory for Flaky {
+    fn get(&self, u: &str) -> Result<Option<StaffRecord>, ce_server::DirectoryFailure> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.failures.load(SeqCst) > 0 {
+            self.failures.fetch_sub(1, SeqCst);
+            return Err(ce_server::DirectoryFailure::Backend);
+        }
+        self.inner.get(u)
+    }
+    fn list(&self) -> Result<Vec<StaffRecord>, ce_server::DirectoryFailure> {
+        self.inner.list()
+    }
+    fn create(&self, r: StaffRecord, a: &str) -> Result<(), ce_server::DirectoryFailure> {
+        self.inner.create(r, a)
+    }
+    fn set_pin(
+        &self,
+        u: &str,
+        h: &str,
+        m: bool,
+        n: u64,
+        a: &str,
+    ) -> Result<(), ce_server::DirectoryFailure> {
+        self.inner.set_pin(u, h, m, n, a)
+    }
+    fn set_roles(&self, u: &str, r: &[String], a: &str) -> Result<(), ce_server::DirectoryFailure> {
+        self.inner.set_roles(u, r, a)
+    }
+    fn set_active(&self, u: &str, v: bool, a: &str) -> Result<(), ce_server::DirectoryFailure> {
+        self.inner.set_active(u, v, a)
+    }
+    fn writable(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn database_errors_do_not_count_as_wrong_pins() {
+    use ce_server::{Login, LoginError};
+    let dir = Flaky {
+        inner: MemoryDirectory::new(vec![rec("boss", "739142", "admin")], true),
+        failures: std::sync::atomic::AtomicU32::new(10),
+    };
+    let login = PinLogin::with_directory(Arc::new(dir), PinPolicy::default(), Arc::new(|| 1000));
+    let creds = json!({"username": "boss", "pin": "739142"})
+        .as_object()
+        .unwrap()
+        .clone();
+    for _ in 0..10 {
+        assert_eq!(login.login(&creds), Err(LoginError::Unavailable));
+    }
+    assert!(login.login(&creds).is_ok());
+}

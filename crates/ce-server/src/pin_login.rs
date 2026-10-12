@@ -281,6 +281,13 @@ impl PinLogin {
         }
     }
 
+    fn give_back(&self, key: &str) {
+        let mut tracks = self.tracks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = tracks.get_mut(key) {
+            t.fails = t.fails.saturating_sub(1);
+        }
+    }
+
     fn pass(&self, key: &str) {
         self.tracks
             .lock()
@@ -297,20 +304,20 @@ impl PinLogin {
     /// result. Returns the record only for an active account with the right PIN.
     fn check(&self, key: &str, pin: &str) -> Result<StaffRecord, LoginError> {
         self.begin(key)?;
-        let entry = self
-            .dir
-            .get(key)
-            .map_err(|_| LoginError::Unavailable)?
-            .filter(|r| r.active);
+        let entry = match self.dir.get(key) {
+            Ok(e) => e.filter(|r| r.active),
+            Err(_) => {
+                // No PIN was checked: the attempt is not the caller's wrong guess.
+                self.give_back(key);
+                return Err(LoginError::Unavailable);
+            }
+        };
         let known = entry.as_ref().and_then(|e| parse_hash(&e.hash));
         let target = known.as_ref().unwrap_or(&self.dummy);
         if self.in_use.fetch_add(target.memory, Ordering::SeqCst) + target.memory > MEMORY_BUDGET {
             self.in_use.fetch_sub(target.memory, Ordering::SeqCst);
             // Not the caller's wrong guess: give the attempt back.
-            let mut tracks = self.tracks.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(t) = tracks.get_mut(key) {
-                t.fails = t.fails.saturating_sub(1);
-            }
+            self.give_back(key);
             return Err(LoginError::Throttled);
         }
         let ok = verify(pin, target);
