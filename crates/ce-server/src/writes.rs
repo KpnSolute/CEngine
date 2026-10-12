@@ -234,6 +234,12 @@ fn ancestor_levels(
     Ok(levels)
 }
 
+type Change = (
+    String,
+    Option<Map<String, Value>>,
+    Option<Map<String, Value>>,
+);
+
 /// Brings every parent of a changed child up to date. `old` and `new` are the child's data
 /// before and after the write (`None` when it did not exist).
 fn refresh_parents(
@@ -242,47 +248,49 @@ fn refresh_parents(
     child: &str,
     old: Option<&Map<String, Value>>,
     new: Option<&Map<String, Value>>,
-    depth: usize,
 ) -> Result<(), Failure> {
-    // Every parent at this level is locked, in one order, before any of them changes or the
-    // cascade climbs: two writers then never wait on each other's parents, and a rule of a
-    // higher level sees all of this level's new totals together.
-    let parents = parent_keys(env, child, old, new);
-    if parents.is_empty() {
-        return Ok(());
-    }
-    if depth >= MAX_DEPTH {
-        return Err(Failure::Store(StoreError::Constraint("aggregate depth")));
-    }
-    let mut locked = Vec::new();
-    for (parent, id) in parents {
-        match tx.get_locked(env.scope, &parent, &id) {
-            Ok(r) => locked.push((parent, id, r)),
-            // A dangling reference has no total to keep.
-            Err(StoreError::NotFound) => {}
-            Err(e) => return Err(e.into()),
+    let mut changes: Vec<Change> = vec![(child.to_string(), old.cloned(), new.cloned())];
+    // One level at a time: every parent that any change of the level touches is locked, then
+    // recomputed once, before the next level is looked at. A rule of a higher level so sees all
+    // of the level's new totals together, and a record reached by two branches changes once.
+    for depth in 0.. {
+        let mut parents: BTreeSet<(String, String)> = BTreeSet::new();
+        for (entity, old, new) in &changes {
+            parents.extend(parent_keys(env, entity, old.as_ref(), new.as_ref()));
         }
-    }
-    let mut changed = Vec::new();
-    for (parent, id, current) in locked {
-        let Value::Object(before) = &current.data else {
-            continue;
-        };
-        let mut after = before.clone();
-        settle(tx, env, &parent, Some(&id), &mut after, Some(before))?;
-        if &after != before {
-            tx.update(
-                env.scope,
-                &parent,
-                &id,
-                current.version,
-                Value::Object(after.clone()),
-            )?;
-            changed.push((parent, before.clone(), after));
+        if parents.is_empty() {
+            return Ok(());
         }
-    }
-    for (parent, before, after) in changed {
-        refresh_parents(tx, env, &parent, Some(&before), Some(&after), depth + 1)?;
+        if depth >= MAX_DEPTH {
+            return Err(Failure::Store(StoreError::Constraint("aggregate depth")));
+        }
+        let mut locked = Vec::new();
+        for (parent, id) in parents {
+            match tx.get_locked(env.scope, &parent, &id) {
+                Ok(r) => locked.push((parent, id, r)),
+                // A dangling reference has no total to keep.
+                Err(StoreError::NotFound) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        changes = Vec::new();
+        for (parent, id, current) in locked {
+            let Value::Object(before) = &current.data else {
+                continue;
+            };
+            let mut after = before.clone();
+            settle(tx, env, &parent, Some(&id), &mut after, Some(before))?;
+            if &after != before {
+                tx.update(
+                    env.scope,
+                    &parent,
+                    &id,
+                    current.version,
+                    Value::Object(after.clone()),
+                )?;
+                changes.push((parent, Some(before.clone()), Some(after)));
+            }
+        }
     }
     Ok(())
 }
@@ -327,7 +335,7 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             };
             // A replayed create changed nothing, so the parents are already right.
             if derived {
-                refresh_parents(tx, env, entity, None, rec.data.as_object(), 0)?;
+                refresh_parents(tx, env, entity, None, rec.data.as_object())?;
             }
             Ok(Some(rec))
         }
@@ -362,7 +370,7 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             let old = current.data.as_object();
             settle(tx, env, entity, Some(id), &mut obj, old)?;
             let rec = tx.update(env.scope, entity, id, *expected, Value::Object(obj))?;
-            refresh_parents(tx, env, entity, old, rec.data.as_object(), 0)?;
+            refresh_parents(tx, env, entity, old, rec.data.as_object())?;
             Ok(Some(rec))
         }
         Op::Delete { id, expected } => {
@@ -370,7 +378,7 @@ fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Option<Recor
             lock_parents(tx, env, entity, Some(id), pre.data.as_object(), None)?;
             let current = tx.get_locked(env.scope, entity, id)?;
             tx.delete(env.scope, entity, id, *expected)?;
-            refresh_parents(tx, env, entity, current.data.as_object(), None, 0)?;
+            refresh_parents(tx, env, entity, current.data.as_object(), None)?;
             Ok(None)
         }
     }
