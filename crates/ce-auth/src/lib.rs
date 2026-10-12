@@ -79,6 +79,16 @@ impl Verifier {
         Ok(Verifier { key: key.to_vec() })
     }
 
+    /// A scope for a public, unauthenticated read of one tenant's data. The tenant must come
+    /// from the host's own lookup (a workspace name resolved through its directory), never from
+    /// anything the caller sent as an identity, and only a manifest-declared public projection
+    /// may use it. Holding a `Verifier` is the proof that the host asked for this.
+    pub fn public_scope(&self, tenant_id: &str) -> Option<TenantScope> {
+        is_uuid(tenant_id).then(|| TenantScope {
+            tenant_id: tenant_id.to_string(),
+        })
+    }
+
     pub fn verify_token(&self, token: &str, now: u64) -> Result<Principal, AuthError> {
         let mut parts = token.split('.');
         let (h, p, s) = match (parts.next(), parts.next(), parts.next(), parts.next()) {

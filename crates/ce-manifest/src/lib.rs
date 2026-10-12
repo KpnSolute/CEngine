@@ -3,7 +3,10 @@
 //! `validate` runs the JSON Schema, then semantic checks the schema cannot express
 //! (references, state graphs, expressions). It returns every issue it finds.
 
+mod projection;
 mod semantic;
+
+pub use projection::filter_json;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};

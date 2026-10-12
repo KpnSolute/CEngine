@@ -310,6 +310,14 @@ pub fn check(m: &Value) -> Vec<Issue> {
         }
         if let Some(e) = p.get("filter").and_then(Value::as_str) {
             expr(&mut out, &format!("{pp}/filter"), e, &names, Site::Filter);
+            match crate::projection::filter_json(e) {
+                Err(why) => out.push(issue(format!("{pp}/filter"), "unsupported_filter", why)),
+                Ok(f) => {
+                    if let Err(why) = crate::projection::check_types(&f, fields) {
+                        out.push(issue(format!("{pp}/filter"), "invalid_filter", why));
+                    }
+                }
+            }
         }
     }
 

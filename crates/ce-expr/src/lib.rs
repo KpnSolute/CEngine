@@ -7,7 +7,7 @@ mod parse;
 mod value;
 
 pub use eval::{eval, eval_with, Env, EvalError, NoResolver, Resolver};
-pub use parse::{parse, Expr, ParseError, MAX_DEPTH, MAX_LEN, MAX_NODES};
+pub use parse::{parse, Expr, Op, ParseError, MAX_DEPTH, MAX_LEN, MAX_NODES};
 pub use value::Value;
 
 /// Parse and evaluate with a resolver for `ref` and aggregates.
