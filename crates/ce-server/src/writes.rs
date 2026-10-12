@@ -21,7 +21,7 @@ use ce_validate::{
 };
 use serde_json::{Map, Value};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 /// How many levels of parents a write may update (child, parent, grandparent...).
 pub(crate) const MAX_DEPTH: usize = 8;
@@ -69,6 +69,9 @@ struct StoreResolver<'a> {
     /// The first store failure met while answering. The evaluator only sees a message, so this
     /// keeps the real error: a backend or unsupported-store failure is not a broken rule.
     failed: RefCell<Option<StoreError>>,
+    /// What was read from the store while settling this record, so a record read twice gives
+    /// the same answer both times (Postgres reads committed data afresh on every statement).
+    seen: RefCell<HashMap<String, Option<Value>>>,
 }
 
 impl StoreResolver<'_> {
@@ -91,14 +94,24 @@ impl Resolver for StoreResolver<'_> {
         let target = m.value["entities"][self.entity]["fields"][field]["ref"]
             .as_str()
             .ok_or("not a ref field")?;
-        match self.store.get(self.env.scope, target, id) {
-            Ok(rec) => Ok(rec
-                .data
-                .get(attr)
-                .map_or(Ev::Null, |v| json_to_expr(field_type(m, target, attr), v))),
-            Err(StoreError::NotFound) => Ok(Ev::Null),
-            Err(e) => Err(self.fail(e)),
-        }
+        let key = format!("ref\u{0}{target}\u{0}{id}");
+        let cached = self.seen.borrow().get(&key).cloned();
+        let data = match cached {
+            Some(d) => d,
+            None => {
+                let d = match self.store.get(self.env.scope, target, id) {
+                    Ok(rec) => Some(rec.data),
+                    Err(StoreError::NotFound) => None,
+                    Err(e) => return Err(self.fail(e)),
+                };
+                self.seen.borrow_mut().insert(key, d.clone());
+                d
+            }
+        };
+        Ok(data
+            .as_ref()
+            .and_then(|d| d.get(attr))
+            .map_or(Ev::Null, |v| json_to_expr(field_type(m, target, attr), v)))
     }
 
     fn children(
@@ -110,10 +123,24 @@ impl Resolver for StoreResolver<'_> {
         let Some(id) = self.id else {
             return Ok(Vec::new());
         };
-        let values = self
-            .store
-            .child_values(self.env.scope, entity, ref_field, id, attr)
-            .map_err(|e| self.fail(e))?;
+        let key = format!(
+            "kids\u{0}{entity}\u{0}{ref_field}\u{0}{}",
+            attr.unwrap_or("")
+        );
+        let cached = self.seen.borrow().get(&key).cloned().flatten();
+        let values: Vec<Value> = match cached {
+            Some(Value::Array(v)) => v,
+            _ => {
+                let v = self
+                    .store
+                    .child_values(self.env.scope, entity, ref_field, id, attr)
+                    .map_err(|e| self.fail(e))?;
+                self.seen
+                    .borrow_mut()
+                    .insert(key, Some(Value::Array(v.clone())));
+                v
+            }
+        };
         let ty = attr.map_or("", |a| field_type(self.env.manifest, entity, a));
         Ok(values.iter().map(|v| json_to_expr(ty, v)).collect())
     }
@@ -134,6 +161,7 @@ fn settle(
         entity,
         id,
         failed: RefCell::new(None),
+        seen: RefCell::new(HashMap::new()),
     };
     let out = evaluate_computed_with(env.manifest, entity, record, old, env.ctx, Some(&r))
         .and_then(|()| check_invariants_with(env.manifest, entity, record, old, env.ctx, Some(&r)));
