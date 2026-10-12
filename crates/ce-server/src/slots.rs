@@ -125,7 +125,7 @@ pub(crate) fn free(
                 let max = Duration::days(ce_calendar::MAX_WINDOW_DAYS);
                 let back = (first.duration() + buffer).min(max);
                 let looks = [
-                    window.clone(),
+                    *window,
                     Interval::new(window.start - back, window.start)
                         .map_err(|e| cal("/window", e))?,
                 ];
