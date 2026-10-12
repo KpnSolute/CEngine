@@ -16,6 +16,7 @@
 
 mod actions;
 mod changesets;
+mod events;
 mod files;
 mod openapi;
 mod periods;
@@ -41,6 +42,8 @@ use ce_store::{ListRequest, QueryError, Record, SortDir, SortKey, Store, StoreEr
 use serde_json::{json, Map, Value};
 use std::{collections::HashMap, sync::Arc};
 
+pub use events::{relay_once, Deliver, Delivery, Relay, Report as RelayReport};
+
 const MAX_BODY: usize = 1024 * 1024;
 
 pub struct AppState<S> {
@@ -56,6 +59,8 @@ pub struct AppState<S> {
     /// Turns the workspace name in a public URL into a tenant id; without one the public
     /// endpoints answer 404. The host's directory decides, never the caller.
     pub public_tenants: Option<PublicTenants>,
+    /// Signs and delivers events out; without one `POST .../events/relay` answers 503.
+    pub relay: Option<Arc<Relay>>,
 }
 
 /// Looks up the tenant behind a public workspace name.
@@ -72,6 +77,7 @@ impl<S> Clone for AppState<S> {
             now: self.now.clone(),
             blobs: self.blobs.clone(),
             public_tenants: self.public_tenants.clone(),
+            relay: self.relay.clone(),
         }
     }
 }
@@ -92,7 +98,14 @@ impl<S> AppState<S> {
             }),
             blobs: None,
             public_tenants: None,
+            relay: None,
         }
+    }
+
+    /// Gives the server a signer and a transport for events out.
+    pub fn with_relay(mut self, relay: Relay) -> Self {
+        self.relay = Some(Arc::new(relay));
+        self
     }
 
     /// Lets public projections resolve workspace names to tenants.
@@ -142,6 +155,8 @@ where
         .route("/v1/{inst}/_batch", post(batch::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
+        .route("/v1/{inst}/events/relay", post(events_relay::<S>))
+        .route("/v1/{inst}/events/{id}/replay", post(events_replay::<S>))
         .route("/v1/{inst}/{entity}", get(list::<S>).post(create::<S>))
         .route(
             "/v1/{inst}/{entity}/{id}",
@@ -401,7 +416,9 @@ where
 /// status fields of a period.
 fn check_server_only(m: &Manifest, entity: &str, op: &writes::Op) -> Result<(), Problem> {
     // The audit trail is written by the server alone; nobody edits it through the API.
-    if entity == writes::AUDIT_ENTITY || (changesets::enabled(m) && changesets::is_internal(entity))
+    if entity == writes::AUDIT_ENTITY
+        || (changesets::enabled(m) && changesets::is_internal(entity))
+        || (events::enabled(m) && entity == events::ENTITY)
     {
         return Err(Problem::new(
             StatusCode::FORBIDDEN,
@@ -1416,6 +1433,75 @@ async fn list<S: Store + Send + Sync + 'static>(
             Json(json!({"data": data, "meta": {"request_id": rid, "next": next}})),
         )
             .into_response())
+    };
+    finish(&rid, run.await)
+}
+
+/// `POST .../events/{id}/replay`: puts a delivered or dead-lettered event back in the queue.
+async fn events_replay<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authenticate(&st, &headers)?;
+        if inst != st.installation || !events::enabled(&st.manifest) {
+            return Err(Problem::not_found());
+        }
+        if !st.policy.can_run(&who.roles, events::ACTION) {
+            return Err(Problem::forbidden());
+        }
+        let scope = who.scope().clone();
+        let store = st.store.clone();
+        let rec = tokio::task::spawn_blocking(move || events::replay(&*store, &scope, &id))
+            .await
+            .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+            .map_err(|e| match e {
+                StoreError::Constraint("not_replayable") => Problem::new(
+                    StatusCode::CONFLICT,
+                    "invalid_transition",
+                    "only a delivered or dead-lettered event can be replayed",
+                ),
+                e => store_problem(e),
+            })?;
+        let body = json!({"data": view(&rec, st.policy.can_read(&who.roles, events::ENTITY)), "meta": {"request_id": rid, "version": rec.version}});
+        Ok((StatusCode::OK, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
+}
+
+/// `POST .../events/relay`: one delivery pass for the caller's tenant.
+async fn events_relay<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authenticate(&st, &headers)?;
+        if inst != st.installation || !events::enabled(&st.manifest) {
+            return Err(Problem::not_found());
+        }
+        if !st.policy.can_run(&who.roles, events::ACTION) {
+            return Err(Problem::forbidden());
+        }
+        let Some(relay) = st.relay.clone() else {
+            return Err(Problem::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "no event transport is configured",
+            ));
+        };
+        let scope = who.scope().clone();
+        let (store, now) = (st.store.clone(), (st.now)());
+        let r =
+            tokio::task::spawn_blocking(move || events::relay_once(&*store, &scope, &relay, now))
+                .await
+                .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+                .map_err(store_problem)?;
+        let body = json!({"data": {"delivered": r.delivered, "retrying": r.retrying, "dead_lettered": r.dead_lettered}, "meta": {"request_id": rid}});
+        Ok((StatusCode::OK, Json(body)).into_response())
     };
     finish(&rid, run.await)
 }

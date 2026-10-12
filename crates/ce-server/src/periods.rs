@@ -93,6 +93,20 @@ pub(crate) fn transition<S: Store>(
             Err(writes::Failure::Store(e)) => return Err(e),
             Err(_) => return Err(StoreError::Aborted),
         };
+        if let Some(p) = &out.after {
+            let name = if close {
+                "period.closed"
+            } else {
+                "period.reopened"
+            };
+            crate::events::enqueue(
+                tx,
+                env,
+                name,
+                Some(&p.id),
+                json!({"id": p.id, "actor": env.ctx.actor_id, "period": p.data}),
+            )?;
+        }
         done = out.after;
         Ok(())
     });

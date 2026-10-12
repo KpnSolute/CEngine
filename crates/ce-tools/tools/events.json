@@ -1,0 +1,26 @@
+{
+  "tool": "events",
+  "version": "0.1.0",
+  "title": "Events out: what the template emits is kept in the same transaction and delivered at least once, signed, with retry, dead letter and replay",
+  "entities": {
+    "outbox_event": {
+      "fields": {
+        "name": {"type": "string", "required": true, "max_length": 120, "indexed": true},
+        "event_version": {"type": "integer", "default": 1},
+        "subject": {"type": "string", "max_length": 120},
+        "data": {"type": "json"},
+        "at": {"type": "integer", "required": true, "indexed": true},
+        "seq": {"type": "integer", "required": true, "indexed": true},
+        "status": {"type": "enum", "values": ["pending", "in_flight", "delivered", "dead_lettered"], "default": "pending", "indexed": true},
+        "attempts": {"type": "integer", "default": 0},
+        "not_before": {"type": "integer", "default": 0},
+        "last_error": {"type": "string", "max_length": 500},
+        "delivered_at": {"type": "integer"}
+      },
+      "sort_keys": ["seq", "at", "status"]
+    }
+  },
+  "actions": {
+    "manage_events": {"entity": "outbox_event", "effect": [{"emit": "events.managed"}]}
+  }
+}
