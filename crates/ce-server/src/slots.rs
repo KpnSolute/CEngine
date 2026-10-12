@@ -103,7 +103,10 @@ pub(crate) fn free(
     let tz =
         parse_tz(resource["timezone"].as_str().unwrap_or("")).map_err(|e| cal("/resource", e))?;
     let working = hours(&resource["hours"])?;
-    let buffer = Duration::minutes(resource["buffer_minutes"].as_i64().unwrap_or(0));
+    let buffer = match resource["buffer_minutes"].as_i64().unwrap_or(0) {
+        m @ 0..=1440 => Duration::minutes(m),
+        _ => return Err(cal("/buffer_minutes", CalendarError::BadBuffer)),
+    };
     let mut busy = Vec::new();
     for b in bookings {
         let (Some(s), Some(e)) = (b["starts_at"].as_str(), b["ends_at"].as_str()) else {
@@ -117,16 +120,24 @@ pub(crate) fn free(
             None => busy.push(first),
             Some(text) => {
                 let rule = Recurrence::parse(text).map_err(|e| cal("/booking", e))?;
-                // An occurrence that begins before the window can still run into it.
-                let from = Interval::new(window.start - first.duration() - buffer, window.end)
-                    .map_err(|e| cal("/window", e))?;
-                for t in expand(&rule, start.with_timezone(&tz).naive_local(), tz, &from)
-                    .map_err(|e| cal("/booking", e))?
-                {
-                    busy.push(Interval {
-                        start: t,
-                        end: t + first.duration(),
-                    });
+                // Occurrences starting inside the window, plus a short look-back for ones that
+                // began earlier and still run into it (each call stays within the window limit).
+                let max = Duration::days(ce_calendar::MAX_WINDOW_DAYS);
+                let back = (first.duration() + buffer).min(max);
+                let looks = [
+                    window.clone(),
+                    Interval::new(window.start - back, window.start)
+                        .map_err(|e| cal("/window", e))?,
+                ];
+                for w in &looks {
+                    for t in expand(&rule, start.with_timezone(&tz).naive_local(), tz, w)
+                        .map_err(|e| cal("/booking", e))?
+                    {
+                        busy.push(Interval {
+                            start: t,
+                            end: t + first.duration(),
+                        });
+                    }
                 }
             }
         }

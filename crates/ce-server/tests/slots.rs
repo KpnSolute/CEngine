@@ -247,6 +247,12 @@ async fn bad_requests_are_refused() {
             json!({"name": "A", "timezone": "America/New_York", "hours": weekdays()}),
         )
         .await;
+    let huge = a
+        .make(
+            "resource",
+            json!({"name": "C", "timezone": "America/New_York", "hours": weekdays(), "buffer_minutes": 9223372036854775807i64}),
+        )
+        .await;
     let nohours = a
         .make(
             "resource",
@@ -268,6 +274,15 @@ async fn bad_requests_are_refused() {
         ),
         (format!("resource={r}&{Q}&duration=abc"), "/duration"),
         (format!("resource={r}&{Q}&duration=0"), "/duration"),
+        (
+            format!("resource={r}&{Q}&duration=9223372036854775807"),
+            "/duration",
+        ),
+        (
+            format!("resource={r}&{Q}&step=9223372036854775807"),
+            "/step",
+        ),
+        (format!("resource={huge}&{Q}"), "/buffer_minutes"),
         (format!("resource={nohours}&{Q}"), "/hours"),
     ] {
         let (s, v) = a.slots("owner", &q).await;
@@ -279,4 +294,26 @@ async fn bad_requests_are_refused() {
     // A role that cannot read bookings gets nothing.
     let (s, _) = a.slots("guest", &format!("resource={r}&{Q}")).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_recurring_booking_does_not_break_a_full_year_window() {
+    let Some(mut a) = setup().await else { return };
+    let r = a
+        .make(
+            "resource",
+            json!({"name": "Year", "timezone": "America/New_York", "hours": weekdays(), "buffer_minutes": 60}),
+        )
+        .await;
+    a.make("booking", json!({"resource": r, "contact_name": "Eve", "starts_at": "2026-10-05T14:00:00Z", "ends_at": "2026-10-05T15:00:00Z", "recurrence": "FREQ=WEEKLY;COUNT=2"}))
+        .await;
+    // Exactly 366 days.
+    let q = format!("resource={r}&from=2026-10-12T13:00:00Z&to=2027-10-13T13:00:00Z&duration=60");
+    let (s, v) = a.slots("owner", &q).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // The occurrence on Oct 12 (10:00 local) and its buffer block 09:00-12:00 that Monday.
+    assert!(
+        !starts(&v).contains(&"2026-10-12T13:00:00+00:00".to_string()),
+        "{v}"
+    );
 }

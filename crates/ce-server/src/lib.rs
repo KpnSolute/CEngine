@@ -1804,6 +1804,9 @@ async fn free_slots<S: Store + Send + Sync + 'static>(
                     (None, Some(d)) => d,
                     (None, None) => return Err(invalid((format!("/{name}"), "required".into()))),
                 };
+                if !(1..=1440).contains(&n) {
+                    return Err(invalid((format!("/{name}"), "1 to 1440 minutes".into())));
+                }
                 Ok(ce_calendar::Duration::minutes(n))
             };
         let id = need("resource")?.clone();
