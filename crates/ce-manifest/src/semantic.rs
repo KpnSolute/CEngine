@@ -326,6 +326,10 @@ pub fn check(m: &Value) -> Vec<Issue> {
                             ));
                         }
                         let mut row_names: BTreeSet<&str> = tf.keys().map(String::as_str).collect();
+                        if let Some(sf) = entities[t].get("state").and_then(|s| s["field"].as_str())
+                        {
+                            row_names.insert(sf);
+                        }
                         row_names.insert("input");
                         let values = c.get("values").and_then(Value::as_object);
                         if !values.is_some_and(|v| v.contains_key(via)) {
