@@ -387,6 +387,32 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
                 "responses": responses}}),
         );
     }
+    let mut ai_responses = json!({"200": {"description": "checked draft records; nothing is saved",
+        "content": {"application/json": {"schema": {"type": "object", "properties": {"data": {"type": "object",
+            "properties": {"ready": {"type": "integer"},
+                "drafts": {"type": "array", "items": {"type": "object", "properties": {
+                    "body": {"type": "object"}, "errors": {"type": "array", "items": {"type": "object"}}}}}}}}}}}}});
+    if let (Value::Object(r), Value::Object(e)) = (
+        &mut ai_responses,
+        problem_responses(&[
+            ("401", "unauthenticated"),
+            ("403", "forbidden"),
+            ("422", "validation_failed"),
+            ("502", "provider_failed"),
+            ("503", "unavailable"),
+        ]),
+    ) {
+        r.extend(e);
+    }
+    paths.insert(
+        format!("/v1/{installation}/_ai/entry"),
+        json!({"post": {"operationId": "aiEntry",
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object",
+                "required": ["entity", "text"],
+                "properties": {"entity": {"type": "string"}, "text": {"type": "string", "maxLength": 20000},
+                    "hint": {"type": "string", "maxLength": 500}}}}}},
+            "responses": ai_responses}}),
+    );
     json!({
         "openapi": "3.1.0",
         "info": {
