@@ -203,7 +203,7 @@ where
         .route("/v1/{inst}/_report/{name}", get(report::<S>))
         .route(
             "/v1/{inst}/_ai/entry",
-            post(ai_entry::<S>).layer(DefaultBodyLimit::max(ai::MAX_TEXT + 1024)),
+            post(ai_entry::<S>).layer(DefaultBodyLimit::max(ai::MAX_BODY)),
         )
         .route("/v1/{inst}/_slots", get(free_slots::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
@@ -2175,7 +2175,18 @@ async fn ai_entry<S: Store + Send + Sync + 'static>(
             .await
             .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
             .map_err(ai_problem)?;
-        let drafts = ai::drafts(&st.manifest, &entity, &answer.data).map_err(ai_problem)?;
+        let mut drafts = ai::drafts(&st.manifest, &entity, &answer.data).map_err(ai_problem)?;
+        // A draft the server would refuse to create (period-managed fields, say) is not ready.
+        for d in &mut drafts {
+            let op = writes::Op::Create {
+                data: d.body.clone(),
+                key: String::new(),
+            };
+            if check_server_only(&st.manifest, &entity, &op).is_err() {
+                d.errors.push(json!({"path": "", "code": "server_managed",
+                    "detail": "this draft sets fields only the server may write"}));
+            }
+        }
         let ready = drafts.iter().filter(|d| d.errors.is_empty()).count();
         let drafts: Vec<Value> = drafts
             .into_iter()

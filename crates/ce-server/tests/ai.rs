@@ -206,3 +206,40 @@ async fn provider_trouble_has_safe_answers() {
     let (s, _) = entry(&build(Some(&f)), "manager", ok).await;
     assert_eq!(s, StatusCode::BAD_GATEWAY);
 }
+
+#[tokio::test]
+async fn escaped_text_within_the_limit_is_accepted_and_server_fields_are_not_ready() {
+    // 20,000 control characters are 120,000 bytes once JSON-escaped: still within the text limit.
+    let f = fake(Ok(json!({"records": []})));
+    let app = build(Some(&f));
+    let text = "\u{1}".repeat(20_000);
+    let (s, v) = entry(&app, "manager", json!({"entity": "item", "text": text})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    // With the period tool, fields the server alone writes keep a draft from being ready.
+    let m = ce_tools::compose(
+        &json!({
+            "manifest_version": 1,
+            "template": {"name": "shop", "version": "0.1.0", "title": "Shop"},
+            "entities": {},
+            "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}}
+        }),
+        &["period"],
+    )
+    .unwrap();
+    let m = validate(m.to_string().as_bytes()).unwrap();
+    let mut st = AppState::new(MemoryStore::new(), Verifier::new(KEY).unwrap(), m, INST);
+    st.now = Arc::new(|| 1000);
+    let f = fake(Ok(json!({"records": [
+        {"label": "2026-09", "starts_on": "2026-09-01", "ends_on": "2026-09-30"},
+        {"label": "2026-10", "starts_on": "2026-10-01", "ends_on": "2026-10-31", "status": "closed"}
+    ]})));
+    let app = router(st.with_provider(Arc::new(f)));
+    let (s, v) = entry(&app, "owner", json!({"entity": "period", "text": "months"})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["ready"], 1, "{v}");
+    assert_eq!(
+        v["data"]["drafts"][1]["errors"][0]["code"],
+        "server_managed"
+    );
+}

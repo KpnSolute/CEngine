@@ -16,6 +16,9 @@ use serde_json::{json, Map, Value};
 pub(crate) const MAX_DRAFTS: usize = 50;
 /// The most bytes of text one request may carry.
 pub(crate) const MAX_TEXT: usize = 20_000;
+/// The most bytes of request body: the text, hint and envelope at the worst JSON escaping
+/// (a control character becomes six bytes, `\u00XX`).
+pub(crate) const MAX_BODY: usize = 6 * (MAX_TEXT + 500) + 1024;
 pub(crate) const OPERATION: &str = "records.extract";
 
 /// The fields a draft may set: declared, not computed, not the state field.
