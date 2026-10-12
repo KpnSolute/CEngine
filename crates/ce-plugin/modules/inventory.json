@@ -1,0 +1,95 @@
+{
+  "module": "business.inventory",
+  "api": 1,
+  "title": "Stock counts: items, counts per period, movements, and the calculations over them",
+  "requires_entities": ["period"],
+  "read": ["stock.items", "stock.lines", "stock.movements"],
+  "write": [],
+  "emit": [],
+  "slots": {
+    "price": {
+      "default": "round(max(0, unit_price), 6)",
+      "about": "Unit price used for a line: the price stamped on the line when it was created. A line never reads the item's current price, so a later change to the item cannot move an existing line."
+    },
+    "ending_qty": {
+      "default": "max(0, opening_oh + received - pulled)",
+      "about": "Quantity on hand at the end of the period."
+    },
+    "opening_value": {
+      "default": "round(max(0, opening_oh) * price, 2)",
+      "about": "Value of the opening quantity."
+    },
+    "received_value": {
+      "default": "round(max(0, received) * price, 2)",
+      "about": "Value of what was received in the period."
+    },
+    "pulled_value": {
+      "default": "round(max(0, pulled) * price, 2)",
+      "about": "Value of what was pulled in the period."
+    },
+    "ending_value": {
+      "default": "round(ending_qty * price, 2)",
+      "about": "Value of the ending quantity."
+    },
+    "over_pull": {
+      "default": "opening_oh + received - pulled >= 0",
+      "about": "Invariant on a line: true when the line may be saved. Use true to allow negative stock."
+    }
+  },
+  "fragment": {
+    "entities": {
+      "stock_item": {
+        "fields": {
+          "sku": {"type": "string", "required": true, "max_length": 60, "unique": true, "indexed": true, "searchable": true},
+          "description": {"type": "string", "required": true, "max_length": 240, "indexed": true, "searchable": true},
+          "unit_price": {"type": "decimal", "precision": 12, "scale": 6, "default": 0},
+          "par_level": {"type": "integer", "default": 0}
+        },
+        "invariants": [
+          {"name": "price_not_negative", "expr": "unit_price >= 0", "message_code": "stock.negative_price"}
+        ],
+        "sort_keys": ["sku", "description"]
+      },
+      "stock_line": {
+        "fields": {
+          "item": {"type": "ref", "ref": "stock_item", "indexed": true, "required": true},
+          "period": {"type": "ref", "ref": "period", "indexed": true, "required": true},
+          "line_key": {"type": "string", "max_length": 100, "unique": true, "indexed": true, "computed": "concat(item, '|', period)"},
+          "opening_oh": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
+          "unit_price": {"type": "decimal", "precision": 12, "scale": 6, "default": 0},
+          "price": {"type": "decimal", "precision": 12, "scale": 6, "computed": {"$slot": "price"}},
+          "received": {"type": "decimal", "precision": 14, "scale": 3, "computed": "sum(children(stock_movement, line).received)"},
+          "pulled": {"type": "decimal", "precision": 14, "scale": 3, "computed": "sum(children(stock_movement, line).pulled)"},
+          "ending_qty": {"type": "decimal", "precision": 14, "scale": 3, "computed": {"$slot": "ending_qty"}},
+          "opening_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "opening_value"}},
+          "received_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "received_value"}},
+          "pulled_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "pulled_value"}},
+          "ending_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "ending_value"}}
+        },
+        "invariants": [
+          {"name": "opening_not_negative", "expr": "opening_oh >= 0", "message_code": "stock.negative_opening"},
+          {"name": "no_over_pull", "expr": {"$slot": "over_pull"}, "message_code": "stock.over_pull"}
+        ],
+        "locked_when": "ref(period).status == 'closed'",
+        "sort_keys": ["line_key"]
+      },
+      "stock_movement": {
+        "fields": {
+          "line": {"type": "ref", "ref": "stock_line", "indexed": true, "required": true},
+          "period": {"type": "ref", "ref": "period", "indexed": true, "required": true},
+          "received": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
+          "pulled": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
+          "txn_date": {"type": "date", "indexed": true},
+          "reason": {"type": "string", "max_length": 200}
+        },
+        "invariants": [
+          {"name": "in_line_period", "expr": "period == ref(line).period", "message_code": "stock.movement_period_mismatch"},
+          {"name": "received_not_negative", "expr": "received >= 0", "message_code": "stock.negative_received"},
+          {"name": "pulled_not_negative", "expr": "pulled >= 0", "message_code": "stock.negative_pulled"}
+        ],
+        "locked_when": "ref(period).status == 'closed'",
+        "sort_keys": ["txn_date"]
+      }
+    }
+  }
+}

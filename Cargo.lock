@@ -307,6 +307,7 @@ name = "ce-plugin"
 version = "0.1.0"
 dependencies = [
  "ce-expr",
+ "ce-manifest",
  "libc",
  "semver",
  "serde",
@@ -385,6 +386,7 @@ dependencies = [
  "ce-expr",
  "ce-io",
  "ce-manifest",
+ "ce-plugin",
  "ce-policy",
  "ce-provider",
  "ce-store",
@@ -393,6 +395,7 @@ dependencies = [
  "ce-validate",
  "hmac 0.12.1",
  "http-body-util",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

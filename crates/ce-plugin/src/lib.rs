@@ -6,12 +6,14 @@
 //! are rejected, never ignored.
 
 mod load;
+mod module;
 mod registry;
 mod validate;
 
 pub use load::{
     digest, digest_of, discover, load, Installed, LoadError, Pin, DESCRIPTOR, PLUGINS_DIR,
 };
+pub use module::{builtin_registry, compose, ComposeError, Composed};
 pub use registry::{Module, Registry, Slot};
 pub use validate::{parse, Capabilities, Plugin, Policy, Violation, MAX_BYTES, MAX_POLICIES};
 

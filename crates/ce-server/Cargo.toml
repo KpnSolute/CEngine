@@ -28,7 +28,9 @@ sha2 = "0.10"
 
 [dev-dependencies]
 ce-store-pg = { path = "../ce-store-pg" }
+ce-plugin = { path = "../ce-plugin" }
 ce-tools = { path = "../ce-tools" }
+semver = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
