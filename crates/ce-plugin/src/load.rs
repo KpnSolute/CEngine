@@ -82,7 +82,10 @@ fn read_descriptor(root: &Path, slug: &str) -> Result<Vec<u8>, LoadError> {
         return Err(LoadError::NotFound);
     }
     let path = descriptor_path(root, slug);
-    let meta = fs::symlink_metadata(&path).map_err(|_| LoadError::NotFound)?;
+    let mut file = open_no_follow(&path)?;
+    let meta = file
+        .metadata()
+        .map_err(|e| LoadError::Io(e.kind().to_string()))?;
     if !meta.is_file() {
         return Err(LoadError::NotFound);
     }
@@ -90,13 +93,37 @@ fn read_descriptor(root: &Path, slug: &str) -> Result<Vec<u8>, LoadError> {
         return Err(LoadError::TooLarge);
     }
     let mut buf = Vec::new();
-    fs::File::open(&path)
-        .and_then(|f| f.take(MAX_BYTES as u64 + 1).read_to_end(&mut buf))
+    (&mut file)
+        .take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
         .map_err(|e| LoadError::Io(e.kind().to_string()))?;
     if buf.len() > MAX_BYTES {
         return Err(LoadError::TooLarge);
     }
     Ok(buf)
+}
+
+/// Open without following a symlink in the last component, so a file swapped for a link after
+/// the directory checks is refused at open time, and the checks that follow run on the opened
+/// handle. Parent directories are checked just before; the digest pin is what finally decides
+/// whether the bytes are accepted, so a swapped path can at worst make the load fail.
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> Result<fs::File, LoadError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| LoadError::NotFound)
+}
+
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> Result<fs::File, LoadError> {
+    let meta = fs::symlink_metadata(path).map_err(|_| LoadError::NotFound)?;
+    if !meta.is_file() {
+        return Err(LoadError::NotFound);
+    }
+    fs::File::open(path).map_err(|_| LoadError::NotFound)
 }
 
 /// Slugs of plugin folders under `<root>/.cengine/plugins`, sorted. Only real directories with
@@ -170,8 +197,10 @@ pub fn load(
 /// Pure data: persistence belongs to the host store.
 #[derive(Debug, Clone, Default)]
 pub struct Installed {
-    /// Approved pins per plugin id, oldest first; the last is active.
-    history: std::collections::BTreeMap<String, Vec<Pin>>,
+    /// Every pin ever approved per plugin, oldest first. Append-only: rollback never edits it.
+    log: std::collections::BTreeMap<String, Vec<Pin>>,
+    /// Positions in `log` that have been active, oldest first; the last one is active now.
+    active: std::collections::BTreeMap<String, Vec<usize>>,
     disabled: std::collections::BTreeSet<String>,
 }
 
@@ -182,10 +211,19 @@ impl Installed {
 
     /// Approve a pin as the active version of its plugin. Re-approving the active pin is a no-op.
     pub fn approve(&mut self, pin: Pin) {
-        let h = self.history.entry(pin.id.clone()).or_default();
-        if h.last() != Some(&pin) {
-            h.push(pin);
+        if self.current(&pin.id) == Some(&pin) {
+            return;
         }
+        let log = self.log.entry(pin.id.clone()).or_default();
+        let at = log.len();
+        let id = pin.id.clone();
+        log.push(pin);
+        self.active.entry(id).or_default().push(at);
+    }
+
+    fn current(&self, id: &str) -> Option<&Pin> {
+        let at = *self.active.get(id)?.last()?;
+        self.log.get(id)?.get(at)
     }
 
     /// The active pin, or `None` when the plugin is unknown or disabled.
@@ -193,23 +231,24 @@ impl Installed {
         if self.disabled.contains(id) {
             return None;
         }
-        self.history.get(id).and_then(|h| h.last())
+        self.current(id)
     }
 
-    /// Drop the active pin and return to the previous one. Fails when there is nothing to go
-    /// back to, so a plugin is never left without an approved version by rollback.
+    /// Step back to the previously active pin. Fails when there is nothing to go back to, so
+    /// rollback never leaves a plugin without an approved version. The approval log keeps
+    /// every pin, including the one rolled back from.
     pub fn rollback(&mut self, id: &str) -> Option<&Pin> {
-        let h = self.history.get_mut(id)?;
-        if h.len() < 2 {
+        let stack = self.active.get_mut(id)?;
+        if stack.len() < 2 {
             return None;
         }
-        h.pop();
-        h.last()
+        stack.pop();
+        self.current(id)
     }
 
     /// Stop serving a plugin without forgetting its history.
     pub fn disable(&mut self, id: &str) {
-        if self.history.contains_key(id) {
+        if self.log.contains_key(id) {
             self.disabled.insert(id.to_string());
         }
     }
@@ -218,8 +257,8 @@ impl Installed {
         self.disabled.remove(id);
     }
 
-    /// Every pin ever approved for a plugin, oldest first.
+    /// Every pin ever approved for a plugin, oldest first, including ones rolled back from.
     pub fn history(&self, id: &str) -> &[Pin] {
-        self.history.get(id).map(Vec::as_slice).unwrap_or(&[])
+        self.log.get(id).map(Vec::as_slice).unwrap_or(&[])
     }
 }

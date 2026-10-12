@@ -307,6 +307,7 @@ name = "ce-plugin"
 version = "0.1.0"
 dependencies = [
  "ce-expr",
+ "libc",
  "semver",
  "serde",
  "serde_json",

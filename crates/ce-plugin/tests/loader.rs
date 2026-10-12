@@ -198,6 +198,15 @@ fn upgrade_rollback_and_disable_keep_history() {
     inst.enable("inventory-rules");
     assert_eq!(inst.rollback("inventory-rules"), Some(&a));
     assert_eq!(inst.active("inventory-rules"), Some(&a));
+    assert_eq!(
+        inst.history("inventory-rules"),
+        &[a.clone(), b.clone()],
+        "rollback keeps the approval log"
+    );
+    // approving the pin we rolled back from makes it active again without losing anything
+    inst.approve(b.clone());
+    assert_eq!(inst.active("inventory-rules"), Some(&b));
+    assert_eq!(inst.history("inventory-rules").len(), 3);
     inst.disable("never-installed");
     assert!(inst.active("never-installed").is_none());
 }
