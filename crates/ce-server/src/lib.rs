@@ -53,7 +53,13 @@ pub struct AppState<S> {
     pub now: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// Where file bytes live; without one the file endpoints answer 503.
     pub blobs: Option<Arc<dyn BlobStore>>,
+    /// Turns the workspace name in a public URL into a tenant id; without one the public
+    /// endpoints answer 404. The host's directory decides, never the caller.
+    pub public_tenants: Option<PublicTenants>,
 }
+
+/// Looks up the tenant behind a public workspace name.
+pub type PublicTenants = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 impl<S> Clone for AppState<S> {
     fn clone(&self) -> Self {
@@ -65,6 +71,7 @@ impl<S> Clone for AppState<S> {
             installation: self.installation.clone(),
             now: self.now.clone(),
             blobs: self.blobs.clone(),
+            public_tenants: self.public_tenants.clone(),
         }
     }
 }
@@ -84,7 +91,14 @@ impl<S> AppState<S> {
                     .unwrap_or(0)
             }),
             blobs: None,
+            public_tenants: None,
         }
+    }
+
+    /// Lets public projections resolve workspace names to tenants.
+    pub fn with_public_tenants(mut self, f: PublicTenants) -> Self {
+        self.public_tenants = Some(f);
+        self
     }
 
     /// Gives the server a place for file bytes.
@@ -120,6 +134,10 @@ where
             get(file_get::<S>)
                 .put(file_put::<S>)
                 .layer(DefaultBodyLimit::max(max_file_bytes(&state.manifest))),
+        )
+        .route(
+            "/public/{inst}/{workspace}/{projection}",
+            get(public_read::<S>),
         )
         .route("/v1/{inst}/_batch", post(batch::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
@@ -714,6 +732,100 @@ async fn file_get<S: Store + Send + Sync + 'static>(
         h.insert(
             "x-content-type-options",
             HeaderValue::from_static("nosniff"),
+        );
+        Ok(res)
+    };
+    finish(&rid, run.await)
+}
+
+/// `GET /public/{inst}/{workspace}/{projection}`: no login. Only the fields and rows the
+/// manifest's projection allows, never an id, a version or anything else of the record.
+async fn public_read<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, workspace, name)): Path<(String, String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+    let rid = request_id();
+    let run = async {
+        let proj = &st.manifest.value["projections"][name.as_str()];
+        if inst != st.installation
+            || st.manifest.value["runtime"]["network"]["public_projections"] != true
+            || !proj.is_object()
+        {
+            return Err(Problem::not_found());
+        }
+        let tenant = st
+            .public_tenants
+            .as_ref()
+            .and_then(|f| f(&workspace))
+            .ok_or_else(Problem::not_found)?;
+        let scope = st
+            .verifier
+            .public_scope(&tenant)
+            .ok_or_else(Problem::not_found)?;
+        let entity = proj["entity"]
+            .as_str()
+            .ok_or_else(Problem::not_found)?
+            .to_string();
+        let fields: Vec<String> = proj["fields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f.as_str().map(String::from))
+            .collect();
+        let filter = match proj["filter"].as_str() {
+            Some(src) => Some(ce_manifest::filter_json(src).map_err(|e| {
+                store_problem(StoreError::Backend(format!("projection filter: {e}")))
+            })?),
+            None => None,
+        };
+        let mut req = list_request(&HashMap::new())?;
+        // Callers page; they cannot change what is selected, filtered, sorted or searched.
+        req.select = Some(fields.clone());
+        req.filter = filter;
+        req.limit = Some(
+            q.get("limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(50)
+                .clamp(1, 100),
+        );
+        if let Some(c) = q.get("after") {
+            let raw = B64
+                .decode(c)
+                .map_err(|_| bad_param("after", "the cursor is not valid"))?;
+            match serde_json::from_slice::<Value>(&raw) {
+                Ok(Value::Array(a)) => req.after = Some(a),
+                _ => return Err(bad_param("after", "the cursor is not valid")),
+            }
+        }
+        let store = st.store.clone();
+        let page = tokio::task::spawn_blocking(move || store.list(&scope, &entity, &req))
+            .await
+            .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+            .map_err(store_problem)?;
+        let data: Vec<Value> = page
+            .records
+            .iter()
+            .map(|r| {
+                let mut o = Map::new();
+                for f in &fields {
+                    if let Some(v) = r.data.get(f) {
+                        o.insert(f.clone(), v.clone());
+                    }
+                }
+                Value::Object(o)
+            })
+            .collect();
+        let next = page.next.map(|c| B64.encode(Value::Array(c).to_string()));
+        let mut res = (
+            StatusCode::OK,
+            Json(json!({"data": data, "meta": {"request_id": rid, "next": next}})),
+        )
+            .into_response();
+        res.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=30"),
         );
         Ok(res)
     };
