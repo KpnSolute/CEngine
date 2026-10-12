@@ -31,6 +31,10 @@
 //! | `CE_LOGIN_MAX_FAILED` | wrong PINs before a username locks (default 5) |
 //! | `CE_LOGIN_LOCKOUT_SECS` | how long it stays locked (default 900) |
 //! | `CE_ROLE_LADDER` | comma-separated roles, lowest first (default `staff,assistant,manager,admin,sudo`); a role also grants those below it |
+//! | `CE_FILES` | `postgres` keeps uploaded files in the installation's schema (`_ce_blobs`); unset leaves file routes answering 503 |
+//! | `CE_PROVIDER_URL` | the host gateway's https endpoint for provider calls (AI invoice import); unset leaves them answering 503 |
+//! | `CE_PROVIDER_TOKEN` | bearer token the gateway expects (a secret; required with `CE_PROVIDER_URL`) |
+//! | `CE_PROVIDER_TIMEOUT_SECS` | longest one provider call may take, 1 to 300 (default 30) |
 //! | `CE_BIND` | listen address (default `127.0.0.1:8080`) |
 
 use ce_auth::Verifier;
@@ -300,6 +304,51 @@ fn staff_login() -> Result<Option<(ce_server::PinLogin, String, u64)>, String> {
     Ok(Some((login, tenant, ttl)))
 }
 
+/// Uploaded files in the installation's schema.
+struct PgFiles(ce_store_pg::PgBlobs);
+
+impl ce_server::BlobStore for PgFiles {
+    fn put(
+        &self,
+        scope: &ce_auth::TenantScope,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<(), String> {
+        self.0
+            .put(scope.tenant_id(), key, bytes, content_type)
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    fn get(
+        &self,
+        scope: &ce_auth::TenantScope,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
+        self.0
+            .get(scope.tenant_id(), key)
+            .map_err(|e| format!("{e:?}"))
+    }
+}
+
+/// The gateway provider when `CE_PROVIDER_URL` is set. The token is never printed.
+fn provider_from_env() -> Result<Option<ce_provider_http::HttpProvider>, String> {
+    let Some(url) = std::env::var("CE_PROVIDER_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let token = var("CE_PROVIDER_TOKEN")?;
+    let secs = env_num("CE_PROVIDER_TIMEOUT_SECS", 30u64)?;
+    if !(1..=300).contains(&secs) {
+        return Err("CE_PROVIDER_TIMEOUT_SECS is 1 to 300".into());
+    }
+    ce_provider_http::HttpProvider::new(&url, &token, std::time::Duration::from_secs(secs))
+        .map(Some)
+        .map_err(|e| format!("CE_PROVIDER_URL: {e}"))
+}
+
 /// `ce-serve staff hash`: reads a PIN from stdin (one line) and prints its hash.
 fn staff_command(args: &[String]) -> Result<(), String> {
     if args.first().map(String::as_str) != Some("hash") {
@@ -369,7 +418,27 @@ fn run() -> Result<(), String> {
     let store = TypedPgStore::open_with(&url, &manifest, &schema, pool).map_err(|e| {
         format!("cannot open schema {schema}: {e:?} (run `ce-serve install` first)")
     })?;
+    let blobs = match std::env::var("CE_FILES")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .as_deref()
+    {
+        None => None,
+        Some("postgres") => Some(
+            store
+                .blobs()
+                .map_err(|e| format!("cannot prepare file storage: {e:?}"))?,
+        ),
+        Some(_) => return Err("CE_FILES must be `postgres` or unset".into()),
+    };
+    let provider = provider_from_env()?;
     let mut state = AppState::new(store, verifier, manifest, &installation);
+    if let Some(b) = blobs {
+        state = state.with_blobs(std::sync::Arc::new(PgFiles(b)));
+    }
+    if let Some(p) = provider {
+        state = state.with_provider(std::sync::Arc::new(p));
+    }
     if let Some(login) = staff_login()? {
         let (login, tenant, ttl) = login;
         state = state

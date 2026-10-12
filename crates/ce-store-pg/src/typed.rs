@@ -55,7 +55,7 @@ struct Ent {
 }
 
 pub struct TypedPgStore {
-    pool: Pool,
+    pool: std::sync::Arc<Pool>,
     schema: String,
     manifest: Manifest,
     ents: HashMap<String, Ent>,
@@ -196,6 +196,7 @@ impl TypedPgStore {
                )"#
         ))
         .map_err(db)?;
+        tx.batch_execute(&crate::blobs::ddl(schema)).map_err(db)?;
         tx.commit().map_err(db)?;
         drop(client);
         Self::build(pool, m, schema)
@@ -283,7 +284,7 @@ impl TypedPgStore {
             );
         }
         Ok(TypedPgStore {
-            pool,
+            pool: std::sync::Arc::new(pool),
             schema: schema.to_string(),
             manifest: m.clone(),
             ents,
@@ -292,6 +293,12 @@ impl TypedPgStore {
 
     pub fn schema_name(&self) -> &str {
         &self.schema
+    }
+
+    /// File bytes kept in this installation's schema, sharing the store's connections. Creates the
+    /// table when an installation made before files existed does not have it yet.
+    pub fn blobs(&self) -> Result<crate::PgBlobs, StoreError> {
+        crate::PgBlobs::open(self.pool.clone(), &self.schema)
     }
 
     /// Drops the schema and everything in it. For tests.

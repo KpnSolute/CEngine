@@ -18,6 +18,7 @@ semver = "1"
 serde_json = "1"
 ce-server = { path = "../ce-server" }
 ce-store-pg = { path = "../ce-store-pg" }
+ce-provider-http = { path = "../ce-provider-http" }
 postgres = "0.19"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
