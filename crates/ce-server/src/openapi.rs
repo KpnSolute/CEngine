@@ -498,7 +498,11 @@ fn add_operations(m: &Manifest, installation: &str, paths: &mut Map<String, Valu
                     "content": {"application/json": {"schema": {"type": "object", "properties": {
                         "data": {"type": "array", "items": {"type": ["object", "null"]}},
                         "meta": {"type": "object"}}}}}}}),
-                &with(&[("409", "conflict"), ("422", "validation_failed")]))}}),
+                &with(&[
+                    ("409", "conflict"),
+                    ("422", "validation_failed"),
+                    ("428", "precondition_required: Idempotency-Key is missing"),
+                ]))}}),
     );
 
     // actions
@@ -514,8 +518,8 @@ fn add_operations(m: &Manifest, installation: &str, paths: &mut Map<String, Valu
             json!({"post": {"operationId": format!("action_{name}"),
                 "summary": format!("run `{name}` on one {entity} record"),
                 "parameters": [key.clone(),
-                    {"name": "If-Match", "in": "header", "required": false, "schema": {"type": "string"},
-                        "description": "the record version the caller read"}],
+                    {"name": "If-Match", "in": "header", "required": true, "schema": {"type": "string"},
+                        "description": "the record version the caller read, such as \"3\""}],
                 "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object",
                     "required": ["id"],
                     "properties": {"id": {"type": "string", "description": "the record the action runs on"},
@@ -527,8 +531,12 @@ fn add_operations(m: &Manifest, installation: &str, paths: &mut Map<String, Valu
                             "meta": {"type": "object", "properties": {
                                 "request_id": {"type": "string"}, "version": {"type": "integer"},
                                 "created": {"type": "array", "items": {"type": "object"}},
-                                "emitted": {"type": "array", "items": {"type": "object"}}}}}}}}}}),
-                    &with(&[("409", "invalid_transition or version_conflict"), ("422", "validation_failed")]))}}),
+                                "emitted": {"type": "array", "items": {"type": "string"}}}}}}}}}}),
+                    &with(&[
+                        ("409", "invalid_transition or version_conflict"),
+                        ("422", "validation_failed"),
+                        ("428", "precondition_required: If-Match or Idempotency-Key is missing"),
+                    ]))}}),
         );
     }
 

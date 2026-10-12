@@ -97,6 +97,15 @@ async fn period_changeset_and_event_routes_appear_with_their_tools() {
             ["$ref"],
         "#/components/schemas/period"
     );
+    let headers = close["parameters"].as_array().unwrap();
+    let if_match = headers.iter().find(|h| h["name"] == "If-Match").unwrap();
+    assert_eq!(if_match["required"], true);
+    assert!(close["responses"]["428"].is_object());
+    assert_eq!(
+        close["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["meta"]
+            ["properties"]["emitted"]["items"]["type"],
+        "string"
+    );
     assert_eq!(
         close["requestBody"]["content"]["application/json"]["schema"]["required"],
         json!(["id"])
