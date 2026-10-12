@@ -162,7 +162,9 @@ fn manifest() -> Value {
                     "fields": {
                         "name": {"type": "string", "required": true},
                         "note": {"type": "string"},
-                        "sent_on": {"type": "date"}
+                        "sent_on": {"type": "date"},
+                        "amount": {"type": "decimal", "precision": 12, "scale": 2, "default": 0},
+                        "account": {"type": "ref", "ref": "account"}
                     },
                     "state": {"field": "status", "initial": "draft", "states": {
                         "draft": {"code": 100, "to": ["sent"]},
@@ -170,7 +172,14 @@ fn manifest() -> Value {
                         "paid": {"code": 600}
                     }}
                 },
-                "task": {"fields": {"title": {"type": "string", "required": true}}}
+                "task": {"fields": {"title": {"type": "string", "required": true}}},
+                "account": {
+                    "fields": {
+                        "name": {"type": "string", "required": true},
+                        "balance": {"type": "decimal", "precision": 12, "scale": 2, "default": 0}
+                    },
+                    "invariants": [{"name": "not_overdrawn", "expr": "balance >= 0", "message_code": "account.overdrawn"}]
+                }
             },
             "actions": {
                 "send": {
@@ -184,7 +193,22 @@ fn manifest() -> Value {
                         {"emit": "order.sent"}
                     ]
                 },
-                "pay": {"entity": "order", "effect": [{"transition": "paid"}]}
+                "pay": {"entity": "order", "effect": [{"transition": "paid"}]},
+                "credit": {
+                    "entity": "order",
+                    "effect": [
+                        {"update": {"entity": "account", "id": "account", "set": {"balance": "ref(account).balance + amount"}}}
+                    ]
+                },
+                "bill": {
+                    "entity": "order",
+                    "effect": [
+                        {"set": {"note": "'billed'"}},
+                        {"when": "amount > 100", "set": {"note": "'large'"}},
+                        {"when": "amount > 100", "update": {"entity": "account", "id": "account", "set": {"balance": "ref(account).balance - amount"}}},
+                        {"when": "amount <= 100", "set": {"sent_on": "today"}}
+                    ]
+                }
             },
             "roles": {
                 "owner": {"read": ["*"], "write": ["*"], "actions": ["*"]},
@@ -303,5 +327,111 @@ async fn a_failing_action_changes_nothing() {
     assert_eq!(got["data"]["status"], "draft");
     assert_eq!(got["data"]["version"], 1);
     assert!(owner.list("task").await.is_empty());
+    close(vec![owner.app]).await;
+}
+
+#[tokio::test]
+async fn effects_run_only_when_their_condition_holds_and_can_update_another_record() {
+    let Some(mut owner) = setup().await else {
+        return;
+    };
+    let (_, acc) = owner
+        .post("account", json!({"name": "petty", "balance": "500.00"}))
+        .await;
+    let acc_id = acc["data"]["id"].as_str().unwrap().to_string();
+    let (s, big) = owner
+        .post(
+            "order",
+            json!({"name": "oven", "amount": "120.00", "account": acc_id}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{big}");
+    let (s, small) = owner
+        .post(
+            "order",
+            json!({"name": "mop", "amount": "20.00", "account": acc_id}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{small}");
+
+    let big_id = big["data"]["id"].as_str().unwrap();
+    let (s, v) = owner.act("bill", big_id, 1, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["note"], "large");
+    assert!(
+        v["data"]["sent_on"].is_null(),
+        "the small-order effect must not run"
+    );
+    let (_, a) = owner
+        .call("GET", &format!("/v1/{INST}/account/{acc_id}"), None, None)
+        .await;
+    assert_eq!(a["data"]["balance"], "380.00");
+    assert_eq!(a["data"]["version"], 2);
+
+    let small_id = small["data"]["id"].as_str().unwrap();
+    let (s, v) = owner.act("bill", small_id, 1, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["note"], "billed");
+    assert_eq!(v["data"]["sent_on"], "1970-01-01");
+    let (_, a) = owner
+        .call("GET", &format!("/v1/{INST}/account/{acc_id}"), None, None)
+        .await;
+    assert_eq!(
+        a["data"]["balance"], "380.00",
+        "a skipped update changes nothing"
+    );
+
+    // The account's own rule applies to the update, and the whole action is undone.
+    let (_, poor) = owner
+        .post("account", json!({"name": "tiny", "balance": "10.00"}))
+        .await;
+    let poor_id = poor["data"]["id"].as_str().unwrap().to_string();
+    let (_, o) = owner
+        .post(
+            "order",
+            json!({"name": "van", "amount": "900.00", "account": poor_id}),
+        )
+        .await;
+    let oid = o["data"]["id"].as_str().unwrap();
+    let (s, v) = owner.act("bill", oid, 1, json!({})).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let (_, o2) = owner
+        .call("GET", &format!("/v1/{INST}/order/{oid}"), None, None)
+        .await;
+    assert!(
+        o2["data"]["note"].is_null(),
+        "the first set was undone: {o2}"
+    );
+    let (_, p) = owner
+        .call("GET", &format!("/v1/{INST}/account/{poor_id}"), None, None)
+        .await;
+    assert_eq!(p["data"]["balance"], "10.00");
+
+    // No account on the order: the update has nothing to change and the action fails whole.
+    let (_, lone) = owner
+        .post("order", json!({"name": "box", "amount": "500.00"}))
+        .await;
+    let lid = lone["data"]["id"].as_str().unwrap();
+    let (s, v) = owner.act("bill", lid, 1, json!({})).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+
+    // An action that only updates another record still advances its own, so a retry with the same
+    // version cannot apply the update twice.
+    let (_, c) = owner
+        .post(
+            "order",
+            json!({"name": "refund", "amount": "50.00", "account": acc_id}),
+        )
+        .await;
+    let cid = c["data"]["id"].as_str().unwrap();
+    let (s, v) = owner.act("credit", cid, 1, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["version"], 2);
+    let (s, v) = owner.act("credit", cid, 1, json!({})).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let (_, a) = owner
+        .call("GET", &format!("/v1/{INST}/account/{acc_id}"), None, None)
+        .await;
+    assert_eq!(a["data"]["balance"], "430.00", "credited once");
     close(vec![owner.app]).await;
 }

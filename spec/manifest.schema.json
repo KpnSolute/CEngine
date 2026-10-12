@@ -100,7 +100,9 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+              "when": { "type": "string", "description": "Expression; the effect is skipped unless it is true." },
               "set": { "type": "object", "additionalProperties": { "type": "string" } },
+              "update": { "type": "object", "required": ["entity", "id", "set"], "additionalProperties": false, "properties": { "entity": { "$ref": "#/$defs/name" }, "id": { "type": "string", "description": "Expression giving the record id, usually a ref field of the action's record." }, "set": { "type": "object", "additionalProperties": { "type": "string" } } } },
               "transition": { "$ref": "#/$defs/name" },
               "create": { "type": "object", "required": ["entity", "values"], "additionalProperties": false, "properties": { "entity": { "$ref": "#/$defs/name" }, "values": { "type": "object", "additionalProperties": { "type": "string" } } } },
               "emit": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*$" }

@@ -220,6 +220,62 @@ pub fn check(m: &Value) -> Vec<Issue> {
                     ));
                 }
             }
+            if let Some(w) = eff.get("when").and_then(Value::as_str) {
+                expr(&mut out, &format!("{ep}/when"), w, &expr_names, Site::Plain);
+                if eff.as_object().is_some_and(|o| o.len() == 1) {
+                    out.push(issue(
+                        format!("{ep}/when"),
+                        "empty_effect",
+                        "`when` needs an effect to guard".to_string(),
+                    ));
+                }
+            }
+            if let Some(u) = obj(eff, "update") {
+                if let Some(e) = u.get("id").and_then(Value::as_str) {
+                    expr(
+                        &mut out,
+                        &format!("{ep}/update/id"),
+                        e,
+                        &expr_names,
+                        Site::Plain,
+                    );
+                }
+                match u.get("entity").and_then(Value::as_str) {
+                    Some(t) if !entities.contains_key(t) => out.push(issue(
+                        format!("{ep}/update/entity"),
+                        "unknown_entity",
+                        format!("no entity `{t}`"),
+                    )),
+                    Some(t) => {
+                        let tf = obj(&entities[t], "fields").unwrap_or(&empty);
+                        for (k, v) in u.get("set").and_then(Value::as_object).unwrap_or(&empty) {
+                            if !tf.contains_key(k) {
+                                out.push(issue(
+                                    format!("{ep}/update/set/{k}"),
+                                    "unknown_field",
+                                    format!("`{t}` has no field `{k}`"),
+                                ));
+                            } else if tf[k].get("computed").is_some() {
+                                out.push(issue(
+                                    format!("{ep}/update/set/{k}"),
+                                    "computed_field",
+                                    format!("`{k}` is computed and cannot be set"),
+                                ));
+                            }
+                            if let Some(e) = v.as_str() {
+                                expr(
+                                    &mut out,
+                                    &format!("{ep}/update/set/{k}"),
+                                    e,
+                                    &expr_names,
+                                    Site::Plain,
+                                );
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
             if let Some(set) = obj(eff, "set") {
                 for (k, v) in set {
                     if !names.contains(k.as_str()) {
