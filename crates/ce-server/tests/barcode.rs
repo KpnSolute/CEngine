@@ -107,7 +107,9 @@ async fn bad_requests_are_refused_with_the_reason() {
         ("type=code128", "data"),
         ("type=ean13&data=5901234123458", "bad_check_digit"),
         ("type=ean13&data=12ab", "bad_"),
-        ("type=code128&data=A&module_size=99", "module_size"),
+        ("type=code128&data=A&module_size=99", "/module_size"),
+        ("type=code128&data=A&bar_height=0", "/bar_height"),
+        ("type=code128&data=A&quiet_zone=21", "/quiet_zone"),
         ("type=code128&data=A&bar_height=x", "bar_height"),
     ] {
         let (s, body, _) = get(&app, &format!("/v1/{INST}/_barcode?{q}"), Some(&t)).await;

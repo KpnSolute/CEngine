@@ -1720,6 +1720,13 @@ async fn barcode<S: Store + Send + Sync + 'static>(
         }
         opt.quiet_zone = number("quiet_zone")?;
         let failed = |e: BarcodeError| {
+            // `BadOptions` messages start with the option's name (`module_size must be ...`).
+            let path = match &e {
+                BarcodeError::BadOptions(why) => {
+                    format!("/{}", why.split_whitespace().next().unwrap_or("data"))
+                }
+                _ => "/data".to_string(),
+            };
             let (code, detail) = match e {
                 BarcodeError::Empty => ("empty", "nothing to encode".to_string()),
                 BarcodeError::TooLong { max } => ("too_long", format!("at most {max}")),
@@ -1738,7 +1745,7 @@ async fn barcode<S: Store + Send + Sync + 'static>(
             };
             Problem::validation(
                 "the barcode cannot be made",
-                vec![json!({"path": "/data", "code": code, "detail": detail})],
+                vec![json!({"path": path, "code": code, "detail": detail})],
             )
         };
         let code = ce_barcode::encode(symbology, data).map_err(failed)?;
