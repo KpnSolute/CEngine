@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 
 const ENGINE: Version = Version::new(0, 1, 0);
 
+const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 fn shell() -> Value {
     json!({
         "manifest_version": 1,
@@ -90,7 +92,7 @@ slot = "over_pull"
 rule = "true"
 "#,
     );
-    let with = compose(&shell(), "business.inventory", Some(&p)).unwrap();
+    let with = compose(&shell(), "business.inventory", Some((&p, DIGEST))).unwrap();
     let without = compose(&shell(), "business.inventory", None).unwrap();
     assert_ne!(with.hash, without.hash);
     let f = &with.manifest["entities"]["stock_line"];
@@ -120,7 +122,7 @@ slot = "ending_qty"
 rule = "opening_oh + no_such_field"
 "#,
     );
-    match compose(&shell(), "business.inventory", Some(&p)) {
+    match compose(&shell(), "business.inventory", Some((&p, DIGEST))) {
         Err(ComposeError::Invalid(issues)) => assert!(!issues.is_empty()),
         other => panic!("{other:?}"),
     }
@@ -158,13 +160,54 @@ fn a_plugin_for_another_module_is_refused() {
     let mut p = plugin("");
     p.module = "business.other".into();
     assert_eq!(
-        compose(&shell(), "business.inventory", Some(&p)).unwrap_err(),
+        compose(&shell(), "business.inventory", Some((&p, DIGEST))).unwrap_err(),
         ComposeError::PluginMismatch
     );
     let mut p = plugin("");
     p.module_api = 2;
     assert_eq!(
-        compose(&shell(), "business.inventory", Some(&p)).unwrap_err(),
+        compose(&shell(), "business.inventory", Some((&p, DIGEST))).unwrap_err(),
         ComposeError::PluginMismatch
     );
+}
+
+#[test]
+fn the_composed_manifest_names_its_module_and_pinned_plugin() {
+    let p = plugin("");
+    let with = compose(&shell(), "business.inventory", Some((&p, DIGEST))).unwrap();
+    assert_eq!(
+        with.manifest["provenance"],
+        json!({
+            "module": {"name": "business.inventory", "api": 1},
+            "plugin": {"id": p.id, "version": p.version.to_string(), "digest": DIGEST}
+        })
+    );
+    let bare = compose(&shell(), "business.inventory", None).unwrap();
+    assert_eq!(
+        bare.manifest["provenance"],
+        json!({"module": {"name": "business.inventory", "api": 1}})
+    );
+    // A different pinned digest is a different manifest.
+    let other = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let moved = compose(&shell(), "business.inventory", Some((&p, other))).unwrap();
+    assert_ne!(with.hash, moved.hash);
+}
+
+#[test]
+fn an_author_cannot_write_provenance_by_hand() {
+    let mut forged = compose(&shell(), "business.inventory", None)
+        .unwrap()
+        .manifest;
+    forged["provenance"]["plugin"] = json!({"id": "x", "version": "1.0.0", "digest": DIGEST});
+    let issues = ce_manifest::validate(forged.to_string().as_bytes()).unwrap_err();
+    assert!(issues.iter().any(|i| i.code == "provenance_reserved"));
+    // Only the composing host may accept it.
+    assert!(ce_manifest::validate_composed(forged.to_string().as_bytes()).is_ok());
+}
+
+#[test]
+fn a_long_but_legal_plugin_version_still_composes() {
+    let mut p = plugin("");
+    p.version = semver::Version::parse(&format!("1.0.0-{}", "a".repeat(120))).unwrap();
+    assert!(compose(&shell(), "business.inventory", Some((&p, DIGEST))).is_ok());
 }

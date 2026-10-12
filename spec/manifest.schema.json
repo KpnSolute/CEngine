@@ -175,6 +175,16 @@
     "roles": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "type": "object", "additionalProperties": false, "properties": { "read": { "type": "array", "items": { "type": "string" } }, "write": { "type": "array", "items": { "type": "string" } }, "actions": { "type": "array", "items": { "type": "string" } } } } },
     "projections": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/projection" } },
     "reports": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/report" } },
-    "runtime": { "$ref": "#/$defs/runtime" }
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "provenance": {
+      "type": "object",
+      "description": "Written by composition, never by authors: which module and which digest-pinned plugin produced the rules. Recorded on every audit event.",
+      "required": ["module"],
+      "additionalProperties": false,
+      "properties": {
+        "module": { "type": "object", "required": ["name", "api"], "additionalProperties": false, "properties": { "name": { "type": "string" }, "api": { "type": "integer", "minimum": 1 } } },
+        "plugin": { "type": "object", "required": ["id", "version", "digest"], "additionalProperties": false, "properties": { "id": { "type": "string" }, "version": { "type": "string" }, "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } } }
+      }
+    }
   }
 }

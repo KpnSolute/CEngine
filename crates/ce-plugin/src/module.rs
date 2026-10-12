@@ -80,12 +80,13 @@ pub struct Composed {
 pub fn compose(
     template: &Value,
     module: &str,
-    plugin: Option<&Plugin>,
+    plugin: Option<(&Plugin, &str)>,
 ) -> Result<Composed, ComposeError> {
     let def = defs()
         .into_iter()
         .find(|d| d["module"] == module)
         .ok_or_else(|| ComposeError::UnknownModule(module.to_string()))?;
+    let (plugin, digest) = (plugin.map(|(p, _)| p), plugin.map(|(_, d)| d));
     if let Some(p) = plugin {
         if p.module != module || Some(u64::from(p.module_api)) != def["api"].as_u64() {
             return Err(ComposeError::PluginMismatch);
@@ -127,7 +128,16 @@ pub fn compose(
         entities.insert(k.clone(), v.clone());
     }
 
-    match ce_manifest::validate(out.to_string().as_bytes()) {
+    let mut prov = serde_json::json!({"module": {"name": module, "api": def["api"]}});
+    if let (Some(p), Some(d)) = (plugin, digest) {
+        prov["plugin"] =
+            serde_json::json!({"id": p.id, "version": p.version.to_string(), "digest": d});
+    }
+    out.as_object_mut()
+        .expect("checked above")
+        .insert("provenance".into(), prov);
+
+    match ce_manifest::validate_composed(out.to_string().as_bytes()) {
         Ok(m) => Ok(Composed {
             manifest: m.value,
             hash: m.hash,

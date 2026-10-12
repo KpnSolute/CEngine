@@ -574,6 +574,10 @@ pub(crate) fn audit(
     ev.insert("actor".into(), json!(env.ctx.actor_id));
     ev.insert("request_id".into(), json!(env.request_id));
     ev.insert("at".into(), json!(env.ctx.now_unix));
+    ev.insert("manifest_hash".into(), json!(env.manifest.hash));
+    if let Some(p) = env.manifest.value.get("provenance") {
+        ev.insert("provenance".into(), p.clone());
+    }
     if let Some(r) = after {
         ev.insert("to_version".into(), json!(r.version));
         ev.insert("after".into(), r.data.clone());
