@@ -40,7 +40,7 @@ pub(crate) fn enqueue(
     subject: Option<&str>,
     data: Value,
 ) -> Result<(), StoreError> {
-    if !enabled(env.manifest) || !ce_events::valid_event_name(name) {
+    if !enabled(env.manifest) || name.len() > 120 || !ce_events::valid_event_name(name) {
         return Ok(());
     }
     let mut ev = Map::new();
