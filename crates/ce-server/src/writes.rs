@@ -327,15 +327,15 @@ fn refresh_parents(
 
 /// What a write changed: the record it left (none for a delete) and the data it replaced
 /// (none for a create), which is what the audit trail keeps.
-struct Outcome {
-    after: Option<Record>,
-    before: Option<Value>,
+pub(crate) struct Outcome {
+    pub(crate) after: Option<Record>,
+    pub(crate) before: Option<Value>,
     /// False when a create was a replay of an earlier request with the same key: nothing
     /// changed, so there is nothing to audit.
-    fresh: bool,
+    pub(crate) fresh: bool,
 }
 
-fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Outcome, Failure> {
+pub(crate) fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<Outcome, Failure> {
     match op {
         Op::Create { data, key } => {
             // The derived fields are computed only if this call really creates the record: a
@@ -441,7 +441,13 @@ pub(crate) const AUDIT_ENTITY: &str = "audit_event";
 
 /// Records the write in the audit trail, in the transaction of the write itself, when the
 /// template uses the `audit` tool. The audit entity is never audited.
-fn audit(tx: &dyn Store, env: &Env, entity: &str, op: &Op, out: &Outcome) -> Result<(), Failure> {
+pub(crate) fn audit(
+    tx: &dyn Store,
+    env: &Env,
+    entity: &str,
+    op: &Op,
+    out: &Outcome,
+) -> Result<(), Failure> {
     if entity == AUDIT_ENTITY
         || !out.fresh
         || !env.manifest.value["entities"][AUDIT_ENTITY].is_object()

@@ -30,7 +30,8 @@ fn every_tool_composes_into_a_valid_manifest_alone_and_together() {
             "notifications",
             "bookings",
             "invoicing",
-            "audit"
+            "audit",
+            "changesets"
         ]
     );
     for n in &names {

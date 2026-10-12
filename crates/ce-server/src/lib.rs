@@ -14,6 +14,7 @@
 //! (including sums over child records) and invariants (including `ref()`) are enforced there.
 //! Not yet: batch, actions, changesets, events, files.
 
+mod changesets;
 mod openapi;
 mod problem;
 mod writes;
@@ -25,7 +26,7 @@ use axum::{
     extract::{rejection::BytesRejection, DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use ce_auth::{Principal, Verifier};
@@ -87,6 +88,10 @@ where
         .route("/_meta/health/ready", get(health))
         .route("/_meta/manifest", get(manifest::<S>))
         .route("/_meta/openapi", get(openapi_doc::<S>))
+        .route(
+            "/v1/{inst}/changeset/{id}/{verb}",
+            post(changeset_verb::<S>),
+        )
         .route("/v1/{inst}/{entity}", get(list::<S>).post(create::<S>))
         .route(
             "/v1/{inst}/{entity}/{id}",
@@ -323,11 +328,13 @@ where
     S: Store + Send + Sync + 'static,
 {
     // The audit trail is written by the server alone; nobody edits it through the API.
-    if entity == writes::AUDIT_ENTITY {
+    if entity == writes::AUDIT_ENTITY
+        || (changesets::enabled(&st.manifest) && changesets::is_internal(&entity))
+    {
         return Err(Problem::new(
             StatusCode::FORBIDDEN,
             "forbidden",
-            "the audit trail is written by the server only",
+            "this record is written by the server only",
         ));
     }
     let rid = rid.to_string();
@@ -402,6 +409,126 @@ async fn openapi_doc<S: Store + Send + Sync + 'static>(
     )
 }
 
+/// A write waiting to be staged; owned so it can move into the blocking task.
+struct Staged {
+    operation: &'static str,
+    record_id: Option<String>,
+    expected: Option<u64>,
+    data: Option<Value>,
+    key: Option<String>,
+}
+
+impl Staged {
+    fn new(
+        operation: &'static str,
+        record_id: Option<String>,
+        expected: Option<u64>,
+        data: Option<Value>,
+        key: Option<String>,
+    ) -> Self {
+        Staged {
+            operation,
+            record_id,
+            expected,
+            data,
+            key,
+        }
+    }
+}
+
+/// Stages the write as a changeset operation when the entity is governed and the caller may
+/// not merge; the answer is then 202 with the changeset and operation ids.
+async fn stage_if_governed<S: Store + Send + Sync + 'static>(
+    st: &AppState<S>,
+    who: &Principal,
+    headers: &HeaderMap,
+    entity: &str,
+    w: Staged,
+    rid: &str,
+) -> Result<Option<Response>, Problem> {
+    if !changesets::governed(&st.manifest, entity)
+        || st.policy.can_run(&who.roles, changesets::MERGE_ACTION)
+    {
+        return Ok(None);
+    }
+    let append = header_str(headers, "x-ce-changeset")?.map(str::to_string);
+    let (store, scope, actor, entity) = (
+        st.store.clone(),
+        who.scope().clone(),
+        who.user_id.clone(),
+        entity.to_string(),
+    );
+    let staged = tokio::task::spawn_blocking(move || {
+        changesets::stage(
+            &*store,
+            &scope,
+            &changesets::Staging {
+                actor: &actor,
+                entity: &entity,
+                operation: w.operation,
+                record_id: w.record_id.as_deref(),
+                expected_version: w.expected,
+                data: w.data,
+                key: w.key.as_deref(),
+                append_to: append.as_deref(),
+            },
+        )
+    })
+    .await
+    .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
+    let body = json!({
+        "data": {"changeset_id": staged.changeset_id, "op_id": staged.op_id, "status": "proposed"},
+        "meta": {"request_id": rid}
+    });
+    Ok(Some((StatusCode::ACCEPTED, Json(body)).into_response()))
+}
+
+/// `POST .../changeset/{id}/{merge|reject|revert|withdraw}`.
+async fn changeset_verb<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, id, verb)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authenticate(&st, &headers)?;
+        if inst != st.installation
+            || !changesets::enabled(&st.manifest)
+            || !matches!(verb.as_str(), "merge" | "reject" | "revert" | "withdraw")
+        {
+            return Err(Problem::not_found());
+        }
+        if verb != "withdraw" && !st.policy.can_run(&who.roles, changesets::MERGE_ACTION) {
+            return Err(Problem::forbidden());
+        }
+        let ctx = invariant_context(&st, &who);
+        let scope = who.scope().clone();
+        let (store, manifest, rid2) = (st.store.clone(), st.manifest.clone(), rid.clone());
+        let rec = tokio::task::spawn_blocking(move || {
+            let env = writes::Env {
+                manifest: &manifest,
+                scope: &scope,
+                ctx: &ctx,
+                request_id: &rid2,
+            };
+            match verb.as_str() {
+                "merge" => changesets::merge(&*store, &env, &id),
+                "revert" => changesets::revert(&*store, &env, &id),
+                "reject" => {
+                    changesets::close(&*store, &scope, &ctx.actor_id, &id, "rejected", false)
+                }
+                _ => changesets::close(&*store, &scope, &ctx.actor_id, &id, "withdrawn", true),
+            }
+        })
+        .await
+        .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
+        let body =
+            json!({"data": record_json(&rec), "meta": {"request_id": rid, "version": rec.version}});
+        Ok((StatusCode::OK, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
+}
+
 async fn create<S: Store + Send + Sync + 'static>(
     State(st): State<AppState<S>>,
     Path((inst, entity)): Path<(String, String)>,
@@ -425,6 +552,24 @@ async fn create<S: Store + Send + Sync + 'static>(
             if !obj.contains_key(name) && !f["computed"].is_string() && !f["default"].is_null() {
                 obj.insert(name.clone(), f["default"].clone());
             }
+        }
+        if let Some(res) = stage_if_governed(
+            &st,
+            &who,
+            &headers,
+            &entity,
+            Staged::new(
+                "create",
+                None,
+                None,
+                Some(Value::Object(obj.clone())),
+                Some(key.clone()),
+            ),
+            &rid,
+        )
+        .await?
+        {
+            return Ok(res);
         }
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
@@ -483,6 +628,24 @@ async fn update<S: Store + Send + Sync + 'static>(
         let expected = if_match(&headers)?;
         let patch = parse_object(&body.map_err(body_problem)?)?;
         validate_body(&st, &entity, &patch, ce_validate::Mode::Patch)?;
+        if let Some(res) = stage_if_governed(
+            &st,
+            &who,
+            &headers,
+            &entity,
+            Staged::new(
+                "update",
+                Some(id.clone()),
+                Some(expected),
+                Some(Value::Object(patch.clone())),
+                None,
+            ),
+            &rid,
+        )
+        .await?
+        {
+            return Ok(res);
+        }
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
         let readable = st.policy.can_read(&who.roles, &entity);
@@ -514,6 +677,18 @@ async fn remove<S: Store + Send + Sync + 'static>(
     let run = async {
         let who = guard(&st, &headers, &inst, &entity, Access::Write)?;
         let expected = if_match(&headers)?;
+        if let Some(res) = stage_if_governed(
+            &st,
+            &who,
+            &headers,
+            &entity,
+            Staged::new("delete", Some(id.clone()), Some(expected), None, None),
+            &rid,
+        )
+        .await?
+        {
+            return Ok(res);
+        }
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
         write(

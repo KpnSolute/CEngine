@@ -1,0 +1,34 @@
+{
+  "tool": "changesets",
+  "version": "0.1.0",
+  "title": "Changesets: staged writes that a reviewer merges, rejects or reverts",
+  "entities": {
+    "changeset": {
+      "fields": {
+        "title": {"type": "string", "required": true, "max_length": 200, "indexed": true},
+        "status": {"type": "enum", "values": ["proposed", "merged", "rejected", "withdrawn", "conflicted", "reverted"], "indexed": true},
+        "submitted_by": {"type": "string", "required": true, "max_length": 120, "indexed": true},
+        "decided_by": {"type": "string", "max_length": 120},
+        "conflict": {"type": "json"}
+      },
+      "sort_keys": ["title", "status"]
+    },
+    "changeset_op": {
+      "fields": {
+        "changeset": {"type": "ref", "ref": "changeset", "required": true, "indexed": true},
+        "seq": {"type": "integer", "required": true, "indexed": true},
+        "entity": {"type": "string", "required": true, "max_length": 64},
+        "operation": {"type": "enum", "values": ["create", "update", "delete"], "required": true},
+        "record_id": {"type": "string", "max_length": 64},
+        "expected_version": {"type": "integer"},
+        "data": {"type": "json"},
+        "before": {"type": "json"},
+        "result_version": {"type": "integer"}
+      },
+      "sort_keys": ["seq"]
+    }
+  },
+  "actions": {
+    "merge_changeset": {"entity": "changeset", "effect": [{"emit": "changeset.decided"}]}
+  }
+}
