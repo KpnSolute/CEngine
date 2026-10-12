@@ -192,3 +192,22 @@ fn the_composed_manifest_names_its_module_and_pinned_plugin() {
     let moved = compose(&shell(), "business.inventory", Some((&p, other))).unwrap();
     assert_ne!(with.hash, moved.hash);
 }
+
+#[test]
+fn an_author_cannot_write_provenance_by_hand() {
+    let mut forged = compose(&shell(), "business.inventory", None)
+        .unwrap()
+        .manifest;
+    forged["provenance"]["plugin"] = json!({"id": "x", "version": "1.0.0", "digest": DIGEST});
+    let issues = ce_manifest::validate(forged.to_string().as_bytes()).unwrap_err();
+    assert!(issues.iter().any(|i| i.code == "provenance_reserved"));
+    // Only the composing host may accept it.
+    assert!(ce_manifest::validate_composed(forged.to_string().as_bytes()).is_ok());
+}
+
+#[test]
+fn a_long_but_legal_plugin_version_still_composes() {
+    let mut p = plugin("");
+    p.version = semver::Version::parse(&format!("1.0.0-{}", "a".repeat(120))).unwrap();
+    assert!(compose(&shell(), "business.inventory", Some((&p, DIGEST))).is_ok());
+}

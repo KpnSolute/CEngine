@@ -137,7 +137,7 @@ pub fn compose(
         .expect("checked above")
         .insert("provenance".into(), prov);
 
-    match ce_manifest::validate(out.to_string().as_bytes()) {
+    match ce_manifest::validate_composed(out.to_string().as_bytes()) {
         Ok(m) => Ok(Composed {
             manifest: m.value,
             hash: m.hash,

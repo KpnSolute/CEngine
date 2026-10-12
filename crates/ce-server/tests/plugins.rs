@@ -7,7 +7,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use ce_auth::Verifier;
-use ce_manifest::validate;
+use ce_manifest::validate_composed;
 use ce_server::{router, AppState};
 use ce_store_pg::TypedPgStore;
 use hmac::{Hmac, Mac};
@@ -48,7 +48,7 @@ fn url() -> Option<String> {
 static N: AtomicU32 = AtomicU32::new(0);
 
 fn build(url: &str, m: Value) -> Router {
-    let m = validate(m.to_string().as_bytes()).unwrap_or_else(|e| panic!("{e:?}"));
+    let m = validate_composed(m.to_string().as_bytes()).unwrap_or_else(|e| panic!("{e:?}"));
     let schema = format!(
         "ce_plug_{}_{}",
         std::process::id(),

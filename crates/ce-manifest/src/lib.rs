@@ -41,9 +41,29 @@ pub(crate) fn issue(
     }
 }
 
+/// Validates a manifest an author wrote. `provenance` is reserved: only composition may write
+/// it, so it is refused here, which is what keeps audit attribution from being forged by a
+/// hand-written file.
 pub fn validate(json: &[u8]) -> Result<Manifest, Vec<Issue>> {
+    check(json, false)
+}
+
+/// Validates a manifest that composition produced, which may carry `provenance`. Call this only
+/// on the output of a trusted composer (`ce_plugin::compose`), never on a file an author supplied.
+pub fn validate_composed(json: &[u8]) -> Result<Manifest, Vec<Issue>> {
+    check(json, true)
+}
+
+fn check(json: &[u8], composed: bool) -> Result<Manifest, Vec<Issue>> {
     let value: Value =
         serde_json::from_slice(json).map_err(|e| vec![issue("", "json", e.to_string())])?;
+    if !composed && value.get("provenance").is_some() {
+        return Err(vec![issue(
+            "/provenance",
+            "provenance_reserved",
+            "`provenance` is written by composition and cannot be set by a manifest author",
+        )]);
+    }
     let schema: Value = serde_json::from_str(SCHEMA).expect("embedded schema is valid JSON");
     let validator = jsonschema::validator_for(&schema).expect("embedded schema compiles");
     let mut issues: Vec<Issue> = validator

@@ -182,8 +182,8 @@
       "required": ["module"],
       "additionalProperties": false,
       "properties": {
-        "module": { "type": "object", "required": ["name", "api"], "additionalProperties": false, "properties": { "name": { "type": "string", "maxLength": 64 }, "api": { "type": "integer", "minimum": 1 } } },
-        "plugin": { "type": "object", "required": ["id", "version", "digest"], "additionalProperties": false, "properties": { "id": { "type": "string", "maxLength": 64 }, "version": { "type": "string", "maxLength": 64 }, "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } } }
+        "module": { "type": "object", "required": ["name", "api"], "additionalProperties": false, "properties": { "name": { "type": "string" }, "api": { "type": "integer", "minimum": 1 } } },
+        "plugin": { "type": "object", "required": ["id", "version", "digest"], "additionalProperties": false, "properties": { "id": { "type": "string" }, "version": { "type": "string" }, "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } } }
       }
     }
   }
