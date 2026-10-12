@@ -191,14 +191,17 @@ kind = "policy-pack"
     .unwrap_or_else(|e| panic!("{e:?}"))
 }
 
+const DIGEST: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
 fn manifest(p: Option<&ce_plugin::Plugin>) -> Value {
     let shell = json!({
         "manifest_version": 1,
         "template": {"name": "kitchen", "version": "0.1.0"},
         "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}}
     });
-    let shell = ce_tools::compose(&shell, &["period"]).unwrap();
-    ce_plugin::compose(&shell, "business.inventory", p)
+    let shell = ce_tools::compose(&shell, &["period", "audit"]).unwrap();
+    let pinned = p.map(|p| (p, DIGEST));
+    ce_plugin::compose(&shell, "business.inventory", pinned)
         .unwrap()
         .manifest
 }
@@ -407,5 +410,38 @@ async fn a_closed_period_freezes_its_lines_and_movements() {
         (&l1["data"]["pulled"], &l1["data"]["ending_qty"]),
         (&json!("4.000"), &json!("6.000"))
     );
+    close(api.app).await;
+}
+
+#[tokio::test]
+async fn every_audit_event_names_the_plugin_that_ruled() {
+    let Some(url) = url() else { return };
+    let b = plugin(
+        "lenient-rules",
+        "[[policy]]\nslot = \"over_pull\"\nrule = \"true\"\n",
+    );
+    let mut api = Api {
+        app: app(&url, manifest(Some(&b))).await,
+        n: 0,
+    };
+    let (s, _) = api
+        .post(
+            "period",
+            json!({"label": "W1", "starts_on": "2026-11-01", "ends_on": "2026-11-07"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (_, v) = api
+        .call("GET", &format!("/v1/{INST}/audit_event"), None, None)
+        .await;
+    let events = v["data"].as_array().unwrap();
+    assert!(!events.is_empty(), "{v}");
+    for e in events {
+        let d = e;
+        assert_eq!(d["provenance"]["plugin"]["id"], "lenient-rules", "{e}");
+        assert_eq!(d["provenance"]["plugin"]["digest"], DIGEST, "{e}");
+        assert_eq!(d["provenance"]["module"]["name"], "business.inventory");
+        assert_eq!(d["manifest_hash"].as_str().unwrap().len(), 64);
+    }
     close(api.app).await;
 }
