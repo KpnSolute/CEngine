@@ -12,8 +12,8 @@ mod resolve;
 mod validate;
 
 pub use load::{
-    digest, digest_of, discover, load, Installed, LoadError, Pin, DESCRIPTOR, MAX_RECORD_BYTES,
-    PLUGINS_DIR,
+    digest, digest_of, discover, load, snapshot, Installed, LoadError, Pin, DESCRIPTOR,
+    MAX_RECORD_BYTES, PLUGINS_DIR,
 };
 pub use module::{builtin_registry, compose, ComposeError, Composed};
 pub use registry::{Module, Registry, Slot};

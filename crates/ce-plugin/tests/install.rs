@@ -229,3 +229,20 @@ fn a_damaged_or_hand_edited_record_is_refused() {
     });
     assert!(Installed::from_json("not json").is_err());
 }
+
+#[test]
+fn an_active_history_that_goes_backwards_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), &descriptor("0.1.0", LENIENT));
+    let mut inst = Installed::new();
+    approve(&mut inst, dir.path(), "0.1.0");
+    write(dir.path(), &descriptor("0.2.0", "opening_oh"));
+    approve(&mut inst, dir.path(), "0.2.0");
+    let mut v: Value = serde_json::from_str(&inst.to_json()).unwrap();
+    v["plugins"]["kitchen-rules"]["active"] = json!([1, 0]);
+    assert!(Installed::from_json(&v.to_string()).is_err());
+    v["plugins"]["kitchen-rules"]["active"] = json!([0, 0]);
+    assert!(Installed::from_json(&v.to_string()).is_err());
+    v["plugins"]["kitchen-rules"]["active"] = json!([0, 1]);
+    assert!(Installed::from_json(&v.to_string()).is_ok());
+}

@@ -132,6 +132,17 @@ fn a_hand_edited_install_record_stops_everything() {
 }
 
 #[test]
+fn an_oversized_install_record_is_refused_without_loading_it_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path(), PLUGIN);
+    let big = std::fs::File::create(dir.path().join("installs.json")).unwrap();
+    big.set_len(2 * 1024 * 1024).unwrap();
+    let o = ce(dir.path(), &["plugin", "status"], &[]);
+    assert!(!o.status.success());
+    assert!(err(&o).contains("too large"), "{}", err(&o));
+}
+
+#[test]
 fn the_server_refuses_to_start_on_an_unapproved_plugin() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path(), PLUGIN);

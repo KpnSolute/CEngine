@@ -150,6 +150,13 @@ pub fn digest_of(root: &Path, slug: &str) -> Result<String, LoadError> {
     read_descriptor(root, slug).map(|b| digest(&b))
 }
 
+/// The descriptor bytes and their digest from one read, so an approver validates exactly what
+/// was digested even if the file changes afterwards.
+pub fn snapshot(root: &Path, slug: &str) -> Result<(String, Vec<u8>), LoadError> {
+    let bytes = read_descriptor(root, slug)?;
+    Ok((digest(&bytes), bytes))
+}
+
 /// Load a plugin only if its bytes match `pin`, then validate it. The digest is checked on the
 /// same bytes that are parsed, so the file cannot change between check and use.
 pub fn load(
@@ -364,6 +371,9 @@ impl Installed {
                     .as_u64()
                     .filter(|n| (*n as usize) < pins.len())
                     .ok_or_else(|| format!("active position outside the log for {id}"))?;
+                if active.last().is_some_and(|prev| *prev >= at as usize) {
+                    return Err(format!("active positions for {id} must increase"));
+                }
                 active.push(at as usize);
             }
             if pins.is_empty() || active.is_empty() {

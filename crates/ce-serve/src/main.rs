@@ -87,12 +87,25 @@ fn engine() -> semver::Version {
 }
 
 fn read_installs(path: &str) -> Result<ce_plugin::Installed, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => ce_plugin::Installed::from_json(&text)
-            .map_err(|e| format!("{path} is not a valid install record: {e}")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ce_plugin::Installed::new()),
-        Err(e) => Err(format!("cannot read {path}: {e}")),
+    use std::io::Read;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ce_plugin::Installed::new())
+        }
+        Err(e) => return Err(format!("cannot read {path}: {e}")),
+    };
+    // Bounded read: a huge or corrupt file is refused without being loaded whole.
+    let max = ce_plugin::MAX_RECORD_BYTES as u64;
+    let mut text = String::new();
+    file.take(max + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    if text.len() as u64 > max {
+        return Err(format!("{path} is not a valid install record: too large"));
     }
+    ce_plugin::Installed::from_json(&text)
+        .map_err(|e| format!("{path} is not a valid install record: {e}"))
 }
 
 /// Write the record through a temporary file in the same folder, so a crash never leaves a
@@ -135,19 +148,15 @@ fn plugin_command(args: &[String]) -> Result<(), String> {
             let want = args
                 .get(2)
                 .ok_or("plugin approve needs the digest you reviewed")?;
-            let found = ce_plugin::digest_of(&root, id)
+            // One read: the digest and the validated plugin come from the same bytes.
+            let (found, bytes) = ce_plugin::snapshot(&root, id)
                 .map_err(|e| format!("cannot read the plugin: {e:?}"))?;
             if &found != want {
                 return Err(format!(
                     "the plugin on disk has digest {found}, not the one you gave; nothing approved"
                 ));
             }
-            let text = std::fs::read_to_string(
-                root.join(ce_plugin::PLUGINS_DIR)
-                    .join(id)
-                    .join(ce_plugin::DESCRIPTOR),
-            )
-            .map_err(|e| format!("cannot read the plugin: {e}"))?;
+            let text = String::from_utf8(bytes).map_err(|_| "the plugin is not UTF-8")?;
             let plugin = ce_plugin::parse(&text, &ce_plugin::builtin_registry(), &engine())
                 .map_err(|v| {
                     let mut m = String::from("the plugin is not valid:");
