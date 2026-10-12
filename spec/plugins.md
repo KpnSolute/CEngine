@@ -61,5 +61,14 @@ To run a template with a plugin, set `CE_TEMPLATE` (a template JSON, not a finis
 
 Tests: `crates/ce-plugin/tests/install.rs` (record, resolve, failure modes) and `crates/ce-serve/tests/plugin_cli.rs` (the binary, including `install` against Postgres).
 
+## Carried opening cost and legacy parity
+`stock_line` has an `opening_unit_cost` field (default 0): the unit cost the opening quantity was carried in at. Module defaults ignore it (opening is valued at the line price), so existing installations are unchanged. A rollover client sets it to the closing line's price, so a later price change in the new period does not revalue the opening stock. A plugin that wants the carried cost fills the `opening_value` slot with a rule that reads it.
+
+`crates/ce-plugin/tests/fixtures/mjcc-legacy-valuation/plugin.toml` is a synthetic copy of MJCC's valuation rules as the legacy Compute backend applies them today (opening at carried cost, falling back to price; ending value follows quantity and never goes below zero). `crates/ce-plugin/tests/legacy_parity.rs` runs 164 synthetic rows from `tests/parity/mjcc_inventory_vectors.json` through the composed manifest: quantities and every money figure match the legacy results to the cent, except four figures on two exact half-cent products, listed below.
+
+Rounding: CEngine rounds exact decimals half up, as the legacy Postgres trigger does (`round(numeric, 2)`). The legacy Python read path rounds binary floats, so an exact half cent can land a cent lower (`1.005 x 1` gives 1.00, `0.045 x 1` gives 0.04). The vectors show where the two differ; the stored database value agrees with CEngine. Treat the float result as a legacy artifact unless the owner says otherwise.
+
+The generator (`tests/parity/gen_mjcc_inventory_vectors.py`) imports the legacy formulas read-only from a local Compute checkout and uses synthetic inputs only.
+
 ## Not in this increment
 Price review, fetching plugin folders from a customer repository (the host places the folder), a plugin release approval workflow beyond the owner commands, and the HTTP deploy.

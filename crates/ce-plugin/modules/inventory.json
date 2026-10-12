@@ -57,6 +57,7 @@
           "line_key": {"type": "string", "max_length": 100, "unique": true, "indexed": true, "computed": "concat(item, '|', period)"},
           "opening_oh": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
           "unit_price": {"type": "decimal", "precision": 12, "scale": 6, "default": 0},
+          "opening_unit_cost": {"type": "decimal", "precision": 12, "scale": 6, "default": 0},
           "price": {"type": "decimal", "precision": 12, "scale": 6, "computed": {"$slot": "price"}},
           "received": {"type": "decimal", "precision": 14, "scale": 3, "computed": "sum(children(stock_movement, line).received)"},
           "pulled": {"type": "decimal", "precision": 14, "scale": 3, "computed": "sum(children(stock_movement, line).pulled)"},

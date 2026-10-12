@@ -21,3 +21,5 @@ libc = "0.2"
 [dev-dependencies]
 semver = "1"
 tempfile = "3"
+ce-validate = { path = "../ce-validate" }
+bigdecimal = "0.4"
