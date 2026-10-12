@@ -3,6 +3,7 @@
 //! ```text
 //! ce-serve install   create the installation's Postgres schema (fails if it exists)
 //! ce-serve [serve]   open the schema and serve the HTTP API (default)
+//! ce-serve files sweep <hours>  delete stored file bytes no record uses and older than that many hours
 //! ce-serve staff hash  read a PIN on stdin, print the hash to put in the staff list
 //! ce-serve plugin status | digest <slug> | approve <slug> <digest>
 //!                    | rollback <slug> | disable <slug> | enable <slug>
@@ -35,6 +36,9 @@
 //! | `CE_PROVIDER_URL` | the host gateway's https endpoint for provider calls (AI invoice import); unset leaves them answering 503 |
 //! | `CE_PROVIDER_TOKEN` | bearer token the gateway expects (a secret; required with `CE_PROVIDER_URL`) |
 //! | `CE_PROVIDER_TIMEOUT_SECS` | longest one provider call may take, 1 to 300 (default 30) |
+//! | `CE_STAFF_SOURCE` | `postgres` keeps staff accounts in the installation's schema (`_ce_staff`) so they can be created, switched off and re-PINned over the API; `CE_STAFF_FILE` then only seeds an empty table. Unset keeps the read-only file |
+//! | `CE_STAFF_ADMIN_ROLE` | the role that may use `/_staff` (default `admin`) |
+//! | `CE_MIN_PIN_LEN` | shortest PIN anyone may set, 4 to 64 (default 6) |
 //! | `CE_BIND` | listen address (default `127.0.0.1:8080`) |
 
 use ce_auth::Verifier;
@@ -270,37 +274,182 @@ fn env_num<T: std::str::FromStr>(name: &str, default: T) -> Result<T, String> {
     }
 }
 
-/// The staff PIN login when `CE_STAFF_FILE` is set: the login, its tenant and token lifetime.
-fn staff_login() -> Result<Option<(ce_server::PinLogin, String, u64)>, String> {
-    let Some(path) = std::env::var("CE_STAFF_FILE")
+/// Staff accounts in the installation's schema, as the login's directory.
+struct PgDirectory(ce_store_pg::PgStaff);
+
+fn dir_err(e: ce_store_pg::StaffError) -> ce_server::DirectoryFailure {
+    match e {
+        ce_store_pg::StaffError::Missing => ce_server::DirectoryFailure::Missing,
+        ce_store_pg::StaffError::Exists => ce_server::DirectoryFailure::Exists,
+        ce_store_pg::StaffError::Backend => ce_server::DirectoryFailure::Backend,
+    }
+}
+
+fn record_of(r: ce_store_pg::StaffRow) -> ce_server::StaffRecord {
+    ce_server::StaffRecord {
+        username: r.username,
+        hash: r.hash,
+        roles: r.roles,
+        active: r.active,
+        must_rotate: r.must_rotate,
+        pin_updated_at: r.pin_updated_at,
+    }
+}
+
+impl ce_server::StaffDirectory for PgDirectory {
+    fn get(&self, u: &str) -> Result<Option<ce_server::StaffRecord>, ce_server::DirectoryFailure> {
+        self.0.get(u).map(|r| r.map(record_of)).map_err(dir_err)
+    }
+
+    fn list(&self) -> Result<Vec<ce_server::StaffRecord>, ce_server::DirectoryFailure> {
+        self.0
+            .list()
+            .map(|v| v.into_iter().map(record_of).collect())
+            .map_err(dir_err)
+    }
+
+    fn create(
+        &self,
+        r: ce_server::StaffRecord,
+        actor: &str,
+    ) -> Result<(), ce_server::DirectoryFailure> {
+        self.0
+            .create(
+                &ce_store_pg::StaffRow {
+                    username: r.username,
+                    hash: r.hash,
+                    roles: r.roles,
+                    active: r.active,
+                    must_rotate: r.must_rotate,
+                    pin_updated_at: r.pin_updated_at,
+                },
+                actor,
+            )
+            .map_err(dir_err)
+    }
+
+    fn set_pin(
+        &self,
+        u: &str,
+        hash: &str,
+        must_rotate: bool,
+        now: u64,
+        actor: &str,
+    ) -> Result<(), ce_server::DirectoryFailure> {
+        self.0
+            .set_pin(u, hash, must_rotate, now, actor)
+            .map_err(dir_err)
+    }
+
+    fn set_roles(
+        &self,
+        u: &str,
+        roles: &[String],
+        actor: &str,
+    ) -> Result<(), ce_server::DirectoryFailure> {
+        self.0.set_roles(u, roles, actor).map_err(dir_err)
+    }
+
+    fn set_active(
+        &self,
+        u: &str,
+        active: bool,
+        actor: &str,
+    ) -> Result<(), ce_server::DirectoryFailure> {
+        self.0.set_active(u, active, actor).map_err(dir_err)
+    }
+
+    fn writable(&self) -> bool {
+        true
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The staff PIN login: from `CE_STAFF_FILE` alone (a read-only list), or with
+/// `CE_STAFF_SOURCE=postgres` from the installation's database, where `CE_STAFF_FILE` only seeds
+/// an empty table. Returns the login, its tenant and the token lifetime.
+fn staff_login(store: &TypedPgStore) -> Result<Option<(ce_server::PinLogin, String, u64)>, String> {
+    let file = std::env::var("CE_STAFF_FILE")
         .ok()
-        .filter(|s| !s.is_empty())
-    else {
-        return Ok(None);
+        .filter(|s| !s.is_empty());
+    let source = std::env::var("CE_STAFF_SOURCE").unwrap_or_default();
+    let in_db = match source.as_str() {
+        "" | "file" => false,
+        "postgres" => true,
+        _ => return Err("CE_STAFF_SOURCE must be `postgres`, `file` or unset".into()),
     };
+    if file.is_none() && !in_db {
+        return Ok(None);
+    }
     let tenant = var("CE_TENANT")?;
     let ttl = env_num("CE_TOKEN_TTL_SECS", 12 * 3600u64)?;
     let mut policy = ce_server::PinPolicy {
         max_failed: env_num("CE_LOGIN_MAX_FAILED", 5u32)?,
         lockout_secs: env_num("CE_LOGIN_LOCKOUT_SECS", 900u64)?,
+        min_pin_len: env_num("CE_MIN_PIN_LEN", 6usize)?,
         ..Default::default()
     };
     if !(1..=100).contains(&policy.max_failed) || !(1..=86_400).contains(&policy.lockout_secs) {
         return Err("CE_LOGIN_MAX_FAILED is 1 to 100 and CE_LOGIN_LOCKOUT_SECS 1 to 86400".into());
+    }
+    if !(4..=64).contains(&policy.min_pin_len) {
+        return Err("CE_MIN_PIN_LEN is 4 to 64".into());
     }
     if let Ok(l) = std::env::var("CE_ROLE_LADDER") {
         if !l.is_empty() {
             policy.ladder = l.split(',').map(|r| r.trim().to_string()).collect();
         }
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    let now: std::sync::Arc<dyn Fn() -> u64 + Send + Sync> = std::sync::Arc::new(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-    });
+    let text = match &file {
+        Some(path) => {
+            Some(std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?)
+        }
+        None => None,
+    };
+    let now: std::sync::Arc<dyn Fn() -> u64 + Send + Sync> = std::sync::Arc::new(now_secs);
+    if !in_db {
+        let text = text.expect("a file is set when the source is not the database");
+        let login = ce_server::PinLogin::from_json(&text, policy, now)
+            .map_err(|e| format!("{}: {e}", file.unwrap_or_default()))?;
+        return Ok(Some((login, tenant, ttl)));
+    }
+    let staff = store
+        .staff(&tenant)
+        .map_err(|e| format!("cannot prepare staff storage: {e:?}"))?;
+    if staff.count().map_err(|e| format!("staff table: {e:?}"))? == 0 {
+        let Some(text) = &text else {
+            return Err(
+                "no staff accounts yet: set CE_STAFF_FILE once to add the first ones".into(),
+            );
+        };
+        let records = ce_server::parse_staff_file(text, &policy)
+            .map_err(|e| format!("{}: {e}", file.clone().unwrap_or_default()))?;
+        if records.is_empty() {
+            return Err("the staff file has no users to start with".into());
+        }
+        for r in records {
+            staff
+                .create(
+                    &ce_store_pg::StaffRow {
+                        username: r.username,
+                        hash: r.hash,
+                        roles: r.roles,
+                        active: r.active,
+                        must_rotate: r.must_rotate,
+                        pin_updated_at: now_secs(),
+                    },
+                    "seed",
+                )
+                .map_err(|e| format!("cannot seed staff: {e:?}"))?;
+        }
+    }
     let login =
-        ce_server::PinLogin::from_json(&text, policy, now).map_err(|e| format!("{path}: {e}"))?;
+        ce_server::PinLogin::with_directory(std::sync::Arc::new(PgDirectory(staff)), policy, now);
     Ok(Some((login, tenant, ttl)))
 }
 
@@ -373,7 +522,7 @@ fn run() -> Result<(), String> {
         return plugin_command(&args[1..]);
     }
     let cmd = args.first().cloned().unwrap_or_else(|| "serve".into());
-    if !matches!(cmd.as_str(), "serve" | "install") {
+    if !matches!(cmd.as_str(), "serve" | "install" | "files") {
         return Err(format!(
             "unknown command `{cmd}` (use `install` or `serve`)"
         ));
@@ -403,6 +552,23 @@ fn run() -> Result<(), String> {
         Verifier::new(key.as_bytes()).map_err(|_| "CE_JWT_KEY is too short".to_string())?;
 
     // Blocking Postgres work happens here, before and after the async runtime, never inside it.
+    if cmd == "files" {
+        let hours = match (args.get(1).map(String::as_str), args.get(2)) {
+            (Some("sweep"), Some(h)) => h
+                .parse::<u64>()
+                .ok()
+                .filter(|h| *h <= 24 * 365)
+                .ok_or("use files sweep <hours>")?,
+            _ => return Err("use files sweep <hours>".into()),
+        };
+        let store = TypedPgStore::open_with(&url, &manifest, &schema, pool)
+            .map_err(|e| format!("cannot open schema {schema}: {e:?}"))?;
+        let n = store
+            .sweep_blobs(hours * 3600)
+            .map_err(|e| format!("sweep failed: {e:?}"))?;
+        println!("deleted {n} unreferenced file(s)");
+        return Ok(());
+    }
     if cmd == "install" {
         let store = TypedPgStore::install_with(&url, &manifest, &schema, pool.clone())
             .map_err(|e| format!("install failed: {e:?}"))?;
@@ -432,6 +598,7 @@ fn run() -> Result<(), String> {
         Some(_) => return Err("CE_FILES must be `postgres` or unset".into()),
     };
     let provider = provider_from_env()?;
+    let login = staff_login(&store)?;
     let mut state = AppState::new(store, verifier, manifest, &installation);
     if let Some(b) = blobs {
         state = state.with_blobs(std::sync::Arc::new(PgFiles(b)));
@@ -439,11 +606,15 @@ fn run() -> Result<(), String> {
     if let Some(p) = provider {
         state = state.with_provider(std::sync::Arc::new(p));
     }
-    if let Some(login) = staff_login()? {
-        let (login, tenant, ttl) = login;
+    if let Some((login, tenant, ttl)) = login {
         state = state
             .with_login(Box::new(login), &tenant, ttl)
             .map_err(|e| format!("cannot enable sign-in: {e}"))?;
+        if let Ok(role) = std::env::var("CE_STAFF_ADMIN_ROLE") {
+            if !role.is_empty() {
+                state = state.with_staff_admin_role(&role);
+            }
+        }
     }
     let app = router(state);
 

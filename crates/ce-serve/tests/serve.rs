@@ -297,6 +297,29 @@ fn files_and_ai_entry_are_switched_on_by_environment() {
         .unwrap()
         .get(0);
     assert_eq!(n, 1);
+
+    // An upload whose record write never happened is unreferenced; the sweep removes it and
+    // leaves the file a record points at.
+    client
+        .batch_execute(&format!(
+            r#"INSERT INTO "{schema}"."_ce_blobs" (tenant_id, key, content_type, bytes)
+               VALUES ('00000000-0000-4000-8000-000000000001', 'orphan', 'text/plain', 'x')"#
+        ))
+        .unwrap();
+    let out = cmd("files", false).arg("sweep").arg("0").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let left: Vec<String> = client
+        .query(&format!(r#"SELECT key FROM "{schema}"."_ce_blobs""#), &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(left.len(), 1);
+    assert!(left[0].contains("scan"), "{left:?}");
     client
         .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
         .unwrap();
@@ -326,4 +349,131 @@ fn sign_in(bind: &str) -> String {
     );
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     format!("Bearer {}", v["data"]["token"].as_str().unwrap())
+}
+
+fn token_for(bind: &str, user: &str, pin: &str) -> (String, serde_json::Value) {
+    let (st, body) = request(
+        bind,
+        "POST",
+        "/v1/test-inst/_auth/token",
+        &[("Content-Type", "application/json")],
+        serde_json::json!({"username": user, "pin": pin})
+            .to_string()
+            .as_bytes(),
+    );
+    (st, serde_json::from_slice(&body).unwrap_or_default())
+}
+
+#[test]
+fn staff_accounts_live_in_the_database_and_survive_a_restart() {
+    let Some(url) = database_url() else { return };
+    let schema = format!("ce_serve_staff_{}", std::process::id());
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = serde_json::json!({
+        "manifest_version": 1,
+        "template": {"name": "docs", "version": "0.1.0"},
+        "entities": {"doc": {"fields": {"title": {"type": "string", "max_length": 80}}}},
+        "roles": {
+            "staff": {"read": ["doc"], "write": [], "actions": []},
+            "admin": {"read": ["*"], "write": ["*"], "actions": []}
+        }
+    });
+    std::fs::write(dir.path().join("m.json"), manifest.to_string()).unwrap();
+    let seed = serde_json::json!({"users": [
+        {"username": "boss", "pin_hash": ce_server::hash_pin_random("739142").unwrap(), "roles": ["admin"]}
+    ]});
+    std::fs::write(dir.path().join("staff.json"), seed.to_string()).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let bind = format!("127.0.0.1:{port}");
+    let cmd = |arg: &str, seeded: bool| {
+        let mut c = command(&url, &schema, &bind, arg);
+        c.env("CE_MANIFEST", dir.path().join("m.json"))
+            .env("CE_STAFF_SOURCE", "postgres")
+            .env("CE_TENANT", "00000000-0000-4000-8000-000000000001");
+        if seeded {
+            c.env("CE_STAFF_FILE", dir.path().join("staff.json"));
+        }
+        c
+    };
+    assert!(cmd("install", false).status().unwrap().success());
+
+    // No accounts and no seed file: the server refuses to start rather than run with no one.
+    let out = cmd("serve", false).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no staff accounts"));
+
+    let server = Kill(cmd("serve", true).spawn().unwrap());
+    wait_ready(&bind);
+    let (st, b) = token_for(&bind, "boss", "739142");
+    assert!(st.contains("200"), "{st}");
+    let boss = format!("Bearer {}", b["data"]["token"].as_str().unwrap());
+    let h = [
+        ("Authorization", boss.as_str()),
+        ("Content-Type", "application/json"),
+    ];
+    let (st, body) = request(
+        &bind,
+        "POST",
+        "/v1/test-inst/_staff",
+        &h,
+        br#"{"username":"Ana","roles":["staff"],"pin":"482915"}"#,
+    );
+    assert!(
+        st.contains("201"),
+        "{st} {}",
+        String::from_utf8_lossy(&body)
+    );
+    let (_, b) = token_for(&bind, "ana", "482915");
+    assert_eq!(b["data"]["must_rotate"], true);
+    let tmp = format!("Bearer {}", b["data"]["token"].as_str().unwrap());
+    let (st, _) = request(
+        &bind,
+        "POST",
+        "/v1/test-inst/_auth/pin",
+        &[
+            ("Authorization", tmp.as_str()),
+            ("Content-Type", "application/json"),
+        ],
+        br#"{"current_pin":"482915","new_pin":"846213"}"#,
+    );
+    assert!(st.contains("200"), "{st}");
+    drop(server);
+
+    // Restart without the seed file: the accounts and the new PIN are still there.
+    let server = Kill(cmd("serve", false).spawn().unwrap());
+    wait_ready(&bind);
+    assert!(token_for(&bind, "ana", "482915").0.contains("401"));
+    let (st, b) = token_for(&bind, "ana", "846213");
+    assert!(st.contains("200"), "{st}");
+    assert_eq!(b["data"]["roles"], serde_json::json!(["staff"]));
+    drop(server);
+
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let kinds: Vec<String> = client
+        .query(
+            &format!(r#"SELECT kind FROM "{schema}"."_ce_staff_event" ORDER BY id"#),
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(kinds, ["create", "create", "change_pin"]);
+    let leaked: i64 = client
+        .query_one(
+            &format!(
+                r#"SELECT count(*) FROM "{schema}"."_ce_staff_event" WHERE kind LIKE '%scrypt%'"#
+            ),
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(leaked, 0);
+    client
+        .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .unwrap();
 }

@@ -149,3 +149,13 @@ fn urls_must_be_https_or_loopback() {
     assert!(HttpProvider::new("gw.example.com", "t", t).is_err());
     assert!(HttpProvider::new("https://gw.example.com/p", "", t).is_err());
 }
+
+#[test]
+fn only_a_200_is_an_answer() {
+    let (url, _h) = serve_once("202 Accepted", r#"{"data":{"records":[]}}"#);
+    let p = HttpProvider::new(&url, "t", Duration::from_secs(5)).unwrap();
+    assert!(matches!(
+        p.call(&scope(), &req()),
+        Err(ProviderError::Failed(_))
+    ));
+}

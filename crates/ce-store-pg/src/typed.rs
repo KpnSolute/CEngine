@@ -197,6 +197,7 @@ impl TypedPgStore {
         ))
         .map_err(db)?;
         tx.batch_execute(&crate::blobs::ddl(schema)).map_err(db)?;
+        tx.batch_execute(&crate::staff::ddl(schema)).map_err(db)?;
         tx.commit().map_err(db)?;
         drop(client);
         Self::build(pool, m, schema)
@@ -293,6 +294,41 @@ impl TypedPgStore {
 
     pub fn schema_name(&self) -> &str {
         &self.schema
+    }
+
+    /// Deletes stored file bytes no record points at any more and that are at least
+    /// `older_than_secs` old (the age protects an upload whose record write is still in flight).
+    /// Counts soft-deleted records as pointing. The old bytes of a replaced file are also gone from
+    /// audit and changeset history afterwards, so a revert of that replacement can no longer
+    /// restore them. Returns how many were deleted.
+    pub fn sweep_blobs(&self, older_than_secs: u64) -> Result<u64, StoreError> {
+        let mut unreferenced = String::new();
+        for (name, ent) in &self.ents {
+            for c in ent.cols.iter().filter(|c| c.ty == "file") {
+                unreferenced.push_str(&format!(
+                    r#" AND NOT EXISTS (SELECT 1 FROM "{schema}"."{name}" t
+                          WHERE t.tenant_id = b.tenant_id AND t."{col}"->>'key' = b.key)"#,
+                    schema = self.schema,
+                    col = c.name,
+                ));
+            }
+        }
+        let sql = format!(
+            r#"DELETE FROM "{schema}"."_ce_blobs" b
+               WHERE b.created_at < now() - ($1::bigint * interval '1 second'){unreferenced}"#,
+            schema = self.schema,
+        );
+        let n = self
+            .lock()?
+            .execute(&sql, &[&(older_than_secs as i64)])
+            .map_err(db)?;
+        Ok(n)
+    }
+
+    /// Staff accounts for the installation's one tenant, kept in this schema. Creates the tables
+    /// when they are missing.
+    pub fn staff(&self, tenant: &str) -> Result<crate::PgStaff, crate::StaffError> {
+        crate::staff::PgStaff::open(self.pool.clone(), &self.schema, tenant)
     }
 
     /// File bytes kept in this installation's schema, sharing the store's connections. Creates the
