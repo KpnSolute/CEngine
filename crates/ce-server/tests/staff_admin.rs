@@ -453,6 +453,7 @@ async fn an_admin_token_for_another_tenant_cannot_administer_staff() {
 struct Flaky {
     inner: MemoryDirectory,
     failures: std::sync::atomic::AtomicU32,
+    list_failures: std::sync::atomic::AtomicU32,
 }
 impl ce_server::StaffDirectory for Flaky {
     fn get(&self, u: &str) -> Result<Option<StaffRecord>, ce_server::DirectoryFailure> {
@@ -464,6 +465,11 @@ impl ce_server::StaffDirectory for Flaky {
         self.inner.get(u)
     }
     fn list(&self) -> Result<Vec<StaffRecord>, ce_server::DirectoryFailure> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.list_failures.load(SeqCst) > 0 {
+            self.list_failures.fetch_sub(1, SeqCst);
+            return Err(ce_server::DirectoryFailure::Backend);
+        }
         self.inner.list()
     }
     fn create(&self, r: StaffRecord, a: &str) -> Result<(), ce_server::DirectoryFailure> {
@@ -496,6 +502,7 @@ fn database_errors_do_not_count_as_wrong_pins() {
     let dir = Flaky {
         inner: MemoryDirectory::new(vec![rec("boss", "739142", "admin")], true),
         failures: std::sync::atomic::AtomicU32::new(10),
+        list_failures: std::sync::atomic::AtomicU32::new(0),
     };
     let login = PinLogin::with_directory(Arc::new(dir), PinPolicy::default(), Arc::new(|| 1000));
     let creds = json!({"username": "boss", "pin": "739142"})
@@ -575,4 +582,63 @@ async fn a_reset_a_pin_change_or_a_switch_off_ends_earlier_sessions() {
     assert!(live(mgr3).await);
     // Other people's sessions are untouched.
     assert!(live(boss).await);
+}
+
+#[test]
+fn tokens_are_refused_until_the_revocation_state_has_loaded() {
+    use ce_server::Login;
+    let dir = Flaky {
+        inner: MemoryDirectory::new(vec![rec("boss", "739142", "admin")], true),
+        failures: std::sync::atomic::AtomicU32::new(0),
+        list_failures: std::sync::atomic::AtomicU32::new(1),
+    };
+    let login = PinLogin::with_directory(Arc::new(dir), PinPolicy::default(), Arc::new(|| 1000));
+    // The directory could not be read at start: every token is refused, not accepted unchecked.
+    assert_eq!(login.not_before("boss"), Some(u64::MAX));
+    let creds = json!({"username": "boss", "pin": "739142"})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert!(login.login(&creds).is_ok());
+    assert_eq!(login.not_before("boss"), None);
+}
+
+#[tokio::test]
+async fn revocation_covers_the_same_second_and_only_this_tenant() {
+    let a = app(true);
+    let boss = token(&a, "boss", "739142").await;
+    let mgr = token(&a, "mgr", "624801").await;
+    let live = |t: String| {
+        let a = a.clone();
+        async move {
+            call(&a, "GET", "/note", Some(&t), Value::Null).await.0 != StatusCode::UNAUTHORIZED
+        }
+    };
+    // A token for another tenant that shares the username.
+    const T2: &str = "22222222-2222-2222-2222-222222222222";
+    let other = Verifier::new(b"0123456789abcdef0123456789abcdef")
+        .unwrap()
+        .sign_token("mgr", T2, &["manager".to_string()], 1000, 3600)
+        .unwrap();
+    assert!(live(mgr.clone()).await && live(other.clone()).await);
+    // Same clock second as the token: the reset still ends it.
+    let (st, _) = call(
+        &a,
+        "POST",
+        "/_staff/mgr/reset_pin",
+        Some(&boss),
+        json!({"pin": "913574"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!live(mgr).await);
+    assert!(live(other).await);
+    // Signing in again in that same second gives a token that works.
+    let fresh = token(&a, "mgr", "913574").await;
+    let (st, _) = call(&a, "GET", "/note", Some(&fresh), Value::Null).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "a rotation-only token, but accepted as valid"
+    );
 }
