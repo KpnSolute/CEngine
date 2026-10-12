@@ -302,6 +302,40 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
                 query("quiet_zone", false, json!({"type": "integer", "minimum": 0, "maximum": 20}))],
             "responses": barcode_responses}}),
     );
+    for (rname, r) in m.value["reports"].as_object().into_iter().flatten() {
+        let mut responses = json!({"200": {"description": "the report",
+            "content": {"application/json": {"schema": {"type": "object"}},
+                "text/csv": {"schema": {"type": "string"}},
+                "text/html": {"schema": {"type": "string"}}}}});
+        if let (Value::Object(o), Value::Object(e)) = (
+            &mut responses,
+            problem_responses(&[
+                ("401", "unauthenticated"),
+                ("403", "forbidden"),
+                ("404", "not_found"),
+                ("422", "validation_failed"),
+            ]),
+        ) {
+            o.extend(e);
+        }
+        let mut params = vec![json!({"name": "format", "in": "query", "required": false,
+            "schema": {"type": "string", "enum": ["json", "csv", "html"]}})];
+        for p in r["params"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            params.push(
+                json!({"name": p, "in": "query", "required": false, "schema": {"type": "string"}}),
+            );
+        }
+        paths.insert(
+            format!("/v1/{installation}/_report/{rname}"),
+            json!({"get": {"operationId": format!("report_{rname}"),
+                "summary": r["title"], "parameters": params, "responses": responses}}),
+        );
+    }
     json!({
         "openapi": "3.1.0",
         "info": {
