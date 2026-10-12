@@ -21,5 +21,17 @@ Unknown fields are errors. The descriptor is limited to 64 KiB and 64 policies. 
 ## What the registry controls
 Module ids, API majors, slot names and shapes, and the capability vocabulary live in CEngine (`ce_plugin::Registry`), never in the plugin. A plugin cannot invent a hook or widen its own permissions.
 
+## Loading and pinning
+`ce_plugin::load(root, slug, pin, registry, engine)` reads `<root>/.cengine/plugins/<slug>/plugin.toml` from a local folder, never from the network and never from a Git HEAD. A `Pin` is what an installation approved: plugin id, exact version and `sha256:` digest of the descriptor bytes. The loader:
+
+- accepts only safe slugs, and only regular files under real directories (symlinks are not followed, so a link cannot point the loader outside the workspace);
+- refuses files over the descriptor limit before hashing;
+- hashes the same bytes it then parses, so the file cannot change between check and use;
+- refuses a mismatched digest (`DigestMismatch`), then validates the descriptor, then requires the folder name, `plugin.id` and `plugin.version` to match the folder and the pin.
+
+`discover(root)` lists plugin folders (real directories with safe names) without reading them; `digest_of` gives an approver the digest of what is on disk. `Installed` keeps the approved pins per plugin with history: `approve` makes a pin active, `rollback` returns to the previous pin (never leaving a plugin with none), `disable` stops serving a plugin without forgetting it. It is plain data; persisting it belongs to the host store.
+
+A customer-editable lockfile is never proof of approval: the pin comes from the trusted installation record, not from the repository.
+
 ## Not in this increment
-Digest-pinned loader and install records (next), the `inventory` module, composing a plugin into the installed manifest, audit of plugin versions, upgrade and rollback, and failure-mode tests beyond descriptor validation.
+Persisting installation records, the `inventory` module, composing a plugin into the installed manifest, audit of plugin versions, upgrade and rollback, and failure-mode tests beyond descriptor validation.
