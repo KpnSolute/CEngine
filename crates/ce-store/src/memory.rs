@@ -194,6 +194,10 @@ impl Inner {
 }
 
 impl Store for MemoryStore {
+    fn ping(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     fn insert(
         &self,
         scope: &TenantScope,
@@ -291,6 +295,10 @@ struct MemoryTx {
 }
 
 impl Store for MemoryTx {
+    fn ping(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     fn insert(
         &self,
         scope: &TenantScope,

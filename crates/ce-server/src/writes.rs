@@ -711,6 +711,9 @@ mod tests {
     struct Flaky(MemoryStore, StoreError);
 
     impl Store for Flaky {
+        fn ping(&self) -> Result<(), StoreError> {
+            self.0.ping()
+        }
         fn list(&self, s: &TenantScope, e: &str, r: &ListRequest) -> Result<Page, StoreError> {
             self.0.list(s, e, r)
         }

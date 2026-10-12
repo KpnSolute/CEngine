@@ -999,6 +999,10 @@ struct TypedTx<'a> {
 }
 
 impl Store for TypedTx<'_> {
+    fn ping(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     fn list(
         &self,
         scope: &TenantScope,
