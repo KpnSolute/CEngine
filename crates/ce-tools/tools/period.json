@@ -11,6 +11,10 @@
         "status": {"type": "enum", "values": ["open", "closed"], "default": "open", "indexed": true},
         "closed_by": {"type": "string", "max_length": 120},
         "closed_at": {"type": "integer"},
+        "week_1_locked": {"type": "boolean", "default": false},
+        "week_2_locked": {"type": "boolean", "default": false},
+        "week_3_locked": {"type": "boolean", "default": false},
+        "week_4_locked": {"type": "boolean", "default": false},
         "snapshot": {"type": "json"}
       },
       "sort_keys": ["label", "starts_on", "status"]
