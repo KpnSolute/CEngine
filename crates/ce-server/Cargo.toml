@@ -15,6 +15,7 @@ ce-expr = { path = "../ce-expr" }
 ce-io = { path = "../ce-io" }
 ce-manifest = { path = "../ce-manifest" }
 ce-policy = { path = "../ce-policy" }
+ce-provider = { path = "../ce-provider" }
 ce-store = { path = "../ce-store" }
 ce-validate = { path = "../ce-validate" }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }

@@ -15,6 +15,7 @@
 //! Not yet: batch, actions, changesets, events, files.
 
 mod actions;
+mod ai;
 mod changesets;
 mod events;
 mod files;
@@ -45,6 +46,7 @@ use ce_store::{ListRequest, QueryError, Record, SortDir, SortKey, Store, StoreEr
 use serde_json::{json, Map, Value};
 use std::{collections::HashMap, sync::Arc};
 
+pub use ce_provider::{Provider, ProviderError, ProviderRequest, ProviderResponse};
 pub use events::{relay_once, Deliver, Delivery, Relay, Report as RelayReport};
 pub use login::{Identity, Issuing, Login, LoginError};
 
@@ -67,6 +69,8 @@ pub struct AppState<S> {
     pub relay: Option<Arc<Relay>>,
     /// Turns the host's login into tokens; without one `POST .../_auth/token` answers 503.
     pub issuing: Option<Arc<Issuing>>,
+    /// Where AI calls go (Infajn); without one `POST .../_ai/entry` answers 503.
+    pub provider: Option<Arc<dyn ce_provider::Provider>>,
 }
 
 /// Looks up the tenant behind a public workspace name.
@@ -85,6 +89,7 @@ impl<S> Clone for AppState<S> {
             public_tenants: self.public_tenants.clone(),
             relay: self.relay.clone(),
             issuing: self.issuing.clone(),
+            provider: self.provider.clone(),
         }
     }
 }
@@ -107,7 +112,14 @@ impl<S> AppState<S> {
             public_tenants: None,
             relay: None,
             issuing: None,
+            provider: None,
         }
+    }
+
+    /// Attaches the host's provider handle (Infajn), which makes every call to an AI model.
+    pub fn with_provider(mut self, provider: Arc<dyn ce_provider::Provider>) -> Self {
+        self.provider = Some(provider);
+        self
     }
 
     /// Gives the server a signer and a transport for events out.
@@ -189,6 +201,10 @@ where
             post(issue_token::<S>).layer(DefaultBodyLimit::max(LOGIN_BYTES)),
         )
         .route("/v1/{inst}/_report/{name}", get(report::<S>))
+        .route(
+            "/v1/{inst}/_ai/entry",
+            post(ai_entry::<S>).layer(DefaultBodyLimit::max(ai::MAX_TEXT + 1024)),
+        )
         .route("/v1/{inst}/_slots", get(free_slots::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
@@ -2088,4 +2104,110 @@ async fn free_slots<S: Store + Send + Sync + 'static>(
             .into_response())
     };
     finish(&rid, run.await)
+}
+
+/// `POST .../_ai/entry` with `{"entity": "...", "text": "...", "hint": "..."}`: draft records for
+/// `entity` extracted from `text` by the host's AI provider, each checked like a create and
+/// answered as `{drafts: [{body, errors}], ready}`. Needs write access to the entity. Nothing is
+/// saved: the caller reviews and saves through the ordinary write routes.
+async fn ai_entry<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authenticate(&st, &headers)?;
+        if inst != st.installation {
+            return Err(Problem::not_found());
+        }
+        let body = parse_object(&body.map_err(body_problem)?)?;
+        let bad = |path: &str, why: &str| {
+            Problem::validation(
+                format!("{path}: {why}"),
+                vec![json!({"path": path, "code": "invalid", "detail": why})],
+            )
+        };
+        let entity = body
+            .get("entity")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad("/entity", "the entity to draft records for"))?
+            .to_string();
+        let text = body
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| bad("/text", "the text to read"))?
+            .to_string();
+        if text.len() > ai::MAX_TEXT {
+            return Err(bad("/text", "too long"));
+        }
+        let hint = match body.get("hint") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(h)) if h.len() <= 500 => Some(h.clone()),
+            _ => return Err(bad("/hint", "a string of at most 500 bytes")),
+        };
+        st.policy
+            .authorize(&who, Access::Write, &entity)
+            .map_err(|_| Problem::forbidden())?;
+        if !st.manifest.value["entities"][&entity].is_object() {
+            return Err(Problem::not_found());
+        }
+        check_server_only(
+            &st.manifest,
+            &entity,
+            &writes::Op::Create {
+                data: Map::new(),
+                key: String::new(),
+            },
+        )?;
+        let Some(provider) = st.provider.clone() else {
+            return Err(Problem::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "no AI provider is configured",
+            ));
+        };
+        let scope = who.scope().clone();
+        let req = ai::request(&st.manifest, &entity, &text, hint.as_deref());
+        let answer = tokio::task::spawn_blocking(move || provider.call(&scope, &req))
+            .await
+            .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+            .map_err(ai_problem)?;
+        let drafts = ai::drafts(&st.manifest, &entity, &answer.data).map_err(ai_problem)?;
+        let ready = drafts.iter().filter(|d| d.errors.is_empty()).count();
+        let drafts: Vec<Value> = drafts
+            .into_iter()
+            .map(|d| json!({"body": d.body, "errors": d.errors}))
+            .collect();
+        let body = json!({"data": {"drafts": drafts, "ready": ready}, "meta": {"request_id": rid}});
+        Ok((StatusCode::OK, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
+}
+
+fn ai_problem(e: ce_provider::ProviderError) -> Problem {
+    use ce_provider::ProviderError as E;
+    match e {
+        E::Unavailable => {
+            let mut p = Problem::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "the AI service is unavailable right now",
+            );
+            p.retryable = true;
+            p
+        }
+        E::Invalid(_) | E::ApprovalRequired => Problem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "something went wrong on our side",
+        ),
+        E::Failed(_) => Problem::new(
+            StatusCode::BAD_GATEWAY,
+            "provider_failed",
+            "the AI service could not read that text",
+        ),
+    }
 }

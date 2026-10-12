@@ -372,6 +372,7 @@ dependencies = [
  "ce-io",
  "ce-manifest",
  "ce-policy",
+ "ce-provider",
  "ce-store",
  "ce-store-pg",
  "ce-tools",
