@@ -227,6 +227,7 @@ fn apply<S: Store>(
             let operation = text(&d, "operation");
             let mut rid = text(&d, "record_id");
             let patch = object(d.get("data").unwrap_or(&Value::Null));
+            let chosen_id = patch.contains_key("id");
             let known = versions.get(&(entity.clone(), rid.clone())).copied();
             let wop = if revert {
                 let before = object(d.get("before").unwrap_or(&Value::Null));
@@ -276,14 +277,16 @@ fn apply<S: Store>(
             {
                 Ok(o) => o,
                 Err(f) => {
-                    if let Some(p) = preview.as_deref_mut() {
+                    // A preview reports what would stop the merge (rules, locks, a record that
+                    // changed). An outage is not a verdict on the changeset and stays an error.
+                    if let (true, Some(p)) = (is_conflict(&f), preview.as_deref_mut()) {
                         let pr = crate::failure_problem(f);
                         p.failure = Some(json!({
                             "seq": seq, "entity": entity, "operation": operation,
                             "code": pr.code, "status": pr.status.as_u16(),
                             "detail": pr.detail, "errors": pr.errors,
                         }));
-                        return Err(StoreError::Aborted);
+                        break;
                     }
                     failed = Some((seq, f));
                     return Err(StoreError::Aborted);
@@ -292,6 +295,9 @@ fn apply<S: Store>(
             if let Some(p) = preview.as_deref_mut() {
                 p.results.push(json!({
                     "seq": seq, "entity": entity, "operation": operation,
+                    // A create without a chosen id gets one from the store; a rolled-back
+                    // preview cannot promise the merge will pick the same.
+                    "id_provisional": operation == "create" && rid.is_empty() && !chosen_id,
                     "record": out.after.as_ref().map(|r| json!({
                         "id": r.id, "version": r.version, "data": r.data,
                     })),
@@ -320,19 +326,25 @@ fn apply<S: Store>(
         if let Some(p) = preview.as_deref_mut() {
             // Later operations can change an earlier record (a parent's totals follow its
             // children), so each is read again as the transaction now holds it.
-            if p.failure.is_none() {
-                for r in &mut p.results {
-                    let (entity, rid) = (
-                        text(&object(r), "entity"),
-                        text(&object(&r["record"]), "id"),
-                    );
-                    if rid.is_empty() {
-                        continue;
-                    }
-                    if let Ok(now) = tx.get(env.scope, &entity, &rid) {
+            for r in &mut p.results {
+                let (entity, rid) = (
+                    text(&object(r), "entity"),
+                    text(&object(&r["record"]), "id"),
+                );
+                if rid.is_empty() {
+                    continue;
+                }
+                match tx.get(env.scope, &entity, &rid) {
+                    Ok(now) => {
                         r["record"] =
                             json!({"id": now.id, "version": now.version, "data": now.data});
                     }
+                    // A later operation deleted it: the merge leaves nothing behind.
+                    Err(StoreError::NotFound) => r["record"] = Value::Null,
+                    Err(e) => return Err(e),
+                }
+                if r["id_provisional"] == true && r["record"].is_object() {
+                    r["record"]["id"] = Value::Null;
                 }
             }
         }

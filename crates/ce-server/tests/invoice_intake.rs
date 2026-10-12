@@ -336,6 +336,16 @@ async fn an_invoice_is_staged_merged_once_and_settles_its_prices() {
     assert_eq!(inv_op["record"]["data"]["goods_total"], "270.50");
     assert_eq!(inv_op["record"]["data"]["delta"], "0.00");
     assert_eq!(inv_op["record"]["data"]["reconciled"], true);
+    // The invoice has an id the caller chose, so it is promised; the receipt does not, so its
+    // id is withheld rather than shown as one the merge will not use.
+    assert_eq!(inv_op["record"]["id"], INVOICE);
+    assert_eq!(inv_op["id_provisional"], false);
+    let receipt = results
+        .iter()
+        .find(|r| r["entity"] == "stock_movement")
+        .unwrap();
+    assert_eq!(receipt["id_provisional"], true);
+    assert!(receipt["record"]["id"].is_null(), "{receipt}");
     // ...and previewing kept nothing: no records, and the changeset is still open.
     assert!(rev.list("supplier_invoice").await.is_empty());
     assert!(rev.list("stock_movement").await.is_empty());
