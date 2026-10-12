@@ -153,6 +153,7 @@ where
             get(public_read::<S>),
         )
         .route("/v1/{inst}/_batch", post(batch::<S>))
+        .route("/v1/{inst}/_barcode", get(barcode::<S>))
         .route("/v1/{inst}/actions/{name}", post(run_action::<S>))
         .route("/v1/{inst}/period/{id}/{verb}", post(period_verb::<S>))
         .route("/v1/{inst}/{entity}/_export", get(export_csv::<S>))
@@ -1669,6 +1670,85 @@ async fn import_csv<S: Store + Send + Sync + 'static>(
         let ids: Vec<Value> = made.iter().flatten().map(|r| json!(r.id)).collect();
         let body = json!({"data": {"created": ids.len(), "ids": ids}, "meta": {"request_id": rid}});
         Ok((StatusCode::CREATED, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
+}
+
+/// `GET .../_barcode?type=code128|ean13|upca|qr&data=..[&module_size=..&bar_height=..&quiet_zone=..]`:
+/// the symbol as SVG. Needs a valid token for the installation, nothing else: no tenant data is
+/// read and nothing is stored. A bad value answers 422 with the position of the first bad character.
+async fn barcode<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    use ce_barcode::{BarcodeError, Symbology};
+    let rid = request_id();
+    let run = async {
+        authenticate(&st, &headers)?;
+        if inst != st.installation {
+            return Err(Problem::not_found());
+        }
+        let bad = |param: &str, why: &str| {
+            Problem::validation(
+                format!("{param}: {why}"),
+                vec![json!({"path": format!("/{param}"), "code": "invalid", "detail": why})],
+            )
+        };
+        let symbology = match q.get("type").map(String::as_str) {
+            Some("code128") => Symbology::Code128,
+            Some("ean13") => Symbology::Ean13,
+            Some("upca") => Symbology::UpcA,
+            Some("qr") => Symbology::Qr,
+            _ => return Err(bad("type", "one of code128, ean13, upca, qr")),
+        };
+        let data = q
+            .get("data")
+            .ok_or_else(|| bad("data", "the text to encode"))?;
+        let number = |name: &str| -> Result<Option<u32>, Problem> {
+            q.get(name)
+                .map(|v| v.parse::<u32>().map_err(|_| bad(name, "a whole number")))
+                .transpose()
+        };
+        let mut opt = ce_barcode::SvgOptions::default();
+        if let Some(v) = number("module_size")? {
+            opt.module_size = v;
+        }
+        if let Some(v) = number("bar_height")? {
+            opt.bar_height = v;
+        }
+        opt.quiet_zone = number("quiet_zone")?;
+        let failed = |e: BarcodeError| {
+            let (code, detail) = match e {
+                BarcodeError::Empty => ("empty", "nothing to encode".to_string()),
+                BarcodeError::TooLong { max } => ("too_long", format!("at most {max}")),
+                BarcodeError::BadChar { index } => {
+                    ("bad_char", format!("character {index} cannot be encoded"))
+                }
+                BarcodeError::BadLength { expected, got } => {
+                    ("bad_length", format!("expected {expected}, got {got}"))
+                }
+                BarcodeError::BadCheckDigit { expected } => (
+                    "bad_check_digit",
+                    format!("the check digit should be {expected}"),
+                ),
+                BarcodeError::Qr(_) => ("qr", "the data does not fit a QR code".to_string()),
+                BarcodeError::BadOptions(why) => ("invalid", why.to_string()),
+            };
+            Problem::validation(
+                "the barcode cannot be made",
+                vec![json!({"path": "/data", "code": code, "detail": detail})],
+            )
+        };
+        let code = ce_barcode::encode(symbology, data).map_err(failed)?;
+        let svg = ce_barcode::render_svg(&code, &opt).map_err(failed)?;
+        let mut res = (StatusCode::OK, svg).into_response();
+        res.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("image/svg+xml"),
+        );
+        Ok(res)
     };
     finish(&rid, run.await)
 }

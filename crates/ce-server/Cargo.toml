@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 ce-auth = { path = "../ce-auth" }
+ce-barcode = { path = "../ce-barcode" }
 ce-events = { path = "../ce-events" }
 ce-expr = { path = "../ce-expr" }
 ce-io = { path = "../ce-io" }

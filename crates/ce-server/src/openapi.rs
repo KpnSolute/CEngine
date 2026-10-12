@@ -278,6 +278,30 @@ pub fn openapi(m: &Manifest, installation: &str) -> Value {
             );
         }
     }
+    let mut barcode_responses = json!({"200": {"description": "the symbol",
+        "content": {"image/svg+xml": {"schema": {"type": "string"}}}}});
+    if let (Value::Object(r), Value::Object(e)) = (
+        &mut barcode_responses,
+        problem_responses(&[
+            ("401", "unauthenticated"),
+            ("404", "not_found"),
+            ("422", "validation_failed"),
+        ]),
+    ) {
+        r.extend(e);
+    }
+    let query = |name: &str, required: bool, schema: Value| json!({"name": name, "in": "query", "required": required, "schema": schema});
+    paths.insert(
+        format!("/v1/{installation}/_barcode"),
+        json!({"get": {"operationId": "barcode",
+            "parameters": [
+                query("type", true, json!({"type": "string", "enum": ["code128", "ean13", "upca", "qr"]})),
+                query("data", true, json!({"type": "string"})),
+                query("module_size", false, json!({"type": "integer", "minimum": 1, "maximum": 32})),
+                query("bar_height", false, json!({"type": "integer", "minimum": 1, "maximum": 400})),
+                query("quiet_zone", false, json!({"type": "integer", "minimum": 0, "maximum": 20}))],
+            "responses": barcode_responses}}),
+    );
     json!({
         "openapi": "3.1.0",
         "info": {
