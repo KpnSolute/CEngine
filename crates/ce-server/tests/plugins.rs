@@ -231,7 +231,7 @@ async fn run(url: &str, m: Value) -> (Value, (StatusCode, Value)) {
     let (s, line) = api
         .post(
             "stock_line",
-            json!({"item": id(&item), "period": id(&period), "opening_oh": "10"}),
+            json!({"item": id(&item), "period": id(&period), "opening_oh": "10", "unit_price": "1.234568"}),
         )
         .await;
     assert_eq!(s, StatusCode::CREATED, "{line}");
@@ -266,7 +266,7 @@ async fn one_module_two_plugins_two_outcomes() {
         "lenient-rules",
         r#"[[policy]]
 slot = "price"
-rule = "round(max(0, when(unit_price > 0, unit_price, coalesce(ref(item).unit_price, 0))), 4)"
+rule = "round(max(0, unit_price), 4)"
 [[policy]]
 slot = "ending_qty"
 rule = "opening_oh + received - pulled"
@@ -307,7 +307,7 @@ async fn a_closed_period_freezes_its_lines_and_movements() {
             json!({"sku": "RICE", "description": "Rice", "unit_price": "2"}),
         )
         .await;
-    let mk_line = |p: &Value| json!({"item": id(&item), "period": id(p), "opening_oh": "10"});
+    let mk_line = |p: &Value| json!({"item": id(&item), "period": id(p), "opening_oh": "10", "unit_price": "2"});
     let (_, l1) = api.post("stock_line", mk_line(&p1)).await;
     let (_, l2) = api.post("stock_line", mk_line(&p2)).await;
     let (s, m1) = api
@@ -320,6 +320,34 @@ async fn a_closed_period_freezes_its_lines_and_movements() {
     assert_eq!(
         api.get("stock_line", &id(&l1)).await["data"]["ending_qty"],
         "7.000"
+    );
+    assert_eq!(
+        api.get("stock_line", &id(&l1)).await["data"]["ending_value"],
+        "14.00"
+    );
+
+    // The item's catalog price changes; the line keeps the price stamped on it.
+    let cur = api.get("stock_item", &id(&item)).await;
+    let (s, r) = api
+        .patch(
+            "stock_item",
+            &id(&item),
+            cur["data"]["version"].as_u64().unwrap(),
+            json!({"unit_price": "5"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let (s, m3) = api
+        .post(
+            "stock_movement",
+            json!({"line": id(&l1), "period": id(&p1), "pulled": "1"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{m3}");
+    let line = api.get("stock_line", &id(&l1)).await;
+    assert_eq!(
+        (&line["data"]["ending_qty"], &line["data"]["ending_value"]),
+        (&json!("6.000"), &json!("12.00"))
     );
 
     // A movement must belong to its line's period.
@@ -377,7 +405,7 @@ async fn a_closed_period_freezes_its_lines_and_movements() {
     let l1 = api.get("stock_line", &id(&l1)).await;
     assert_eq!(
         (&l1["data"]["pulled"], &l1["data"]["ending_qty"]),
-        (&json!("3.000"), &json!("7.000"))
+        (&json!("4.000"), &json!("6.000"))
     );
     close(api.app).await;
 }
