@@ -2,7 +2,8 @@
 //! one record in a single transaction. Effects run in order, each seeing the result of the one
 //! before: `set` writes fields from expressions (rules, computed fields and freezes apply as for
 //! any write), `transition` moves the record along its state graph, `create` makes a record of
-//! another entity, `update` changes a record of another entity that one of this record's fields
+//! another entity, `carry` copies every record that points at this one into new records
+//! (period rollover), `update` changes a record of another entity that one of this record's fields
 //! points at, `emit` names an event. Any effect may carry a `when` expression and is skipped
 //! unless it is true. Expressions read the record's fields, `input.*`,
 //! `actor.*`, `now` and `today`. Every change leaves an audit row when the `audit` tool is used.
@@ -12,9 +13,13 @@
 use crate::writes::{self, Env, Failure, Op, Outcome};
 use crate::{Problem, Record};
 use axum::http::StatusCode;
-use ce_store::{Store, StoreError};
+use ce_store::{ListRequest, Store, StoreError};
 use ce_validate::FieldError;
 use serde_json::{json, Map, Value};
+
+/// Most records one `carry` effect copies, so a single request stays a bounded transaction.
+const MAX_CARRY: usize = 5000;
+const CARRY_PAGE: usize = 250;
 
 pub(crate) struct Run<'a> {
     pub name: &'a str,
@@ -136,6 +141,122 @@ fn eval(
         )
     })?;
     out.map_err(|e| rules(format!("/{name}"), e))
+}
+
+/// `carry`: every live record of `entity` that points at the action's record through `via` is
+/// copied into a new record. The `values` expressions read the source row's fields (stored and
+/// computed) and `input.*`, and must set `via` to somewhere else. A row whose copy is refused
+/// (a duplicate, a frozen target, a rule) refuses the whole action. `requires`, when given, is
+/// read against the action's own record and must be true.
+#[allow(clippy::too_many_arguments)]
+fn carry(
+    tx: &dyn Store,
+    env: &Env,
+    action: &Value,
+    rec: &Record,
+    r: &Run,
+    i: usize,
+    c: &Map<String, Value>,
+    done: &mut Done,
+) -> Result<(), Stop> {
+    let m = env.manifest;
+    let entity = action["entity"].as_str().unwrap_or_default();
+    let ce = c["entity"].as_str().unwrap_or_default();
+    let via = c["via"].as_str().unwrap_or_default();
+    let cent = &m.value["entities"][ce];
+    if let Some(req) = c.get("requires").and_then(Value::as_str) {
+        let ok = eval(
+            tx,
+            env,
+            action,
+            entity,
+            rec,
+            r.input,
+            req,
+            "requires",
+            &json!({"type": "boolean"}),
+        )?;
+        if ok != Some(Value::Bool(true)) {
+            return Err(wrong_state(format!(
+                "`{}` cannot run: the record does not meet `{req}`",
+                r.name
+            )));
+        }
+    }
+    // Read every source row first, so the copies made below are never read back.
+    let mut rows = Vec::new();
+    let mut after = None;
+    loop {
+        let page = tx.list(
+            env.scope,
+            ce,
+            &ListRequest {
+                select: None,
+                filter: Some(json!({"field": via, "op": "eq", "value": rec.id})),
+                search: None,
+                sort: Vec::new(),
+                limit: Some(CARRY_PAGE),
+                after,
+            },
+        )?;
+        rows.extend(page.records);
+        if rows.len() > MAX_CARRY {
+            return Err(rules(
+                format!("/effect/{i}/carry"),
+                format!("more than {MAX_CARRY} records to carry"),
+            ));
+        }
+        match page.next {
+            Some(n) => after = Some(n),
+            None => break,
+        }
+    }
+    for src in rows {
+        let mut data = Map::new();
+        for (field, expr_src) in c["values"].as_object().into_iter().flatten() {
+            let v = eval(
+                tx,
+                env,
+                action,
+                ce,
+                &src,
+                r.input,
+                expr_src.as_str().unwrap_or_default(),
+                field,
+                &cent["fields"][field],
+            )?;
+            if let Some(v) = v {
+                data.insert(field.clone(), v);
+            }
+        }
+        if data.get(via).and_then(Value::as_str).map(str::to_owned) == Some(rec.id.clone()) {
+            return Err(rules(
+                format!("/effect/{i}/carry/values/{via}"),
+                "the copy must point somewhere other than the record it is carried from"
+                    .to_string(),
+            ));
+        }
+        ce_validate::validate(m, ce, &data, ce_validate::Mode::Create).map_err(|errors| {
+            Stop::Problem(Problem::validation(
+                "the action builds an invalid record",
+                errors
+                    .into_iter()
+                    .map(|e| json!({"path": e.path, "code": e.code, "detail": e.detail}))
+                    .collect(),
+            ))
+        })?;
+        crate::prepare_create(m, ce, &mut data);
+        let op = Op::Create {
+            data,
+            key: format!("act:{}:{i}:{}", r.key, src.id),
+        };
+        let out = writes::step(tx, env, ce, &op)?;
+        writes::audit(tx, env, ce, &op, &out)?;
+        if let Some(made) = out.after {
+            done.created.push(json!({"entity": ce, "id": made.id}));
+        }
+    }
+    Ok(())
 }
 
 fn run_in(tx: &dyn Store, env: &Env, r: &Run) -> Result<Done, Stop> {
@@ -302,6 +423,9 @@ fn run_in(tx: &dyn Store, env: &Env, r: &Run) -> Result<Done, Stop> {
             if let Some(made) = out.after {
                 done.created.push(json!({"entity": ce, "id": made.id}));
             }
+        }
+        if let Some(c) = eff["carry"].as_object() {
+            carry(tx, env, action, &rec, r, i, c, &mut done)?;
         }
         if let Some(u) = eff["update"].as_object() {
             let te = u["entity"].as_str().unwrap_or_default();

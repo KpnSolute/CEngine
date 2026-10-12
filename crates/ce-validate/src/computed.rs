@@ -170,7 +170,9 @@ fn to_json(name: &str, f: &Value, v: Ev) -> Result<Option<Value>, String> {
             Some(Value::String(d.to_string()))
         }
         ("boolean", Ev::Bool(b)) => Some(Value::Bool(b)),
-        ("string" | "text" | "enum" | "date" | "datetime", Ev::Str(s)) => Some(Value::String(s)),
+        ("string" | "text" | "enum" | "date" | "datetime" | "ref", Ev::Str(s)) => {
+            Some(Value::String(s))
+        }
         _ => return Err("the result has the wrong type for this field".to_string()),
     };
     // The result must satisfy the whole field definition, like a caller's value would.

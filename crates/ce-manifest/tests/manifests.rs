@@ -213,3 +213,30 @@ fn action_when_and_update_effects_are_checked() {
     ))
     .contains(&"computed_field"));
 }
+
+#[test]
+fn a_carry_effect_must_copy_along_a_ref_and_leave_the_source() {
+    // booking.contact points at contact: carrying a contact's bookings is a valid shape.
+    let carry = |via: &str, values: Value| {
+        let mut m = example("booking_crm");
+        m["actions"]["confirm_booking"]["entity"] = json!("contact");
+        m["actions"]["confirm_booking"]["effect"] = json!([
+            {"carry": {"entity": "booking", "via": via, "values": values}}
+        ]);
+        m["actions"]["confirm_booking"]
+            .as_object_mut()
+            .unwrap()
+            .remove("requires_state");
+        codes(&m)
+    };
+    let ok = carry("contact", json!({"contact": "contact"}));
+    assert!(!ok.contains(&"bad_carry_link"), "{ok:?}");
+    assert!(!ok.contains(&"carry_needs_link"), "{ok:?}");
+    // `starts_at` is not a ref to the action's entity.
+    assert!(carry("starts_at", json!({"starts_at": "starts_at"})).contains(&"bad_carry_link"));
+    // The copies must set the link, or they would not leave the source.
+    assert!(carry("contact", json!({"notes": "notes"})).contains(&"carry_needs_link"));
+    assert!(
+        carry("contact", json!({"contact": "contact", "ghost": "1"})).contains(&"unknown_field")
+    );
+}

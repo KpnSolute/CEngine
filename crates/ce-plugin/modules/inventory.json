@@ -169,6 +169,24 @@
       }
     },
     "actions": {
+      "rollover_stock": {
+        "entity": "period",
+        "input": {"to": {"type": "ref", "ref": "period", "required": true}},
+        "effect": [
+          {"carry": {
+            "entity": "stock_line",
+            "via": "period",
+            "requires": "status == 'closed'",
+            "values": {
+              "item": "item",
+              "period": "input.to",
+              "opening_oh": "ending_qty",
+              "opening_unit_cost": "when(ending_qty > 0, round(ending_value / ending_qty, 6), 0)",
+              "unit_price": "unit_price"
+            }
+          }}
+        ]
+      },
       "settle_price_observation": {
         "entity": "price_observation",
         "requires_state": ["new"],

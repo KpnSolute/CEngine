@@ -296,6 +296,75 @@ pub fn check(m: &Value) -> Vec<Issue> {
                     }
                 }
             }
+            if let Some(c) = obj(eff, "carry") {
+                if let Some(req) = c.get("requires").and_then(Value::as_str) {
+                    expr(
+                        &mut out,
+                        &format!("{ep}/carry/requires"),
+                        req,
+                        &expr_names,
+                        Site::Plain,
+                    );
+                }
+                let via = c.get("via").and_then(Value::as_str).unwrap_or("");
+                match c.get("entity").and_then(Value::as_str) {
+                    Some(t) if !entities.contains_key(t) => out.push(issue(
+                        format!("{ep}/carry/entity"),
+                        "unknown_entity",
+                        format!("no entity `{t}`"),
+                    )),
+                    Some(t) => {
+                        let tf = obj(&entities[t], "fields").unwrap_or(&empty);
+                        let points_here = tf
+                            .get(via)
+                            .is_some_and(|f| f["type"] == "ref" && f["ref"].as_str() == Some(en));
+                        if !points_here {
+                            out.push(issue(
+                                format!("{ep}/carry/via"),
+                                "bad_carry_link",
+                                format!("`{t}.{via}` must be a ref field pointing at `{en}`"),
+                            ));
+                        }
+                        let mut row_names: BTreeSet<&str> = tf.keys().map(String::as_str).collect();
+                        row_names.insert("input");
+                        let values = c.get("values").and_then(Value::as_object);
+                        if !values.is_some_and(|v| v.contains_key(via)) {
+                            out.push(issue(
+                                format!("{ep}/carry/values"),
+                                "carry_needs_link",
+                                format!(
+                                    "`values` must set `{via}` so the copies leave this record"
+                                ),
+                            ));
+                        }
+                        for (k, v) in values.unwrap_or(&empty) {
+                            if !tf.contains_key(k) {
+                                out.push(issue(
+                                    format!("{ep}/carry/values/{k}"),
+                                    "unknown_field",
+                                    format!("`{t}` has no field `{k}`"),
+                                ));
+                            } else if tf[k].get("computed").is_some() {
+                                out.push(issue(
+                                    format!("{ep}/carry/values/{k}"),
+                                    "computed_field",
+                                    format!("`{k}` is computed and cannot be set"),
+                                ));
+                            }
+                            if let Some(e) = v.as_str() {
+                                expr(
+                                    &mut out,
+                                    &format!("{ep}/carry/values/{k}"),
+                                    e,
+                                    &row_names,
+                                    Site::Plain,
+                                );
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
             if let Some(c) = obj(eff, "create") {
                 match c.get("entity").and_then(Value::as_str) {
                     Some(t) if !entities.contains_key(t) => out.push(issue(
