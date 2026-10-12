@@ -187,10 +187,16 @@ fn manifest() -> Value {
                     "qty": {"type": "integer"}
                 },
                 "governed": true
+            }, "part": {
+                "fields": {
+                    "name": {"type": "string", "required": true},
+                    "widget": {"type": "ref", "ref": "widget", "required": true, "indexed": true}
+                },
+                "governed": true
             }},
             "roles": {
                 "owner": {"read": ["*"], "write": ["*"], "actions": ["*"]},
-                "clerk": {"read": ["*"], "write": ["widget"], "actions": []},
+                "clerk": {"read": ["*"], "write": ["widget", "part"], "actions": []},
                 "reviewer": {"read": ["*"], "write": [], "actions": ["merge_changeset"]}
             }
         }),
@@ -405,4 +411,41 @@ async fn reject_withdraw_and_deletes() {
     let (s, v) = rev.verb(&cs, "revert").await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     close(vec![clerk.app, owner.app, rev.app]).await;
+}
+
+#[tokio::test]
+async fn a_changeset_can_stage_a_record_and_others_that_point_at_it() {
+    let Some(mut clerk) = setup().await else {
+        return;
+    };
+    let mut rev = as_role(&clerk, "reviewer");
+    let w = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    let (s, v) = clerk
+        .post("widget", json!({"id": w, "name": "frame"}))
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    let cs = v["data"]["changeset_id"].as_str().unwrap().to_string();
+    let (s, v) = clerk
+        .call_with(
+            "POST",
+            &format!("/v1/{INST}/part"),
+            None,
+            Some(json!({"name": "bolt", "widget": w})),
+            &cs,
+        )
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    assert!(rev.list("widget").await.is_empty(), "nothing applied yet");
+    let (s, v) = rev.verb(&cs, "merge").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let widgets = rev.list("widget").await;
+    assert_eq!(widgets[0]["id"], w);
+    let parts = rev.list("part").await;
+    assert_eq!(parts[0]["widget"], w);
+    // Undoing the changeset removes both, in reverse order.
+    let (s, v) = rev.verb(&cs, "revert").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(rev.list("part").await.is_empty());
+    assert!(rev.list("widget").await.is_empty());
+    close(vec![clerk.app, rev.app]).await;
 }
