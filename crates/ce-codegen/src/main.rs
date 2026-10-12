@@ -1,4 +1,4 @@
-//! `ce-codegen <manifest.json> [--lang python] [--out FILE]`: writes a typed client.
+//! `ce-codegen <manifest.json> [--lang python|typescript] [--out FILE]`: writes a typed client.
 
 use std::process::ExitCode;
 
@@ -15,7 +15,8 @@ fn run() -> Result<(), String> {
             _ => return Err(format!("unexpected argument `{a}`")),
         }
     }
-    let path = manifest.ok_or("usage: ce-codegen <manifest.json> [--lang python] [--out FILE]")?;
+    let path = manifest
+        .ok_or("usage: ce-codegen <manifest.json> [--lang python|typescript] [--out FILE]")?;
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let m = ce_manifest::validate(&bytes).map_err(|issues| {
         let mut msg = format!("{path} is not a valid manifest:");
@@ -26,7 +27,12 @@ fn run() -> Result<(), String> {
     })?;
     let code = match lang.as_str() {
         "python" => ce_codegen::python(&m),
-        other => return Err(format!("unknown language `{other}` (use python)")),
+        "typescript" | "ts" => ce_codegen::typescript(&m),
+        other => {
+            return Err(format!(
+                "unknown language `{other}` (use python or typescript)"
+            ))
+        }
     };
     match out {
         Some(p) => std::fs::write(&p, code).map_err(|e| format!("cannot write {p}: {e}")),

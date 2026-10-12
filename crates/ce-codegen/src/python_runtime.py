@@ -284,7 +284,7 @@ class Resource(Generic[M]):
         return self._model.from_json(out["data"])
 
     def update(self, record: Union[M, str], changes: dict[str, Any], *, version: Optional[int] = None) -> M:
-        """Patches a record at the version you last saw; a stale version is a 412 error."""
+        """Patches a record at the version you last saw; a stale version is a 409 error."""
         id_ = record if isinstance(record, str) else record.id
         ver = version if version is not None else getattr(record, "version", None)
         if ver is None:
