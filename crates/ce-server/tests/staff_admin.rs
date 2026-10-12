@@ -29,6 +29,11 @@ fn rec(name: &str, pin: &str, role: &str) -> StaffRecord {
 }
 
 fn app(writable: bool) -> Router {
+    app_at(writable, Arc::new(std::sync::atomic::AtomicU64::new(1000)))
+}
+
+fn app_at(writable: bool, clock: Arc<std::sync::atomic::AtomicU64>) -> Router {
+    use std::sync::atomic::Ordering::SeqCst;
     let m = validate(
         json!({
             "manifest_version": 1,
@@ -53,14 +58,17 @@ fn app(writable: bool) -> Router {
         ],
         writable,
     );
-    let login = PinLogin::with_directory(Arc::new(dir), PinPolicy::default(), Arc::new(|| 1000));
+    let login = PinLogin::with_directory(Arc::new(dir), PinPolicy::default(), {
+        let c = clock.clone();
+        Arc::new(move || c.load(SeqCst))
+    });
     let mut st = AppState::new(
         MemoryStore::new(),
         Verifier::new(b"0123456789abcdef0123456789abcdef").unwrap(),
         m,
         "s",
     );
-    st.now = Arc::new(|| 1000);
+    st.now = Arc::new(move || clock.load(SeqCst));
     router(st.with_login(Box::new(login), T1, 3600).unwrap())
 }
 
@@ -498,4 +506,73 @@ fn database_errors_do_not_count_as_wrong_pins() {
         assert_eq!(login.login(&creds), Err(LoginError::Unavailable));
     }
     assert!(login.login(&creds).is_ok());
+}
+
+#[tokio::test]
+async fn a_reset_a_pin_change_or_a_switch_off_ends_earlier_sessions() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let clock = Arc::new(std::sync::atomic::AtomicU64::new(1000));
+    let a = app_at(true, clock.clone());
+    let boss = token(&a, "boss", "739142").await;
+    let mgr = token(&a, "mgr", "624801").await;
+    let live = |t: String| {
+        let a = a.clone();
+        async move {
+            call(&a, "GET", "/note", Some(&t), Value::Null).await.0 != StatusCode::UNAUTHORIZED
+        }
+    };
+    assert!(live(mgr.clone()).await);
+
+    // Switching the account off ends its session at once, and switching it back on does not
+    // bring the old token back.
+    clock.store(1100, SeqCst);
+    call(
+        &a,
+        "PATCH",
+        "/_staff/mgr",
+        Some(&boss),
+        json!({"active": false}),
+    )
+    .await;
+    assert!(!live(mgr.clone()).await);
+    clock.store(1200, SeqCst);
+    call(
+        &a,
+        "PATCH",
+        "/_staff/mgr",
+        Some(&boss),
+        json!({"active": true}),
+    )
+    .await;
+    assert!(!live(mgr.clone()).await);
+    let mgr2 = token(&a, "mgr", "624801").await;
+    assert!(live(mgr2.clone()).await);
+
+    // A reset ends the session; so does the person's own PIN change.
+    clock.store(1300, SeqCst);
+    call(
+        &a,
+        "POST",
+        "/_staff/mgr/reset_pin",
+        Some(&boss),
+        json!({"pin": "913574"}),
+    )
+    .await;
+    assert!(!live(mgr2).await);
+    clock.store(1400, SeqCst);
+    let rot = token(&a, "mgr", "913574").await;
+    let (st, b) = call(
+        &a,
+        "POST",
+        "/_auth/pin",
+        Some(&rot),
+        json!({"current_pin": "913574", "new_pin": "482916"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    clock.store(1500, SeqCst);
+    let mgr3 = token(&a, "mgr", "482916").await;
+    assert!(live(mgr3).await);
+    // Other people's sessions are untouched.
+    assert!(live(boss).await);
 }

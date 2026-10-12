@@ -94,6 +94,8 @@ pub struct PinLogin {
     policy: PinPolicy,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
     tracks: Mutex<HashMap<String, Track>>,
+    /// Per username, the time of the last change that ends earlier sessions.
+    revoked: Mutex<HashMap<String, u64>>,
     /// Scrypt memory in use now, in bytes.
     in_use: AtomicUsize,
     /// What an unknown username is checked against: the dearest hash in the list (or a built-in one
@@ -224,11 +226,25 @@ impl PinLogin {
         now: Arc<dyn Fn() -> u64 + Send + Sync>,
         dummy: Parsed,
     ) -> Self {
+        // What the directory remembers survives a restart: a PIN set at T ends sessions up to T.
+        // A switched-off account is revoked from now.
+        let start = now();
+        let revoked = dir
+            .list()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| match (r.active, r.pin_updated_at) {
+                (false, _) => Some((r.username.clone(), start)),
+                (true, t) if t > 0 => Some((r.username.clone(), t)),
+                _ => None,
+            })
+            .collect();
         PinLogin {
             dir,
             policy,
             now,
             tracks: Mutex::new(HashMap::new()),
+            revoked: Mutex::new(revoked),
             in_use: AtomicUsize::new(0),
             dummy,
         }
@@ -335,7 +351,26 @@ impl PinLogin {
     }
 }
 
+impl PinLogin {
+    /// Ends every session issued before now for this account (kept in memory; the directory's
+    /// PIN time and active flag rebuild it at start).
+    fn revoke(&self, key: &str) {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_string(), (self.now)());
+    }
+}
+
 impl Login for PinLogin {
+    fn not_before(&self, user: &str) -> Option<u64> {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key_of(user))
+            .map(|t| t.saturating_sub(1))
+    }
+
     fn login(&self, c: &Map<String, Value>) -> Result<Identity, LoginError> {
         let name = c.get("username").and_then(Value::as_str).unwrap_or("");
         let pin = c.get("pin").and_then(Value::as_str).unwrap_or("");
@@ -541,7 +576,9 @@ impl StaffAdmin for PinLogin {
         let hash = self.pin_ok(new)?;
         self.dir
             .set_pin(&key, &hash, false, (self.now)(), &key)
-            .map_err(fail_of)
+            .map_err(fail_of)?;
+        self.revoke(&key);
+        Ok(())
     }
 
     fn list(&self) -> Result<Vec<StaffInfo>, AdminError> {
@@ -608,6 +645,7 @@ impl StaffAdmin for PinLogin {
         if let Some(a) = active {
             self.dir.set_active(&key, a, actor).map_err(fail_of)?;
         }
+        self.revoke(&key);
         self.refreshed(&key)
     }
 
@@ -624,6 +662,7 @@ impl StaffAdmin for PinLogin {
         self.dir
             .set_pin(&key, &hash, true, (self.now)(), actor)
             .map_err(fail_of)?;
+        self.revoke(&key);
         // A reset also clears the lock, so the person can sign in with the temporary PIN.
         self.pass(&key);
         self.refreshed(&key)

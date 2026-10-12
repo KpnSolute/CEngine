@@ -39,6 +39,13 @@ pub trait Login: Send + Sync {
     fn admin(&self) -> Option<&dyn crate::staff::StaffAdmin> {
         None
     }
+
+    /// Tokens for `user` issued at or before this time (seconds) are no longer accepted: a PIN
+    /// change or reset, a role change or a switch-off ends the sessions that came before it.
+    /// Must not block: it runs on every request.
+    fn not_before(&self, _user: &str) -> Option<u64> {
+        None
+    }
 }
 
 /// The login a server was given, the tenant it issues for and how long tokens last.

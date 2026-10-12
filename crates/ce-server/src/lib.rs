@@ -299,9 +299,20 @@ fn authenticate_any<S>(st: &AppState<S>, headers: &HeaderMap) -> Result<Principa
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(Problem::unauthenticated)?;
-    st.verifier
+    let who = st
+        .verifier
         .verify_token(token, (st.now)())
-        .map_err(|_| Problem::unauthenticated())
+        .map_err(|_| Problem::unauthenticated())?;
+    if let Some(nb) = st
+        .issuing
+        .as_ref()
+        .and_then(|i| i.login.not_before(&who.user_id))
+    {
+        if who.issued_at <= nb {
+            return Err(Problem::unauthenticated());
+        }
+    }
+    Ok(who)
 }
 
 /// Token, installation, role, entity, in that order.

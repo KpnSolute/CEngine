@@ -29,6 +29,8 @@ impl TenantScope {
 pub struct Principal {
     pub user_id: String,
     pub roles: Vec<String>,
+    /// Seconds since the epoch when the token was signed (0 when the token has no `iat`).
+    pub issued_at: u64,
     scope: TenantScope,
 }
 
@@ -64,6 +66,7 @@ struct Claims {
     roles: Vec<String>,
     exp: u64,
     nbf: Option<u64>,
+    iat: Option<u64>,
 }
 
 pub struct Verifier {
@@ -154,6 +157,7 @@ impl Verifier {
         Ok(Principal {
             user_id: c.sub,
             roles: c.roles,
+            issued_at: c.iat.unwrap_or(0),
             scope: TenantScope {
                 tenant_id: c.tenant,
             },
