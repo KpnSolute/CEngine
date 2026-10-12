@@ -343,6 +343,55 @@ fn replay(result: Option<Value>) -> Result<Record, StoreError> {
 }
 
 impl TypedPgStore {
+    fn aggregate_on(
+        &self,
+        c: &mut impl GenericClient,
+        scope: &TenantScope,
+        entity: &str,
+        req: &ce_query::AggRequest,
+    ) -> Result<Vec<Map<String, Value>>, StoreError> {
+        use ce_query::{plan_aggregate, ColKind};
+        if !self.ents.contains_key(entity) {
+            return Err(StoreError::BadData("unknown entity"));
+        }
+        let target = Target {
+            schema: self.schema.clone(),
+            entity: entity.to_string(),
+        };
+        let planned =
+            plan_aggregate(&self.manifest, &target, scope, req).map_err(StoreError::Query)?;
+        let params: Vec<Box<dyn ToSql + Sync>> = planned
+            .params
+            .iter()
+            .map(|p| match p {
+                Param::Text(s) | Param::Dec(s) => Box::new(s.clone()) as Box<dyn ToSql + Sync>,
+                Param::Int(i) => Box::new(*i),
+                Param::Bool(b) => Box::new(*b),
+            })
+            .collect();
+        let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = c.query(planned.sql.as_str(), &refs).map_err(db)?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let mut out = Map::new();
+                for (i, (name, kind)) in planned.columns.iter().enumerate() {
+                    let v = match kind {
+                        ColKind::Int => row
+                            .get::<_, Option<i64>>(i)
+                            .map_or(Value::Null, Value::from),
+                        ColKind::Dec => row
+                            .get::<_, Option<String>>(i)
+                            .map_or(Value::Null, Value::String),
+                        ColKind::Json => row.get::<_, Option<Value>>(i).unwrap_or(Value::Null),
+                    };
+                    out.insert(name.clone(), v);
+                }
+                out
+            })
+            .collect())
+    }
+
     fn list_on(
         &self,
         c: &mut impl GenericClient,
@@ -806,6 +855,16 @@ impl TypedPgStore {
 }
 
 impl Store for TypedPgStore {
+    fn aggregate(
+        &self,
+        scope: &TenantScope,
+        entity: &str,
+        req: &ce_query::AggRequest,
+    ) -> Result<Vec<Map<String, Value>>, StoreError> {
+        let mut c = self.lock()?;
+        self.aggregate_on(&mut *c, scope, entity, req)
+    }
+
     fn list(
         &self,
         scope: &TenantScope,

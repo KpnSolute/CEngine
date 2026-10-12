@@ -347,3 +347,181 @@ pub fn plan_list(
         params: ctx.params,
     })
 }
+
+/// The most groups one aggregate returns.
+pub const MAX_GROUPS: usize = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggFn {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone)]
+pub struct Measure {
+    pub func: AggFn,
+    /// `None` only for `Count`, which then counts rows.
+    pub field: Option<String>,
+    /// The column name in the result.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AggRequest {
+    pub group_by: Vec<String>,
+    pub measures: Vec<Measure>,
+    pub filter: Option<Value>,
+}
+
+/// How a result column is read back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColKind {
+    /// A whole number (`bigint`).
+    Int,
+    /// An exact decimal, read as text so no precision is lost.
+    Dec,
+    /// Anything else, as `jsonb`.
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedAgg {
+    pub sql: String,
+    pub params: Vec<Param>,
+    /// Result columns in order (group fields, then measures) with how to read each.
+    pub columns: Vec<(String, ColKind)>,
+}
+
+fn measure_ident(n: &str) -> bool {
+    n.starts_with(|c: char| c.is_ascii_lowercase())
+        && n.len() <= 63
+        && n.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Plans `SELECT <groups>, <measures> ... GROUP BY <groups> ORDER BY <groups>`, tenant-scoped
+/// and soft-delete aware like the list. Group order is ascending with nulls last; at most
+/// [`MAX_GROUPS`] groups come back. Sums and averages cover integer and decimal fields (an
+/// integer sum stays an integer; decimals stay exact); min and max also cover dates.
+pub fn plan_aggregate(
+    m: &Manifest,
+    t: &Target,
+    scope: &TenantScope,
+    req: &AggRequest,
+) -> Result<PlannedAgg, QueryError> {
+    let ident = !t.schema.is_empty()
+        && t.schema.starts_with(|c: char| c.is_ascii_lowercase())
+        && t.schema
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ident {
+        return Err(QueryError::BadSchema);
+    }
+    let entity = m.value["entities"]
+        .get(&t.entity)
+        .ok_or_else(|| QueryError::UnknownEntity(t.entity.clone()))?;
+    let mut ctx = Ctx {
+        entity,
+        params: vec![Param::Text(scope.tenant_id().to_string())],
+    };
+    if req.measures.is_empty() || req.group_by.len() > 4 || req.measures.len() > 12 {
+        return Err(QueryError::BadFilter(
+            "a report needs 1 to 12 measures and at most 4 groups",
+        ));
+    }
+    let mut cols: Vec<String> = Vec::new();
+    let mut kinds: Vec<(String, ColKind)> = Vec::new();
+    let mut group_sql: Vec<String> = Vec::new();
+    for (i, g) in req.group_by.iter().enumerate() {
+        let ty = ctx.field_type(g)?;
+        if g == "id" || matches!(ty.as_str(), "json" | "file" | "text") {
+            return Err(QueryError::NotFilterable(g.clone()));
+        }
+        let col = ctx.column(g)?;
+        if ty == "decimal" {
+            cols.push(format!("{col}::text AS \"_a{i}\""));
+            kinds.push((g.clone(), ColKind::Dec));
+        } else {
+            cols.push(format!("to_jsonb({col}) AS \"_a{i}\""));
+            kinds.push((g.clone(), ColKind::Json));
+        }
+        group_sql.push(col);
+    }
+    for (j, ms) in req.measures.iter().enumerate() {
+        let i = req.group_by.len() + j;
+        if !measure_ident(&ms.name) || kinds.iter().any(|(n, _)| n == &ms.name) {
+            return Err(QueryError::BadValue(ms.name.clone()));
+        }
+        let (expr, kind) = match (ms.func, ms.field.as_deref()) {
+            (AggFn::Count, None) => ("count(*)".to_string(), ColKind::Int),
+            (AggFn::Count, Some(f)) => {
+                let ty = ctx.field_type(f)?;
+                if matches!(ty.as_str(), "json" | "file") {
+                    return Err(QueryError::NotFilterable(f.to_string()));
+                }
+                (format!("count({})", ctx.column(f)?), ColKind::Int)
+            }
+            (_, None) => return Err(QueryError::BadValue(ms.name.clone())),
+            (func, Some(f)) => {
+                let ty = ctx.field_type(f)?;
+                let col = ctx.column(f)?;
+                match (func, ty.as_str()) {
+                    (AggFn::Sum, "integer") => (format!("sum({col})"), ColKind::Int),
+                    (AggFn::Sum, "decimal") => (format!("sum({col})"), ColKind::Dec),
+                    (AggFn::Avg, "integer" | "decimal") => (format!("avg({col})"), ColKind::Dec),
+                    (AggFn::Min, "decimal") => (format!("min({col})"), ColKind::Dec),
+                    (AggFn::Max, "decimal") => (format!("max({col})"), ColKind::Dec),
+                    (AggFn::Min, "integer" | "date" | "datetime") => {
+                        (format!("min({col})"), ColKind::Json)
+                    }
+                    (AggFn::Max, "integer" | "date" | "datetime") => {
+                        (format!("max({col})"), ColKind::Json)
+                    }
+                    _ => return Err(QueryError::NotFilterable(f.to_string())),
+                }
+            }
+        };
+        cols.push(match kind {
+            ColKind::Int => format!("({expr})::bigint AS \"_a{i}\""),
+            ColKind::Dec => format!("({expr})::text AS \"_a{i}\""),
+            ColKind::Json => format!("to_jsonb({expr}) AS \"_a{i}\""),
+        });
+        kinds.push((ms.name.clone(), kind));
+    }
+
+    let mut wheres = vec!["\"tenant_id\" = $1::text::uuid".to_string()];
+    if entity["soft_delete"] != false {
+        wheres.push("\"deleted_at\" IS NULL".to_string());
+    }
+    if let Some(f) = &req.filter {
+        let mut nodes = 0;
+        wheres.push(filter::compile(&mut ctx, f, 0, &mut nodes)?);
+    }
+    let mut sql = format!(
+        "SELECT {} FROM \"{}\".\"{}\" WHERE {}",
+        cols.join(", "),
+        t.schema,
+        t.entity,
+        wheres.join(" AND ")
+    );
+    if !group_sql.is_empty() {
+        sql.push_str(&format!(
+            " GROUP BY {} ORDER BY {} LIMIT {}",
+            group_sql.join(", "),
+            group_sql
+                .iter()
+                .map(|c| format!("{c} ASC NULLS LAST"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            MAX_GROUPS + 1
+        ));
+    }
+    Ok(PlannedAgg {
+        sql,
+        params: ctx.params,
+        columns: kinds,
+    })
+}

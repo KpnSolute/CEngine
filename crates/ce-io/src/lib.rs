@@ -127,6 +127,40 @@ pub fn export_csv(m: &Manifest, entity: &str, records: &[Value]) -> Result<Strin
     Ok(out)
 }
 
+/// Renders a computed table (a report) as CSV: `textual[i]` says column `i` holds free text, whose
+/// cells get the same spreadsheet-formula guard as an export. Numbers and exact decimals do not.
+pub fn table_csv(header: &[String], textual: &[bool], rows: &[Vec<Value>]) -> String {
+    let mut out = header
+        .iter()
+        .map(|c| quote(c))
+        .collect::<Vec<_>>()
+        .join(",");
+    out.push_str("\r\n");
+    for r in rows {
+        let cells: Vec<String> = r
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let text = match v {
+                    Value::Null => String::new(),
+                    Value::String(s) => s.clone(),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Number(n) => n.to_string(),
+                    other => other.to_string(),
+                };
+                if textual.get(i).copied().unwrap_or(true) && dangerous(&text) {
+                    quote(&format!("'{text}"))
+                } else {
+                    quote(&text)
+                }
+            })
+            .collect();
+        out.push_str(&cells.join(","));
+        out.push_str("\r\n");
+    }
+    out
+}
+
 /// Splits CSV text into rows of cells. Errors on an unterminated quote.
 fn parse_csv(text: &str) -> Result<Vec<Vec<String>>, IoError> {
     let mut rows = Vec::new();

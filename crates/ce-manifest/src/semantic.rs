@@ -321,6 +321,10 @@ pub fn check(m: &Value) -> Vec<Issue> {
         }
     }
 
+    for (rn, r) in obj(m, "reports").unwrap_or(&empty) {
+        check_report(&mut out, rn, r, entities, &empty);
+    }
+
     for (rn, r) in obj(m, "roles").unwrap_or(&empty) {
         for key in ["read", "write"] {
             for (i, e) in r[key].as_array().into_iter().flatten().enumerate() {
@@ -638,5 +642,119 @@ fn roots_of(e: &Expr, out: &mut BTreeSet<String>) {
             roots_of(b, out);
         }
         _ => {}
+    }
+}
+
+/// A report groups one entity's records and computes measures over each group.
+fn check_report(out: &mut Vec<Issue>, rn: &str, r: &Value, entities: &Obj, empty: &Obj) {
+    let pp = format!("/reports/{rn}");
+    let Some(en) = r["entity"].as_str() else {
+        return;
+    };
+    let Some(ent) = entities.get(en) else {
+        out.push(issue(
+            format!("{pp}/entity"),
+            "unknown_entity",
+            format!("no entity `{en}`"),
+        ));
+        return;
+    };
+    let fields = obj(ent, "fields").unwrap_or(empty);
+    let ty = |f: &str| fields.get(f).and_then(|x| x["type"].as_str());
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for (i, g) in r["group_by"].as_array().into_iter().flatten().enumerate() {
+        let g = g.as_str().unwrap_or("");
+        match ty(g) {
+            None => out.push(issue(
+                format!("{pp}/group_by/{i}"),
+                "unknown_field",
+                format!("no field `{g}`"),
+            )),
+            Some("json" | "file" | "text") => out.push(issue(
+                format!("{pp}/group_by/{i}"),
+                "invalid_group",
+                format!("`{g}` cannot be grouped by"),
+            )),
+            Some(_) if fields[g]["pii"] == true => out.push(issue(
+                format!("{pp}/group_by/{i}"),
+                "pii_in_report",
+                format!("`{g}` is marked pii"),
+            )),
+            Some(_) => {
+                seen.insert(g);
+            }
+        }
+    }
+    for (i, ms) in r["measures"].as_array().into_iter().flatten().enumerate() {
+        let mp = format!("{pp}/measures/{i}");
+        let name = ms["as"].as_str().unwrap_or("");
+        if !seen.insert(name) {
+            out.push(issue(
+                format!("{mp}/as"),
+                "duplicate_name",
+                format!("`{name}` is already a column of this report"),
+            ));
+        }
+        let func = ms["fn"].as_str().unwrap_or("");
+        match (func, ms["field"].as_str()) {
+            ("count", None) => {}
+            ("count", Some(f)) | (_, Some(f)) => match ty(f) {
+                None => out.push(issue(
+                    format!("{mp}/field"),
+                    "unknown_field",
+                    format!("no field `{f}`"),
+                )),
+                Some(t) => {
+                    let ok = match func {
+                        "count" => !matches!(t, "json" | "file"),
+                        "sum" | "avg" => matches!(t, "integer" | "decimal"),
+                        _ => matches!(t, "integer" | "decimal" | "date" | "datetime"),
+                    };
+                    if !ok {
+                        out.push(issue(
+                            format!("{mp}/field"),
+                            "invalid_measure",
+                            format!("`{func}` cannot be computed over a {t} field"),
+                        ));
+                    } else if fields[f]["pii"] == true {
+                        out.push(issue(
+                            format!("{mp}/field"),
+                            "pii_in_report",
+                            format!("`{f}` is marked pii"),
+                        ));
+                    }
+                }
+            },
+            (_, None) => out.push(issue(
+                format!("{mp}/field"),
+                "required",
+                format!("`{func}` needs a field"),
+            )),
+        }
+    }
+    for (i, p) in r["params"].as_array().into_iter().flatten().enumerate() {
+        let p = p.as_str().unwrap_or("");
+        if !matches!(
+            ty(p),
+            Some("string" | "integer" | "boolean" | "enum" | "date" | "ref" | "decimal")
+        ) {
+            out.push(issue(
+                format!("{pp}/params/{i}"),
+                "invalid_param",
+                format!("`{p}` is not a field a report can be narrowed by"),
+            ));
+        }
+    }
+    if let Some(e) = r.get("filter").and_then(Value::as_str) {
+        let names: BTreeSet<&str> = fields.keys().map(String::as_str).collect();
+        expr(out, &format!("{pp}/filter"), e, &names, Site::Filter);
+        match crate::projection::filter_json(e) {
+            Err(why) => out.push(issue(format!("{pp}/filter"), "unsupported_filter", why)),
+            Ok(f) => {
+                if let Err(why) = crate::projection::check_types(&f, fields) {
+                    out.push(issue(format!("{pp}/filter"), "invalid_filter", why));
+                }
+            }
+        }
     }
 }

@@ -140,3 +140,34 @@ fn children_sums_are_checked_against_the_entities() {
     assert!(sum("sum(children(item, period, 0))").contains(&"bad_children"));
     assert!(sum("sum(children(item, period).value.ghost)").contains(&"bad_children"));
 }
+
+#[test]
+fn reports_are_checked_against_the_entity() {
+    let base = || {
+        let mut m = example("inventory");
+        m["reports"] = json!({"stock": {
+            "entity": "item",
+            "group_by": ["category"],
+            "measures": [{"fn": "sum", "field": "unit_cost", "as": "cost"}, {"fn": "count", "as": "n"}],
+            "filter": "category == 'dry'",
+            "params": ["period"]
+        }});
+        m
+    };
+    assert_eq!(codes(&base()), Vec::<&str>::new());
+    let with = |edit: &dyn Fn(&mut Value)| {
+        let mut m = base();
+        edit(&mut m["reports"]["stock"]);
+        codes(&m)
+    };
+    assert!(with(&|r| r["entity"] = json!("nope")).contains(&"unknown_entity"));
+    assert!(with(&|r| r["group_by"] = json!(["nope"])).contains(&"unknown_field"));
+    assert!(with(&|r| r["measures"][0]["field"] = json!("name")).contains(&"invalid_measure"));
+    assert!(with(&|r| r["measures"][0]["field"] = json!("nope")).contains(&"unknown_field"));
+    assert!(with(&|r| r["measures"][1] = json!({"fn": "avg", "as": "n"})).contains(&"required"));
+    assert!(with(&|r| r["measures"][1]["as"] = json!("category")).contains(&"duplicate_name"));
+    assert!(with(&|r| r["params"] = json!(["nope"])).contains(&"invalid_param"));
+    assert!(with(&|r| r["filter"] = json!("name == 3")).contains(&"invalid_filter"));
+    assert!(with(&|r| r["filter"] = json!("ref(period).x == 1")).contains(&"unsupported_filter"));
+    assert!(with(&|r| r["measures"] = json!([])).contains(&"schema"));
+}
