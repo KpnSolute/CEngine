@@ -182,7 +182,7 @@ fn lock_parents(
     // repeated; if it found more records the new ones are locked too (a few tries at most).
     let mut held: BTreeSet<(String, String)> = BTreeSet::new();
     for _ in 0..3 {
-        let levels = ancestor_levels(tx, env, child, old, new);
+        let levels = ancestor_levels(tx, env, child, old, new)?;
         let mut locked_any = false;
         for key in levels.iter().rev().flatten() {
             if held.insert(key.clone()) {
@@ -207,20 +207,23 @@ fn ancestor_levels(
     child: &str,
     old: Option<&Map<String, Value>>,
     new: Option<&Map<String, Value>>,
-) -> Vec<BTreeSet<(String, String)>> {
+) -> Result<Vec<BTreeSet<(String, String)>>, Failure> {
     let mut levels = Vec::new();
     let mut frontier = parent_keys(env, child, old, new);
     while !frontier.is_empty() && levels.len() < MAX_DEPTH {
         let mut next = BTreeSet::new();
         for (entity, id) in &frontier {
-            if let Ok(r) = tx.get(env.scope, entity, id) {
-                next.extend(parent_keys(env, entity, r.data.as_object(), None));
+            match tx.get(env.scope, entity, id) {
+                Ok(r) => next.extend(parent_keys(env, entity, r.data.as_object(), None)),
+                // A dangling reference has no ancestors.
+                Err(StoreError::NotFound) => {}
+                Err(e) => return Err(e.into()),
             }
         }
         levels.push(std::mem::take(&mut frontier));
         frontier = next;
     }
-    levels
+    Ok(levels)
 }
 
 /// Brings every parent of a changed child up to date. `old` and `new` are the child's data
