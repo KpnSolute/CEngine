@@ -1,0 +1,34 @@
+# CEngine STAGING Blueprint for Render (free plan, Docker runtime). Staging only: never point
+# this at production data. No secrets are stored here; every secret is `sync: false` and is
+# entered by the owner in the Render Dashboard. Instructions and open questions:
+# deploy/render/STAGING.md. Not applied by anyone yet.
+services:
+  - type: web
+    name: cengine-staging
+    runtime: docker
+    dockerfilePath: ./Dockerfile # the repo's existing image; see STAGING.md for the plugin-phase image
+    dockerContext: .
+    plan: free # sleeps when idle, no persistent disk, no shell; see STAGING.md "Free-plan limits"
+    # region: oregon # OWNER DECISION: fixed after creation; choose near the external database
+    branch: main
+    autoDeployTrigger: "off" # staging changes ship only when the owner clicks Deploy
+    healthCheckPath: /_meta/health/ready
+    envVars:
+      - key: PORT
+        value: "8080" # the port Render routes to; must equal the port in CE_BIND
+      - key: CE_BIND
+        value: 0.0.0.0:8080 # the image default; ce-serve does not read PORT itself
+      - key: CE_INSTALLATION
+        value: mjcc-staging
+      - key: CE_MANIFEST
+        value: /etc/secrets/manifest.json # Render secret file holding the manifest JSON
+      - key: CE_POOL_SIZE
+        value: "5"
+      - key: CE_DATABASE_URL
+        sync: false # external NON-PRODUCTION Postgres URL
+      - key: CE_JWT_KEY
+        sync: false # >= 32 bytes, generated for staging only
+      - key: CE_DB_TLS
+        sync: false # off | webpki | ca, see STAGING.md
+      - key: CE_DB_CA
+        sync: false # only with CE_DB_TLS=ca; e.g. /etc/secrets/db-ca.pem (Render secret file)
