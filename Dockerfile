@@ -9,6 +9,7 @@ FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY spec/manifest.schema.json ./spec/manifest.schema.json
 RUN cargo build --release --locked -p ce-serve
 
 FROM debian:bookworm-slim
