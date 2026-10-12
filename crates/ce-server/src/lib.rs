@@ -1187,7 +1187,10 @@ async fn changeset_verb<S: Store + Send + Sync + 'static>(
         let who = authenticate(&st, &headers)?;
         if inst != st.installation
             || !changesets::enabled(&st.manifest)
-            || !matches!(verb.as_str(), "merge" | "reject" | "revert" | "withdraw")
+            || !matches!(
+                verb.as_str(),
+                "merge" | "reject" | "revert" | "withdraw" | "preview"
+            )
         {
             return Err(Problem::not_found());
         }
@@ -1197,6 +1200,21 @@ async fn changeset_verb<S: Store + Send + Sync + 'static>(
         let ctx = invariant_context(&st, &who);
         let scope = who.scope().clone();
         let (store, manifest, rid2) = (st.store.clone(), st.manifest.clone(), rid.clone());
+        if verb == "preview" {
+            let data = tokio::task::spawn_blocking(move || {
+                let env = writes::Env {
+                    manifest: &manifest,
+                    scope: &scope,
+                    ctx: &ctx,
+                    request_id: &rid2,
+                };
+                changesets::preview(&*store, &env, &id)
+            })
+            .await
+            .map_err(|_| store_problem(StoreError::Backend("task failed".into())))??;
+            let body = json!({"data": data, "meta": {"request_id": rid}});
+            return Ok((StatusCode::OK, Json(body)).into_response());
+        }
         let rec = tokio::task::spawn_blocking(move || {
             let env = writes::Env {
                 manifest: &manifest,

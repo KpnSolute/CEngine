@@ -197,7 +197,13 @@ fn set_status(
 }
 
 /// Runs the operations of `id` (merge) or undoes them (revert) in one transaction.
-fn apply<S: Store>(store: &S, env: &Env, id: &str, revert: bool) -> Result<Record, Problem> {
+fn apply<S: Store>(
+    store: &S,
+    env: &Env,
+    id: &str,
+    revert: bool,
+    mut preview: Option<&mut Preview>,
+) -> Result<Option<Record>, Problem> {
     let mut done = None;
     let mut bad = None;
     let mut failed: Option<(u64, Failure)> = None;
@@ -221,6 +227,7 @@ fn apply<S: Store>(store: &S, env: &Env, id: &str, revert: bool) -> Result<Recor
             let operation = text(&d, "operation");
             let mut rid = text(&d, "record_id");
             let patch = object(d.get("data").unwrap_or(&Value::Null));
+            let chosen_id = patch.contains_key("id");
             let known = versions.get(&(entity.clone(), rid.clone())).copied();
             let wop = if revert {
                 let before = object(d.get("before").unwrap_or(&Value::Null));
@@ -270,17 +277,39 @@ fn apply<S: Store>(store: &S, env: &Env, id: &str, revert: bool) -> Result<Recor
             {
                 Ok(o) => o,
                 Err(f) => {
+                    // A preview reports what would stop the merge (rules, locks, a record that
+                    // changed). An outage is not a verdict on the changeset and stays an error.
+                    if let (true, Some(p)) = (is_conflict(&f), preview.as_deref_mut()) {
+                        let pr = crate::failure_problem(f);
+                        p.failure = Some(json!({
+                            "seq": seq, "entity": entity, "operation": operation,
+                            "code": pr.code, "status": pr.status.as_u16(),
+                            "detail": pr.detail, "errors": pr.errors,
+                        }));
+                        break;
+                    }
                     failed = Some((seq, f));
                     return Err(StoreError::Aborted);
                 }
             };
+            if let Some(p) = preview.as_deref_mut() {
+                p.results.push(json!({
+                    "seq": seq, "entity": entity, "operation": operation,
+                    // A create without a chosen id gets one from the store; a rolled-back
+                    // preview cannot promise the merge will pick the same.
+                    "id_provisional": operation == "create" && rid.is_empty() && !chosen_id,
+                    "record": out.after.as_ref().map(|r| json!({
+                        "id": r.id, "version": r.version, "data": r.data,
+                    })),
+                }));
+            }
             if let Some(after) = &out.after {
                 if matches!(wop, Op::Create { .. }) {
                     rid = after.id.clone();
                 }
                 versions.insert((entity.clone(), rid.clone()), after.version);
             }
-            if !revert {
+            if !revert && preview.is_none() {
                 let mut nd = d.clone();
                 nd.insert("record_id".into(), json!(rid));
                 if let Some(b) = &out.before {
@@ -294,6 +323,35 @@ fn apply<S: Store>(store: &S, env: &Env, id: &str, revert: bool) -> Result<Recor
                 tx.update(env.scope, OP, &rec.id, rec.version, Value::Object(nd))?;
             }
         }
+        if let Some(p) = preview.as_deref_mut() {
+            // Later operations can change an earlier record (a parent's totals follow its
+            // children), so each is read again as the transaction now holds it.
+            for r in &mut p.results {
+                let (entity, rid) = (
+                    text(&object(r), "entity"),
+                    text(&object(&r["record"]), "id"),
+                );
+                if rid.is_empty() {
+                    continue;
+                }
+                match tx.get(env.scope, &entity, &rid) {
+                    Ok(now) => {
+                        r["record"] =
+                            json!({"id": now.id, "version": now.version, "data": now.data});
+                    }
+                    // A later operation deleted it: the merge leaves nothing behind.
+                    Err(StoreError::NotFound) => r["record"] = Value::Null,
+                    Err(e) => return Err(e),
+                }
+                if r["id_provisional"] == true && r["record"].is_object() {
+                    r["record"]["id"] = Value::Null;
+                }
+            }
+        }
+        if preview.is_some() {
+            // Nothing is kept: the transaction ends here with everything it did undone.
+            return Err(StoreError::Aborted);
+        }
         let status = if revert { "reverted" } else { "merged" };
         done = Some(set_status(
             tx,
@@ -306,10 +364,15 @@ fn apply<S: Store>(store: &S, env: &Env, id: &str, revert: bool) -> Result<Recor
         Ok(())
     });
     match r {
-        Ok(()) => done.ok_or_else(|| crate::store_problem(StoreError::Aborted)),
+        Ok(()) => done
+            .map(Some)
+            .ok_or_else(|| crate::store_problem(StoreError::Aborted)),
         Err(e) => {
             if let Some(p) = bad {
                 return Err(p);
+            }
+            if preview.is_some() && matches!(e, StoreError::Aborted) {
+                return Ok(None);
             }
             let Some((seq, f)) = failed else {
                 return Err(crate::store_problem(e));
@@ -348,11 +411,31 @@ fn failure_problem_code(f: &Failure) -> &'static str {
 }
 
 pub(crate) fn merge<S: Store>(store: &S, env: &Env, id: &str) -> Result<Record, Problem> {
-    apply(store, env, id, false)
+    apply(store, env, id, false, None)?.ok_or_else(|| crate::store_problem(StoreError::Aborted))
 }
 
 pub(crate) fn revert<S: Store>(store: &S, env: &Env, id: &str) -> Result<Record, Problem> {
-    apply(store, env, id, true)
+    apply(store, env, id, true, None)?.ok_or_else(|| crate::store_problem(StoreError::Aborted))
+}
+
+/// What a merge would do, without doing it: every operation applied in one transaction that is
+/// always rolled back. `results` has each operation's record as the merge would store it (with
+/// computed fields), so a reviewer sees totals and reconciliation before deciding. The first
+/// operation that would fail is reported as `failure` and the ones after it are not run.
+pub(crate) fn preview<S: Store>(store: &S, env: &Env, id: &str) -> Result<Value, Problem> {
+    let mut out = Preview::default();
+    apply(store, env, id, false, Some(&mut out))?;
+    Ok(json!({
+        "mergeable": out.failure.is_none(),
+        "results": out.results,
+        "failure": out.failure,
+    }))
+}
+
+#[derive(Default)]
+struct Preview {
+    results: Vec<Value>,
+    failure: Option<Value>,
 }
 
 /// `reject` (a reviewer) or `withdraw` (the submitter): a proposed changeset becomes closed.
