@@ -297,6 +297,29 @@ fn files_and_ai_entry_are_switched_on_by_environment() {
         .unwrap()
         .get(0);
     assert_eq!(n, 1);
+
+    // An upload whose record write never happened is unreferenced; the sweep removes it and
+    // leaves the file a record points at.
+    client
+        .batch_execute(&format!(
+            r#"INSERT INTO "{schema}"."_ce_blobs" (tenant_id, key, content_type, bytes)
+               VALUES ('00000000-0000-4000-8000-000000000001', 'orphan', 'text/plain', 'x')"#
+        ))
+        .unwrap();
+    let out = cmd("files", false).arg("sweep").arg("0").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let left: Vec<String> = client
+        .query(&format!(r#"SELECT key FROM "{schema}"."_ce_blobs""#), &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(left.len(), 1);
+    assert!(left[0].contains("scan"), "{left:?}");
     client
         .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
         .unwrap();

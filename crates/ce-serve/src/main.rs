@@ -3,6 +3,7 @@
 //! ```text
 //! ce-serve install   create the installation's Postgres schema (fails if it exists)
 //! ce-serve [serve]   open the schema and serve the HTTP API (default)
+//! ce-serve files sweep <hours>  delete stored file bytes no record uses and older than that many hours
 //! ce-serve staff hash  read a PIN on stdin, print the hash to put in the staff list
 //! ce-serve plugin status | digest <slug> | approve <slug> <digest>
 //!                    | rollback <slug> | disable <slug> | enable <slug>
@@ -373,7 +374,7 @@ fn run() -> Result<(), String> {
         return plugin_command(&args[1..]);
     }
     let cmd = args.first().cloned().unwrap_or_else(|| "serve".into());
-    if !matches!(cmd.as_str(), "serve" | "install") {
+    if !matches!(cmd.as_str(), "serve" | "install" | "files") {
         return Err(format!(
             "unknown command `{cmd}` (use `install` or `serve`)"
         ));
@@ -403,6 +404,23 @@ fn run() -> Result<(), String> {
         Verifier::new(key.as_bytes()).map_err(|_| "CE_JWT_KEY is too short".to_string())?;
 
     // Blocking Postgres work happens here, before and after the async runtime, never inside it.
+    if cmd == "files" {
+        let hours = match (args.get(1).map(String::as_str), args.get(2)) {
+            (Some("sweep"), Some(h)) => h
+                .parse::<u64>()
+                .ok()
+                .filter(|h| *h <= 24 * 365)
+                .ok_or("use files sweep <hours>")?,
+            _ => return Err("use files sweep <hours>".into()),
+        };
+        let store = TypedPgStore::open_with(&url, &manifest, &schema, pool)
+            .map_err(|e| format!("cannot open schema {schema}: {e:?}"))?;
+        let n = store
+            .sweep_blobs(hours * 3600)
+            .map_err(|e| format!("sweep failed: {e:?}"))?;
+        println!("deleted {n} unreferenced file(s)");
+        return Ok(());
+    }
     if cmd == "install" {
         let store = TypedPgStore::install_with(&url, &manifest, &schema, pool.clone())
             .map_err(|e| format!("install failed: {e:?}"))?;
