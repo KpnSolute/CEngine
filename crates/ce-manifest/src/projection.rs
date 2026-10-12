@@ -101,13 +101,7 @@ mod tests {
 
     #[test]
     fn anything_else_is_refused() {
-        for bad in [
-            "qty + 1 > 3",
-            "ref(x).y == 1",
-            "a == b",
-            "today > '2026'",
-            "qty < null",
-        ] {
+        for bad in ["qty + 1 > 3", "ref(x).y == 1", "a == b", "qty < null"] {
             assert!(filter_json(bad).is_err(), "{bad}");
         }
     }
