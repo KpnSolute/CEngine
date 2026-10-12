@@ -240,3 +240,18 @@ fn a_carry_effect_must_copy_along_a_ref_and_leave_the_source() {
         carry("contact", json!({"contact": "contact", "ghost": "1"})).contains(&"unknown_field")
     );
 }
+
+#[test]
+fn a_carry_expression_may_read_the_carried_entitys_undeclared_state_field() {
+    // `step` has an engine-managed `state` that is not in its `fields`.
+    let mut m = example("approval_workflow");
+    m["entities"]["step"] = json!({
+        "fields": {"request": {"type": "ref", "ref": "request", "required": true}},
+        "state": {"field": "state", "initial": "todo", "states": {"todo": {"code": 100, "to": ["done"]}, "done": {"code": 200}}}
+    });
+    m["actions"]["start_review"]["effect"] = json!([
+        {"carry": {"entity": "step", "via": "request", "values": {"request": "when(state == 'todo', request, request)"}}}
+    ]);
+    let c = codes(&m);
+    assert!(!c.contains(&"unknown_identifier"), "{c:?}");
+}

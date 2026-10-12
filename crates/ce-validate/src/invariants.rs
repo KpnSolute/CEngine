@@ -123,6 +123,15 @@ pub(crate) fn build_env(
             env.insert(format!("old.{name}"), to_expr(ty, before));
         }
     }
+    // An engine-managed state field need not be declared in `fields`; expressions still read it.
+    if let Some(sf) = ent["state"]["field"].as_str() {
+        if !env.contains_key(sf) {
+            env.insert(
+                sf.to_string(),
+                to_expr("enum", record.get(sf).unwrap_or(&Value::Null)),
+            );
+        }
+    }
     env.insert("actor.id".into(), Ev::Str(ctx.actor_id.clone()));
     env.insert(
         "actor.role".into(),

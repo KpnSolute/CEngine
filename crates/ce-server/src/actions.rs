@@ -246,6 +246,14 @@ fn carry(
             ))
         })?;
         crate::prepare_create(m, ce, &mut data);
+        // Lock where the copy is going before checking its freeze, so a close of the
+        // destination either finishes first (the copy is refused) or waits for this action
+        // (its snapshot then counts the copies).
+        if let (Some(Value::String(dest)), Some(target)) =
+            (data.get(via), cent["fields"][via]["ref"].as_str())
+        {
+            tx.get_locked(env.scope, target, dest)?;
+        }
         let op = Op::Create {
             data,
             key: format!("act:{}:{i}:{}", r.key, src.id),

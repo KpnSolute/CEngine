@@ -136,3 +136,38 @@ fn a_failing_lookup_fails_the_write_instead_of_passing_it() {
     r.remove("customer");
     check_invariants_with(&m, "invoice", &r, None, &ctx(), Some(&Down)).unwrap();
 }
+
+/// A state field the template does not declare in `fields` is still readable by expressions.
+#[test]
+fn an_undeclared_state_field_is_readable_in_an_effect_expression() {
+    let m = ce_manifest::validate(
+        &std::fs::read(format!(
+            "{}/../../spec/examples/approval_workflow.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let rec = json!({"state": "in_review", "title": "x"});
+    let ctx = Context {
+        actor_id: "u".into(),
+        actor_role: None,
+        now_unix: 0,
+    };
+    let run = |src: &str| {
+        ce_validate::eval_effect(
+            &m,
+            "request",
+            rec.as_object().unwrap(),
+            &ctx,
+            &Map::new(),
+            &Map::new(),
+            &ce_expr::NoResolver,
+            src,
+            "t",
+            &json!({"type": "boolean"}),
+        )
+    };
+    assert_eq!(run("state == 'in_review'"), Ok(Some(json!(true))));
+    assert_eq!(run("state == 'draft'"), Ok(Some(json!(false))));
+}
