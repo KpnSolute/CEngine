@@ -37,6 +37,7 @@
 //! | `CE_PROVIDER_TOKEN` | bearer token the gateway expects (a secret; required with `CE_PROVIDER_URL`) |
 //! | `CE_PROVIDER_TIMEOUT_SECS` | longest one provider call may take, 1 to 300 (default 30) |
 //! | `CE_STAFF_SOURCE` | `postgres` keeps staff accounts in the installation's schema (`_ce_staff`) so they can be created, switched off and re-PINned over the API; `CE_STAFF_FILE` then only seeds an empty table. Unset keeps the read-only file |
+//! | `CE_PUBLIC_WORKSPACE` | the workspace name public projection URLs answer for (`/public/{installation}/{workspace}/{projection}`), served for `CE_TENANT`; unset keeps every public URL at 404 |
 //! | `CE_STAFF_ADMIN_ROLE` | the role that may use `/_staff` (default `admin`) |
 //! | `CE_MIN_PIN_LEN` | shortest PIN anyone may set, 4 to 64 (default 6) |
 //! | `CE_BIND` | listen address (default `127.0.0.1:8080`) |
@@ -373,6 +374,29 @@ fn now_secs() -> u64 {
 /// The staff PIN login: from `CE_STAFF_FILE` alone (a read-only list), or with
 /// `CE_STAFF_SOURCE=postgres` from the installation's database, where `CE_STAFF_FILE` only seeds
 /// an empty table. Returns the login, its tenant and the token lifetime.
+/// `CE_PUBLIC_WORKSPACE`: the one workspace name that public projection URLs
+/// (`/public/{installation}/{workspace}/{projection}`) answer for, mapped to `CE_TENANT`.
+/// Unset leaves every public URL answering 404.
+fn public_workspace() -> Result<Option<(String, String)>, String> {
+    let Some(name) = std::env::var("CE_PUBLIC_WORKSPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let ok = name.len() <= 63
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !ok {
+        return Err(
+            "CE_PUBLIC_WORKSPACE is lowercase letters, digits and hyphens, at most 63".into(),
+        );
+    }
+    let tenant = var("CE_TENANT").map_err(|_| "CE_PUBLIC_WORKSPACE needs CE_TENANT".to_string())?;
+    Ok(Some((name, tenant)))
+}
+
 fn staff_login(store: &TypedPgStore) -> Result<Option<(ce_server::PinLogin, String, u64)>, String> {
     let file = std::env::var("CE_STAFF_FILE")
         .ok()
@@ -615,6 +639,11 @@ fn run() -> Result<(), String> {
                 state = state.with_staff_admin_role(&role);
             }
         }
+    }
+    if let Some((name, tenant)) = public_workspace()? {
+        state = state.with_public_tenants(std::sync::Arc::new(move |w: &str| {
+            (w == name).then(|| tenant.clone())
+        }));
     }
     let app = router(state);
 
