@@ -366,10 +366,15 @@ impl PinLogin {
     /// Ends every session issued before now for this account (kept in memory; the directory's
     /// PIN time and active flag rebuild it at start).
     fn revoke(&self, key: &str) {
-        self.revoked
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.to_string(), (self.now)());
+        let now = (self.now)();
+        let mut m = self.revoked.lock().unwrap_or_else(|e| e.into_inner());
+        // A sign-in made in the same second as an earlier revocation is dated one second after it
+        // (see `issue_token`), so a second revocation in that second must reach that date too.
+        let cutoff = match m.get(key) {
+            Some(&prev) if prev >= now && prev < u64::MAX => prev + 1,
+            _ => now,
+        };
+        m.insert(key.to_string(), cutoff);
     }
 }
 

@@ -641,6 +641,9 @@ fn run() -> Result<(), String> {
         }
     }
     if let Some((name, tenant)) = public_workspace()? {
+        if state.verifier.public_scope(&tenant).is_none() {
+            return Err("CE_TENANT must be a lowercase uuid".into());
+        }
         state = state.with_public_tenants(std::sync::Arc::new(move |w: &str| {
             (w == name).then(|| tenant.clone())
         }));

@@ -641,4 +641,19 @@ async fn revocation_covers_the_same_second_and_only_this_tenant() {
         StatusCode::FORBIDDEN,
         "a rotation-only token, but accepted as valid"
     );
+    // A second revocation in the same second reaches the token dated just after the first.
+    assert!(live(fresh.clone()).await);
+    let (st, _) = call(
+        &a,
+        "POST",
+        "/_staff/mgr/reset_pin",
+        Some(&boss),
+        json!({"pin": "802468"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        !live(fresh).await,
+        "a token issued in the same second as the earlier revocation survived the next one"
+    );
 }
