@@ -216,6 +216,35 @@
         }
       }
     },
+    "deliveries": {
+      "type": "array",
+      "maxItems": 32,
+      "description": "Queued records the host delivers through a connector. The entity carries `status`, `attempts`, `not_before` and `last_error`; the relay sets them. Needs the `events` tool. The plugin holds no credential.",
+      "items": {
+        "type": "object",
+        "required": ["entity", "connector", "operation"],
+        "additionalProperties": false,
+        "properties": {
+          "entity": { "$ref": "#/$defs/name" },
+          "connector": { "type": "string", "pattern": "^[a-z][a-z_]*$" },
+          "operation": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*$", "maxLength": 120 },
+          "params": {
+            "type": "object",
+            "propertyNames": { "$ref": "#/$defs/name" },
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "maxProperties": 1,
+              "properties": {
+                "from": { "type": "string", "description": "`id` or a field of the entity." },
+                "value": { "description": "A literal." }
+              }
+            }
+          }
+        }
+      }
+    },
     "provenance": {
       "type": "object",
       "description": "Written by composition, never by authors: which module and which digest-pinned plugin produced the rules. Recorded on every audit event.",

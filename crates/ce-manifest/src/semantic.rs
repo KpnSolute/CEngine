@@ -451,6 +451,7 @@ pub fn check(m: &Value) -> Vec<Issue> {
     }
 
     subscriptions(&mut out, m, entities);
+    deliveries(&mut out, m, entities);
     for (rn, r) in obj(m, "reports").unwrap_or(&empty) {
         check_report(&mut out, rn, r, entities, &empty);
     }
@@ -1003,6 +1004,70 @@ fn subscriptions(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
                         format!("{vp}/from"),
                         "bad_event_source",
                         "use name, subject, actor, at, or data.<field>",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// A delivery queues records of an entity the manifest declares, never a server-written one.
+/// The entity carries the fields the relay writes; `params` read fields of that entity.
+fn deliveries(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
+    for (i, d) in m
+        .get("deliveries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let p = format!("/deliveries/{i}");
+        let Some(entity) = d["entity"].as_str() else {
+            continue;
+        };
+        let Some(ent) = entities.get(entity) else {
+            out.push(issue(
+                format!("{p}/entity"),
+                "unknown_entity",
+                format!("no entity `{entity}`"),
+            ));
+            continue;
+        };
+        if SERVER_ENTITIES.contains(&entity) {
+            out.push(issue(
+                format!("{p}/entity"),
+                "server_entity",
+                format!("`{entity}` is written by the server only"),
+            ));
+        }
+        let fields = ent.get("fields").and_then(Value::as_object);
+        for (name, types) in [
+            ("status", &["string", "enum"][..]),
+            ("attempts", &["integer"][..]),
+            ("not_before", &["integer"][..]),
+            ("last_error", &["string", "text"][..]),
+        ] {
+            let t = fields
+                .and_then(|f| f.get(name))
+                .and_then(|f| f["type"].as_str());
+            if !t.is_some_and(|t| types.contains(&t)) {
+                out.push(issue(
+                    format!("{p}/entity"),
+                    "missing_queue_field",
+                    format!(
+                        "`{entity}` needs a `{name}` field of type {}",
+                        types.join(" or ")
+                    ),
+                ));
+            }
+        }
+        for (k, v) in d["params"].as_object().into_iter().flatten() {
+            if let Some(f) = v["from"].as_str() {
+                if f != "id" && !fields.is_some_and(|fs| fs.contains_key(f)) {
+                    out.push(issue(
+                        format!("{p}/params/{k}/from"),
+                        "unknown_field",
+                        format!("`{entity}` has no field `{f}`"),
                     ));
                 }
             }

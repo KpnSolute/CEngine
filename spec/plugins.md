@@ -12,7 +12,7 @@ Located at `.cengine/plugins/<slug>/plugin.toml` (see `customer-plugin-package-c
 - `[plugin]` `id` (lowercase slug, 63 max), `version` (semver), `description`.
 - `[compatibility]` `engine` (semver range the running engine must satisfy), `module` (registered module id), `module_api` (must equal the module's API major).
 - `[execution]` `kind = "policy-pack"`.
-- `[capabilities]` `read`, `write`, `emit` lists, each entry must be offered by the module; `external_network` must be false (provider calls belong to Infajn).
+- `[capabilities]` `read`, `write`, `emit` lists, each entry must be offered by the module; `external_network` must be false (a plugin never calls out itself; connector deliveries are made by the host).
 - `[[policy]]` `slot`, optional `rule`, optional `params`. A slot is filled at most once; the module decides whether a slot requires a rule, forbids one, and which parameter names it accepts. Rules must parse as CEngine expressions. Parameter values are strings, integers, booleans, arrays or tables; floats and datetimes are refused so money and quantities are decimal strings or integers.
 - `[tests]` `fixtures`: relative path inside the plugin folder. Absolute paths, `..`, `.`, empty parts, backslashes and drive prefixes are refused.
 
@@ -142,7 +142,31 @@ value = "queued"
 - **No loops.** Creating the record does not itself store an event, so reactions do not trigger reactions.
 - Limits: 16 subscriptions per plugin, 32 per manifest. Tested on Postgres in `crates/ce-server/tests/plugin_events.rs`.
 
-Not in this increment: reactions other than `create` (update, run an action), conditions (`when`), the connector that delivers a queued job to a destination, retry state for those jobs, plugin routes and SDK helpers.
+Not in this increment: reactions other than `create` (update, run an action), conditions (`when`), plugin routes and SDK helpers.
+
+## Deliveries (connectors)
+
+A plugin can ask the host to send a queued record somewhere, such as an archive snapshot to storage. The plugin names the connector and the parameters; it never holds a credential or makes a call. The host attaches the connector (the provider handle of `ce-provider`, usually a gateway that owns the keys).
+
+```toml
+[[deliver]]
+entity = "job"
+connector = "storage"
+operation = "archive.put"
+[deliver.params.changeset]
+from = "changeset"
+[deliver.params.kind]
+value = "snapshot"
+```
+
+- **Entity.** The plugin's own entity must declare `status` (string or enum), `attempts` (integer), `not_before` (integer) and `last_error` (string); `result` (json) is filled with the connector's answer when declared. One delivery per entity, 8 per plugin, 32 per manifest. Composition needs the `events` tool.
+- **States.** A subscription (or any write) sets `status = "queued"`. The relay writes `in_flight`, `done` or `dead`.
+- **Params.** Each is `{from = "<field of the entity>"}` (or `id`) or `{value = ...}`.
+- **Connector.** `connector` is one of the `ce-provider` connector types. `banking`, `payments` and `hr_payroll` are refused for plugins, so a plugin cannot move money. `operation` is 2 to 4 dotted lower-case segments.
+- **Running it.** `POST /v1/{inst}/deliveries/run` (role action `manage_events`) makes one pass for the caller's tenant and answers `{delivered, retrying, dead}`; the host calls it on a timer. Without a provider it answers 503. Library hosts call `ce_server::deliver_once`.
+- **Retries.** Each call is a write with idempotency key `<entity>:<record id>`, the same on every attempt, so the connector can refuse repeats. A failure backs off like events (5 s doubling, capped at one hour) and the record is `dead` after 5 attempts; a bad request or a missing approval is `dead` at once. A job claimed by a relay that then crashes is leased for 60 seconds and counts as an attempt. One failing job never blocks the others. A person puts a dead job back with `status = "queued"`, `attempts = 0`.
+
+Tested on Postgres in `crates/ce-server/tests/plugin_deliveries.rs`. Not in this increment: the host timer, per-tenant connector settings, a requeue action.
 
 ## Not in this increment
 Fetching plugin folders from a customer repository (the host places the folder), a plugin release approval workflow beyond the owner commands, and the HTTP deploy.

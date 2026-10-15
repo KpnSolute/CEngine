@@ -165,7 +165,7 @@ pub struct Report {
     pub dead_lettered: u32,
 }
 
-fn set(rec: &ce_store::Record, edits: &[(&str, Value)]) -> Value {
+pub(crate) fn set(rec: &ce_store::Record, edits: &[(&str, Value)]) -> Value {
     let mut d = rec.data.clone();
     if let Some(o) = d.as_object_mut() {
         for (k, v) in edits {

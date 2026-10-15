@@ -309,6 +309,7 @@ dependencies = [
  "bigdecimal",
  "ce-expr",
  "ce-manifest",
+ "ce-provider",
  "ce-validate",
  "libc",
  "semver",

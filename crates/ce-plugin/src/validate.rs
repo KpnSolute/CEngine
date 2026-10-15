@@ -13,6 +13,7 @@ pub const MAX_ENTITIES: usize = 16;
 const MAX_ENTITY_LOCAL: usize = 30;
 /// Most event subscriptions one plugin may declare.
 pub const MAX_SUBSCRIPTIONS: usize = 16;
+pub const MAX_DELIVERIES: usize = 8;
 const MAX_RULE: usize = 2000;
 const MAX_LIST: usize = 64;
 
@@ -32,6 +33,8 @@ struct Raw {
     #[serde(default)]
     subscribe: Vec<RawSub>,
     #[serde(default)]
+    deliver: Vec<RawDeliver>,
+    #[serde(default)]
     tests: Option<RawTests>,
 }
 
@@ -41,6 +44,16 @@ struct RawSub {
     event: String,
     entity: String,
     values: toml::Table,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDeliver {
+    entity: String,
+    connector: String,
+    operation: String,
+    #[serde(default)]
+    params: toml::Table,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +149,17 @@ pub struct PluginSubscription {
     pub values: Map<String, Value>,
 }
 
+/// A delivery: the host sends each queued record of the plugin's entity `entity` through its
+/// connector (`connector`, `operation`), with `params` built from the record (`{from = "field"}`
+/// or `{value = ...}`). The plugin holds no credential and makes no call itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginDelivery {
+    pub entity: String,
+    pub connector: String,
+    pub operation: String,
+    pub params: Map<String, Value>,
+}
+
 /// A validated plugin descriptor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plugin {
@@ -151,6 +175,8 @@ pub struct Plugin {
     pub entities: Vec<PluginEntity>,
     /// Reactions to engine events, creating records in the plugin's own entities.
     pub subscriptions: Vec<PluginSubscription>,
+    /// Queued records the host delivers through a connector.
+    pub deliveries: Vec<PluginDelivery>,
     /// Relative, normalized path of the synthetic fixtures folder, when declared.
     pub fixtures: Option<String>,
 }
@@ -270,6 +296,7 @@ pub fn parse(text: &str, registry: &Registry, engine: &Version) -> Result<Plugin
     let policies = policy_check(&mut bad, module, &raw.policy);
     let entities = entity_check(&mut bad, &raw.plugin.id, &raw.entity);
     let subscriptions = subscription_check(&mut bad, &entities, &raw.subscribe);
+    let deliveries = delivery_check(&mut bad, &entities, &raw.deliver);
     let fixtures = raw
         .tests
         .as_ref()
@@ -301,6 +328,7 @@ pub fn parse(text: &str, registry: &Registry, engine: &Version) -> Result<Plugin
             policies,
             entities,
             subscriptions,
+            deliveries,
             fixtures,
         }),
         _ => Err(bad),
@@ -480,6 +508,120 @@ fn subscription_check(
                 "use strings, integers, booleans, arrays or tables",
             )),
         }
+    }
+    out
+}
+
+/// The fields a delivered entity must declare, with the types the relay writes.
+const DELIVERY_FIELDS: &[(&str, &[&str])] = &[
+    ("status", &["string", "enum"]),
+    ("attempts", &["integer"]),
+    ("not_before", &["integer"]),
+    ("last_error", &["string", "text"]),
+];
+
+/// A delivery names one of the plugin's own entities that carries the queue fields, a connector
+/// that does not move money, and parameters copied from the record.
+fn delivery_check(
+    bad: &mut Vec<Violation>,
+    entities: &[PluginEntity],
+    raw: &[RawDeliver],
+) -> Vec<PluginDelivery> {
+    if raw.len() > MAX_DELIVERIES {
+        bad.push(v(
+            "too_many",
+            "deliver",
+            format!("at most {MAX_DELIVERIES} deliveries"),
+        ));
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (i, d) in raw.iter().enumerate() {
+        let at = format!("deliver[{i}]");
+        if !seen.insert(d.entity.as_str()) {
+            bad.push(v(
+                "duplicate_delivery",
+                format!("{at}.entity"),
+                "one delivery per entity",
+            ));
+        }
+        let ent = entities.iter().find(|e| e.name == d.entity);
+        let fields = ent.and_then(|e| e.definition["fields"].as_object());
+        match ent {
+            None => bad.push(v(
+                "unknown_plugin_entity",
+                format!("{at}.entity"),
+                "a delivery may only queue the plugin's own entities",
+            )),
+            Some(_) => {
+                for (name, types) in DELIVERY_FIELDS {
+                    let t = fields
+                        .and_then(|f| f.get(*name))
+                        .and_then(|f| f["type"].as_str());
+                    if !t.is_some_and(|t| types.contains(&t)) {
+                        bad.push(v(
+                            "missing_queue_field",
+                            format!("{at}.entity"),
+                            format!(
+                                "`{}` needs a `{name}` field of type {}",
+                                d.entity,
+                                types.join(" or ")
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        match ce_provider::ConnectorType::parse(&d.connector) {
+            None => bad.push(v(
+                "unknown_connector",
+                format!("{at}.connector"),
+                "not a connector type",
+            )),
+            Some(c) if c.reads_only_first() => bad.push(v(
+                "connector_not_allowed",
+                format!("{at}.connector"),
+                "a plugin cannot deliver to a money-moving connector",
+            )),
+            Some(_) => {}
+        }
+        if !ce_provider::valid_operation(&d.operation) {
+            bad.push(v(
+                "bad_operation",
+                format!("{at}.operation"),
+                "2 to 4 dotted lower-case segments",
+            ));
+        }
+        let Some(Value::Object(params)) = json(&toml::Value::Table(d.params.clone())) else {
+            bad.push(v(
+                "bad_params",
+                format!("{at}.params"),
+                "use strings, integers, booleans, arrays or tables",
+            ));
+            continue;
+        };
+        for (k, p) in &params {
+            let from = p["from"].as_str();
+            let ok = match (from, p.as_object().map_or(0, Map::len)) {
+                (Some(f), 1) => f == "id" || fields.is_some_and(|fs| fs.contains_key(f)),
+                (None, 1) => p.get("value").is_some(),
+                _ => false,
+            };
+            if !ok {
+                bad.push(v(
+                    "bad_param",
+                    format!("{at}.params.{k}"),
+                    "use {from = \"<field of the entity>\"} or {value = ...}",
+                ));
+            }
+        }
+        out.push(PluginDelivery {
+            entity: d.entity.clone(),
+            connector: d.connector.clone(),
+            operation: d.operation.clone(),
+            params,
+        });
     }
     out
 }
