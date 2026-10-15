@@ -6,7 +6,7 @@
 //! Events of one tenant leave in the order they were stored (`seq`): a later event never goes
 //! out before an earlier one that is waiting for a retry. A dead-lettered event no longer blocks.
 
-use crate::writes::Env;
+use crate::writes::{self, Env, Failure, Op};
 use ce_auth::TenantScope;
 use ce_events::{backoff, Event, NewEvent, Signer, MAX_ATTEMPTS};
 use ce_manifest::Manifest;
@@ -45,13 +45,96 @@ pub(crate) fn enqueue(
     }
     let mut ev = Map::new();
     ev.insert("name".into(), json!(name));
+    let data_copy = data.clone();
     ev.insert("data".into(), data);
     ev.insert("at".into(), json!(env.ctx.now_unix));
     ev.insert("seq".into(), json!(seq()));
     if let Some(s) = subject {
         ev.insert("subject".into(), json!(s));
     }
-    tx.insert(env.scope, ENTITY, Value::Object(ev), None)?;
+    let stored = tx.insert(env.scope, ENTITY, Value::Object(ev), None)?;
+    react(tx, env, &stored.id, name, subject, &data_copy)
+}
+
+/// Where a subscription copies a value from: the event's `name`, `subject`, `actor`, `at`, or a
+/// path into its `data`. A missing path gives null.
+fn source(env: &Env, name: &str, subject: Option<&str>, data: &Value, from: &str) -> Value {
+    match from {
+        "name" => json!(name),
+        "subject" => subject.map_or(Value::Null, |s| json!(s)),
+        "actor" => json!(env.ctx.actor_id),
+        "at" => json!(env.ctx.now_unix),
+        _ => {
+            let mut cur = data;
+            for seg in from.strip_prefix("data.").unwrap_or_default().split('.') {
+                cur = &cur[seg];
+            }
+            cur.clone()
+        }
+    }
+}
+
+/// Runs the manifest's `subscriptions` for one stored event: each matching one creates its
+/// record in the event's transaction, through the normal write path (rules, uniqueness, audit).
+/// A record the rules refuse is skipped, never an error: the change that caused the event
+/// stands, and the outbox row names what was refused so a person can see it. A database error
+/// still rolls the whole transaction back.
+fn react(
+    tx: &dyn Store,
+    env: &Env,
+    event_id: &str,
+    name: &str,
+    subject: Option<&str>,
+    data: &Value,
+) -> Result<(), StoreError> {
+    let subs = env.manifest.value["subscriptions"].as_array();
+    let mut refused: Vec<Value> = Vec::new();
+    for (i, sub) in subs.into_iter().flatten().enumerate() {
+        if sub["event"].as_str() != Some(name) {
+            continue;
+        }
+        let entity = sub["create"]["entity"].as_str().unwrap_or_default();
+        let mut rec = Map::new();
+        for (field, v) in sub["create"]["values"].as_object().into_iter().flatten() {
+            let val = match v["from"].as_str() {
+                Some(from) => source(env, name, subject, data, from),
+                None => v["value"].clone(),
+            };
+            if !val.is_null() {
+                rec.insert(field.clone(), val);
+            }
+        }
+        if let Err(errors) =
+            ce_validate::validate(env.manifest, entity, &rec, ce_validate::Mode::Create)
+        {
+            refused.push(
+                json!({"subscription": i, "entity": entity, "errors": errors.into_iter()
+                .map(|e| json!({"path": e.path, "code": e.code})).collect::<Vec<_>>()}),
+            );
+            continue;
+        }
+        crate::prepare_create(env.manifest, entity, &mut rec);
+        let op = Op::Create {
+            data: rec,
+            key: format!("sub:{event_id}:{i}"),
+        };
+        match writes::step(tx, env, entity, &op)
+            .and_then(|o| writes::audit(tx, env, entity, &op, &o).map(|()| o))
+        {
+            Ok(_) => {}
+            Err(Failure::Store(e)) => return Err(e),
+            Err(_) => refused.push(
+                json!({"subscription": i, "entity": entity, "errors": [{"code": "refused"}]}),
+            ),
+        }
+    }
+    if !refused.is_empty() {
+        let ev = tx.get_locked(env.scope, ENTITY, event_id)?;
+        let mut payload = ev.data["data"].as_object().cloned().unwrap_or_default();
+        payload.insert("reaction_errors".into(), Value::Array(refused));
+        let body = set(&ev, &[("data", Value::Object(payload))]);
+        tx.update(env.scope, ENTITY, event_id, ev.version, body)?;
+    }
     Ok(())
 }
 

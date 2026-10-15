@@ -365,14 +365,21 @@ fn apply<S: Store>(
             return Err(StoreError::Aborted);
         }
         let status = if revert { "reverted" } else { "merged" };
-        done = Some(set_status(
+        let finished = set_status(tx, env.scope, &cs, status, &env.ctx.actor_id, None)?;
+        // With the `events` tool the outcome is an event, stored with the merge: subscriptions
+        // and relays see exactly the merges that happened.
+        crate::events::enqueue(
             tx,
-            env.scope,
-            &cs,
-            status,
-            &env.ctx.actor_id,
-            None,
-        )?);
+            env,
+            if revert {
+                "changeset.reverted"
+            } else {
+                "changeset.merged"
+            },
+            Some(&finished.id),
+            json!({"id": finished.id, "actor": env.ctx.actor_id, "title": finished.data["title"]}),
+        )?;
+        done = Some(finished);
         Ok(())
     });
     match r {

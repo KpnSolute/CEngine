@@ -11,6 +11,8 @@ pub const MAX_POLICIES: usize = 64;
 /// Most entities one plugin may add.
 pub const MAX_ENTITIES: usize = 16;
 const MAX_ENTITY_LOCAL: usize = 30;
+/// Most event subscriptions one plugin may declare.
+pub const MAX_SUBSCRIPTIONS: usize = 16;
 const MAX_RULE: usize = 2000;
 const MAX_LIST: usize = 64;
 
@@ -28,7 +30,17 @@ struct Raw {
     #[serde(default)]
     entity: Vec<RawEntity>,
     #[serde(default)]
+    subscribe: Vec<RawSub>,
+    #[serde(default)]
     tests: Option<RawTests>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSub {
+    event: String,
+    entity: String,
+    values: toml::Table,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +126,16 @@ pub struct PluginEntity {
     pub definition: Value,
 }
 
+/// A reaction to an engine event: when `event` is stored, create a record in the plugin's own
+/// entity `entity`. `values` maps field names to `{from = \"...\"}` (a part of the event) or
+/// `{value = ...}` (a literal), already in manifest form.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginSubscription {
+    pub event: String,
+    pub entity: String,
+    pub values: Map<String, Value>,
+}
+
 /// A validated plugin descriptor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plugin {
@@ -127,6 +149,8 @@ pub struct Plugin {
     pub policies: Vec<Policy>,
     /// Entities (tables) the plugin adds beside the module's own.
     pub entities: Vec<PluginEntity>,
+    /// Reactions to engine events, creating records in the plugin's own entities.
+    pub subscriptions: Vec<PluginSubscription>,
     /// Relative, normalized path of the synthetic fixtures folder, when declared.
     pub fixtures: Option<String>,
 }
@@ -245,6 +269,7 @@ pub fn parse(text: &str, registry: &Registry, engine: &Version) -> Result<Plugin
     capability_check(&mut bad, module, &raw.capabilities);
     let policies = policy_check(&mut bad, module, &raw.policy);
     let entities = entity_check(&mut bad, &raw.plugin.id, &raw.entity);
+    let subscriptions = subscription_check(&mut bad, &entities, &raw.subscribe);
     let fixtures = raw
         .tests
         .as_ref()
@@ -275,6 +300,7 @@ pub fn parse(text: &str, registry: &Registry, engine: &Version) -> Result<Plugin
             },
             policies,
             entities,
+            subscriptions,
             fixtures,
         }),
         _ => Err(bad),
@@ -384,6 +410,74 @@ fn entity_check(bad: &mut Vec<Violation>, plugin_id: &str, raw: &[RawEntity]) ->
                 "bad_entity",
                 format!("{at}.definition"),
                 "use strings, integers, booleans, arrays or tables; write decimals as strings",
+            )),
+        }
+    }
+    out
+}
+
+fn event_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('.').collect();
+    name.len() <= 120
+        && (2..=4).contains(&parts.len())
+        && parts.iter().all(|p| {
+            let b = p.as_bytes();
+            !b.is_empty()
+                && b[0].is_ascii_lowercase()
+                && b.iter()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+        })
+}
+
+/// A plugin's reactions write only its own entities, so a plugin cannot use an event to put
+/// records into the template's or the module's tables.
+fn subscription_check(
+    bad: &mut Vec<Violation>,
+    entities: &[PluginEntity],
+    raw: &[RawSub],
+) -> Vec<PluginSubscription> {
+    if raw.len() > MAX_SUBSCRIPTIONS {
+        bad.push(v(
+            "too_many",
+            "subscribe",
+            format!("at most {MAX_SUBSCRIPTIONS} subscriptions"),
+        ));
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (i, s) in raw.iter().enumerate() {
+        let at = format!("subscribe[{i}]");
+        if !event_name(&s.event) {
+            bad.push(v(
+                "bad_event_name",
+                format!("{at}.event"),
+                "2 to 4 dot-separated segments of lowercase letters, digits and underscores",
+            ));
+        }
+        if !entities.iter().any(|e| e.name == s.entity) {
+            bad.push(v(
+                "unknown_plugin_entity",
+                format!("{at}.entity"),
+                "a subscription may only create records in the plugin's own entities",
+            ));
+        }
+        if s.values.is_empty() {
+            bad.push(v(
+                "no_values",
+                format!("{at}.values"),
+                "give at least one field",
+            ));
+        }
+        match json(&toml::Value::Table(s.values.clone())) {
+            Some(Value::Object(values)) => out.push(PluginSubscription {
+                event: s.event.clone(),
+                entity: s.entity.clone(),
+                values,
+            }),
+            _ => bad.push(v(
+                "bad_values",
+                format!("{at}.values"),
+                "use strings, integers, booleans, arrays or tables",
             )),
         }
     }

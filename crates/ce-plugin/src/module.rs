@@ -148,6 +148,10 @@ pub fn compose(
 
     if let Some(p) = plugin {
         add_plugin_entities(entities, p)?;
+        if !p.subscriptions.is_empty() && !entities.contains_key("outbox_event") {
+            // Reactions run when an event is stored, which needs the template's `events` tool.
+            return Err(ComposeError::MissingEntity("outbox_event".into()));
+        }
     }
 
     if let Some(acts) = fragment["actions"].as_object() {
@@ -161,6 +165,23 @@ pub fn compose(
                 return Err(ComposeError::Clash(k.clone()));
             }
             actions.insert(k.clone(), v.clone());
+        }
+    }
+
+    if let Some(p) = plugin {
+        if !p.subscriptions.is_empty() {
+            let prefix = crate::entity_prefix(&p.id);
+            let subs = root
+                .entry("subscriptions")
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .ok_or(ComposeError::NotAnObject)?;
+            for s in &p.subscriptions {
+                subs.push(serde_json::json!({
+                    "event": s.event,
+                    "create": {"entity": format!("{prefix}__{}", s.entity), "values": s.values},
+                }));
+            }
         }
     }
 

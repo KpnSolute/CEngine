@@ -118,7 +118,31 @@ ref = "limit"
 - Everything else comes from the engine as for any entity: `tenant_id` on every row, roles, audit with the plugin digest, changesets for `governed` entities. The template's roles are not changed, so who may read or write a plugin's entities is still the template's decision.
 - Because the entities are part of the composed manifest, they change its hash and are pinned with the plugin digest.
 
-Not in this increment: plugin-defined routes and actions, event subscriptions, connector settings, what happens to a plugin's tables when it is disabled or removed (`ce-migrate` emits no `DROP` today, so data is kept, but this is not yet a tested guarantee), and a migration step for upgrading a plugin's entities across versions.
+Not in this increment: plugin-defined routes and actions, connector settings, what happens to a plugin's tables when it is disabled or removed (`ce-migrate` emits no `DROP` today, so data is kept, but this is not yet a tested guarantee), and a migration step for upgrading a plugin's entities across versions.
+
+## Event subscriptions
+
+A plugin can react to an engine event by creating a record in one of its own entities. This is how a plugin hooks into the engine without code: for example, an archive plugin queues a job each time a changeset is merged.
+
+```toml
+[[subscribe]]
+event = "changeset.merged"
+entity = "job"
+[subscribe.values.changeset]
+from = "subject"
+[subscribe.values.state]
+value = "queued"
+```
+
+- **Events.** With the `events` tool, a changeset merge stores `changeset.merged` and a revert stores `changeset.reverted` in the same transaction (subject: the changeset id; data: `id`, `actor`, `title`). Actions' `emit`s and period close/reopen are unchanged.
+- **Values.** Each field is `{from = "..."}` or `{value = ...}`. `from` is `name`, `subject`, `actor`, `at`, or `data.<field>[.<field>...]` of the event (missing paths give nothing). There are no expressions and no code.
+- **Scope.** A plugin's subscriptions create records only in that plugin's own entities (`entity` is the local name; composition installs the manifest form `subscriptions[]` with the namespaced name). A manifest cannot target the engine's server-written entities. Composition refuses a plugin with subscriptions when the template has no `events` tool.
+- **Same transaction.** The reaction runs when the event is stored, through the normal write path (rules, uniqueness, audit). If the merge rolls back, so does the reaction.
+- **A refused reaction never undoes the change.** If the record fails the entity's rules (a required field is missing, say), it is skipped and the outbox event's `data.reaction_errors` lists the subscription and the field errors, so a person can see it. A database error still rolls the whole transaction back.
+- **No loops.** Creating the record does not itself store an event, so reactions do not trigger reactions.
+- Limits: 16 subscriptions per plugin, 32 per manifest. Tested on Postgres in `crates/ce-server/tests/plugin_events.rs`.
+
+Not in this increment: reactions other than `create` (update, run an action), conditions (`when`), the connector that delivers a queued job to a destination, retry state for those jobs, plugin routes and SDK helpers.
 
 ## Not in this increment
 Fetching plugin folders from a customer repository (the host places the folder), a plugin release approval workflow beyond the owner commands, and the HTTP deploy.
