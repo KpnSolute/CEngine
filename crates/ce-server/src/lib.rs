@@ -17,6 +17,7 @@
 mod actions;
 mod ai;
 mod changesets;
+mod deliveries;
 mod events;
 mod files;
 mod login;
@@ -50,6 +51,7 @@ use serde_json::{json, Map, Value};
 use std::{collections::HashMap, sync::Arc};
 
 pub use ce_provider::{Provider, ProviderError, ProviderRequest, ProviderResponse};
+pub use deliveries::{run_once as deliver_once, Report as DeliveryReport};
 pub use events::{relay_once, Deliver, Delivery, Relay, Report as RelayReport};
 pub use login::{Identity, Issuing, Login, LoginError};
 pub use pin_login::{
@@ -249,6 +251,7 @@ where
         .route("/v1/{inst}/{entity}/_export", get(export_csv::<S>))
         .route("/v1/{inst}/{entity}/_import", post(import_csv::<S>))
         .route("/v1/{inst}/events/relay", post(events_relay::<S>))
+        .route("/v1/{inst}/deliveries/run", post(deliveries_run::<S>))
         .route("/v1/{inst}/events/{id}/replay", post(events_replay::<S>))
         .route("/v1/{inst}/{entity}", get(list::<S>).post(create::<S>))
         .route(
@@ -1679,6 +1682,42 @@ async fn events_relay<S: Store + Send + Sync + 'static>(
                 .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
                 .map_err(store_problem)?;
         let body = json!({"data": {"delivered": r.delivered, "retrying": r.retrying, "dead_lettered": r.dead_lettered}, "meta": {"request_id": rid}});
+        Ok((StatusCode::OK, Json(body)).into_response())
+    };
+    finish(&rid, run.await)
+}
+
+/// `POST .../deliveries/run`: one pass over the plugins' queued deliveries for the caller's tenant.
+async fn deliveries_run<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authenticate(&st, &headers)?;
+        if inst != st.installation || !deliveries::enabled(&st.manifest) {
+            return Err(Problem::not_found());
+        }
+        if !st.policy.can_run(&who.roles, events::ACTION) {
+            return Err(Problem::forbidden());
+        }
+        let Some(provider) = st.provider.clone() else {
+            return Err(Problem::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "no connector is configured",
+            ));
+        };
+        let scope = who.scope().clone();
+        let (store, now, m) = (st.store.clone(), (st.now)(), st.manifest.clone());
+        let r = tokio::task::spawn_blocking(move || {
+            deliveries::run_once(&*store, &scope, &*provider, &m, now)
+        })
+        .await
+        .map_err(|_| store_problem(StoreError::Backend("task failed".into())))?
+        .map_err(store_problem)?;
+        let body = json!({"data": {"delivered": r.delivered, "retrying": r.retrying, "dead": r.dead}, "meta": {"request_id": rid}});
         Ok((StatusCode::OK, Json(body)).into_response())
     };
     finish(&rid, run.await)

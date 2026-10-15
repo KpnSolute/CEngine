@@ -579,6 +579,20 @@ fn add_operations(m: &Manifest, installation: &str, paths: &mut Map<String, Valu
         }
     }
 
+    // plugin deliveries
+    if crate::deliveries::enabled(m) {
+        paths.insert(
+            format!("{base}/deliveries/run"),
+            json!({"post": {"operationId": "deliveriesRun", "summary": "one pass over queued plugin deliveries for the tenant",
+                "responses": answers(
+                    json!({"200": {"description": "counts for the pass",
+                        "content": {"application/json": {"schema": {"type": "object", "properties": {"data": {"type": "object",
+                            "properties": {"delivered": {"type": "integer"}, "retrying": {"type": "integer"},
+                                "dead": {"type": "integer"}}}}}}}}}),
+                    &with(&[("503", "unavailable")]))}}),
+        );
+    }
+
     // outbound events
     if crate::events::enabled(m) {
         paths.insert(

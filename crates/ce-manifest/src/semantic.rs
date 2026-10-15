@@ -451,6 +451,7 @@ pub fn check(m: &Value) -> Vec<Issue> {
     }
 
     subscriptions(&mut out, m, entities);
+    deliveries(&mut out, m, entities);
     for (rn, r) in obj(m, "reports").unwrap_or(&empty) {
         check_report(&mut out, rn, r, entities, &empty);
     }
@@ -1003,6 +1004,113 @@ fn subscriptions(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
                         format!("{vp}/from"),
                         "bad_event_source",
                         "use name, subject, actor, at, or data.<field>",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// A delivery queues records of an entity the manifest declares, never a server-written one.
+/// The entity carries the fields the relay writes; `params` read fields of that entity.
+fn deliveries(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
+    for (i, d) in m
+        .get("deliveries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let p = format!("/deliveries/{i}");
+        let Some(entity) = d["entity"].as_str() else {
+            continue;
+        };
+        let Some(ent) = entities.get(entity) else {
+            out.push(issue(
+                format!("{p}/entity"),
+                "unknown_entity",
+                format!("no entity `{entity}`"),
+            ));
+            continue;
+        };
+        if SERVER_ENTITIES.contains(&entity) {
+            out.push(issue(
+                format!("{p}/entity"),
+                "server_entity",
+                format!("`{entity}` is written by the server only"),
+            ));
+        }
+        let fields = ent.get("fields").and_then(Value::as_object);
+        for (name, types) in [
+            ("status", &["string", "enum"][..]),
+            ("attempts", &["integer"][..]),
+            ("not_before", &["integer"][..]),
+            ("last_error", &["string", "text"][..]),
+        ] {
+            let t = fields
+                .and_then(|f| f.get(name))
+                .and_then(|f| f["type"].as_str());
+            if !t.is_some_and(|t| types.contains(&t)) {
+                out.push(issue(
+                    format!("{p}/entity"),
+                    "missing_queue_field",
+                    format!(
+                        "`{entity}` needs a `{name}` field of type {}",
+                        types.join(" or ")
+                    ),
+                ));
+            }
+        }
+        // The relay writes these fields with plain updates, so a state machine must not own
+        // them, `status` must allow the four relay values, and the others must be optional.
+        let state_field = ent["state"]["field"].as_str();
+        for name in ["status", "attempts", "not_before", "last_error", "result"] {
+            let f = fields.and_then(|f| f.get(name));
+            if f.is_some() && state_field == Some(name) {
+                out.push(issue(
+                    format!("{p}/entity"),
+                    "state_managed_queue_field",
+                    format!("`{name}` is owned by the state machine; use a plain field"),
+                ));
+            }
+            if f.is_some_and(|f| f["required"] == true) && name != "status" {
+                out.push(issue(
+                    format!("{p}/entity"),
+                    "required_queue_field",
+                    format!("`{name}` must not be required: the relay clears and sets it"),
+                ));
+            }
+        }
+        if let Some(values) = fields
+            .and_then(|f| f.get("status"))
+            .and_then(|f| f["values"].as_array())
+        {
+            for want in ["queued", "in_flight", "done", "dead"] {
+                if !values.iter().any(|v| v == want) {
+                    out.push(issue(
+                        format!("{p}/entity"),
+                        "missing_status_value",
+                        format!("`status` must allow `{want}`"),
+                    ));
+                }
+            }
+        }
+        if let Some(r) = fields.and_then(|f| f.get("result")) {
+            if r["type"] != "json" {
+                out.push(issue(
+                    format!("{p}/entity"),
+                    "result_not_json",
+                    "`result` keeps the connector's answer and must be json",
+                ));
+            }
+        }
+        for (k, v) in d["params"].as_object().into_iter().flatten() {
+            if let Some(f) = v["from"].as_str() {
+                if f != "id" && !fields.is_some_and(|fs| fs.contains_key(f)) {
+                    out.push(issue(
+                        format!("{p}/params/{k}/from"),
+                        "unknown_field",
+                        format!("`{entity}` has no field `{f}`"),
                     ));
                 }
             }

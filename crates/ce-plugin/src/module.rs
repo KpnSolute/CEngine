@@ -148,6 +148,10 @@ pub fn compose(
 
     if let Some(p) = plugin {
         add_plugin_entities(entities, p)?;
+        if !p.deliveries.is_empty() && !entities.contains_key("outbox_event") {
+            // Deliveries run with the event relay, which needs the template's `events` tool.
+            return Err(ComposeError::MissingEntity("outbox_event".into()));
+        }
         if !p.subscriptions.is_empty() && !entities.contains_key("outbox_event") {
             // Reactions run when an event is stored, which needs the template's `events` tool.
             return Err(ComposeError::MissingEntity("outbox_event".into()));
@@ -180,6 +184,25 @@ pub fn compose(
                 subs.push(serde_json::json!({
                     "event": s.event,
                     "create": {"entity": format!("{prefix}__{}", s.entity), "values": s.values},
+                }));
+            }
+        }
+    }
+
+    if let Some(p) = plugin {
+        if !p.deliveries.is_empty() {
+            let prefix = crate::entity_prefix(&p.id);
+            let list = root
+                .entry("deliveries")
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .ok_or(ComposeError::NotAnObject)?;
+            for d in &p.deliveries {
+                list.push(serde_json::json!({
+                    "entity": format!("{prefix}__{}", d.entity),
+                    "connector": d.connector,
+                    "operation": d.operation,
+                    "params": d.params,
                 }));
             }
         }
