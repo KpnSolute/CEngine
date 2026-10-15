@@ -146,6 +146,10 @@ pub fn compose(
         entities.insert(k.clone(), v.clone());
     }
 
+    if let Some(p) = plugin {
+        add_plugin_entities(entities, p)?;
+    }
+
     if let Some(acts) = fragment["actions"].as_object() {
         let actions = root
             .entry("actions")
@@ -181,6 +185,37 @@ pub fn compose(
                 .collect(),
         )),
     }
+}
+
+/// Install the plugin's own entities as `<prefix>__<name>`. A `ref` to another of the plugin's
+/// entities is rewritten to the namespaced name; any other `ref` must name an entity the
+/// composed manifest already has, which `ce-manifest` checks on the result.
+fn add_plugin_entities(
+    entities: &mut Map<String, Value>,
+    plugin: &Plugin,
+) -> Result<(), ComposeError> {
+    let prefix = crate::entity_prefix(&plugin.id);
+    let local: std::collections::BTreeSet<&str> =
+        plugin.entities.iter().map(|e| e.name.as_str()).collect();
+    for e in &plugin.entities {
+        let full = format!("{prefix}__{}", e.name);
+        if entities.contains_key(&full) {
+            return Err(ComposeError::Clash(full));
+        }
+        let mut def = e.definition.clone();
+        if let Some(fields) = def.get_mut("fields").and_then(Value::as_object_mut) {
+            for f in fields.values_mut() {
+                let target = f.get("ref").and_then(Value::as_str).map(String::from);
+                if let Some(t) = target {
+                    if local.contains(t.as_str()) {
+                        f["ref"] = Value::String(format!("{prefix}__{t}"));
+                    }
+                }
+            }
+        }
+        entities.insert(full, def);
+    }
+    Ok(())
 }
 
 /// Replace every `{"$slot": name}` with the chosen rule text.

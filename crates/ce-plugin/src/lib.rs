@@ -18,7 +18,10 @@ pub use load::{
 pub use module::{builtin_registry, compose, ComposeError, Composed};
 pub use registry::{Module, Registry, Slot};
 pub use resolve::{resolve, ResolveError};
-pub use validate::{parse, Capabilities, Plugin, Policy, Violation, MAX_BYTES, MAX_POLICIES};
+pub use validate::{
+    entity_prefix, parse, Capabilities, Plugin, PluginEntity, Policy, Violation, MAX_BYTES,
+    MAX_ENTITIES, MAX_POLICIES,
+};
 
 /// Version of the `plugin.toml` schema this crate reads.
 pub const SCHEMA_VERSION: u32 = 1;

@@ -8,6 +8,9 @@ use crate::{Module, Registry, KIND_POLICY_PACK, SCHEMA_VERSION};
 
 pub const MAX_BYTES: usize = 64 * 1024;
 pub const MAX_POLICIES: usize = 64;
+/// Most entities one plugin may add.
+pub const MAX_ENTITIES: usize = 16;
+const MAX_ENTITY_LOCAL: usize = 30;
 const MAX_RULE: usize = 2000;
 const MAX_LIST: usize = 64;
 
@@ -23,7 +26,16 @@ struct Raw {
     #[serde(default)]
     policy: Vec<RawPolicy>,
     #[serde(default)]
+    entity: Vec<RawEntity>,
+    #[serde(default)]
     tests: Option<RawTests>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEntity {
+    name: String,
+    definition: toml::Table,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +104,16 @@ pub struct Policy {
     pub params: Map<String, Value>,
 }
 
+/// An entity a plugin adds. `name` is the plugin's own name for it; composition installs it as
+/// `<plugin id with hyphens as underscores>__<name>` and rewrites references between the
+/// plugin's own entities to match. `definition` is a manifest entity definition (fields, state,
+/// invariants, governed ...) that `ce-manifest` validates when the plugin is composed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginEntity {
+    pub name: String,
+    pub definition: Value,
+}
+
 /// A validated plugin descriptor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plugin {
@@ -103,6 +125,8 @@ pub struct Plugin {
     pub engine: VersionReq,
     pub capabilities: Capabilities,
     pub policies: Vec<Policy>,
+    /// Entities (tables) the plugin adds beside the module's own.
+    pub entities: Vec<PluginEntity>,
     /// Relative, normalized path of the synthetic fixtures folder, when declared.
     pub fixtures: Option<String>,
 }
@@ -220,6 +244,7 @@ pub fn parse(text: &str, registry: &Registry, engine: &Version) -> Result<Plugin
 
     capability_check(&mut bad, module, &raw.capabilities);
     let policies = policy_check(&mut bad, module, &raw.policy);
+    let entities = entity_check(&mut bad, &raw.plugin.id, &raw.entity);
     let fixtures = raw
         .tests
         .as_ref()
@@ -249,6 +274,7 @@ pub fn parse(text: &str, registry: &Registry, engine: &Version) -> Result<Plugin
                 emit: raw.capabilities.emit,
             },
             policies,
+            entities,
             fixtures,
         }),
         _ => Err(bad),
@@ -292,6 +318,76 @@ fn capability_check(bad: &mut Vec<Violation>, module: Option<&Module>, caps: &Ra
             }
         }
     }
+}
+
+/// Local entity names: lowercase, digits and single underscores, so the namespaced name
+/// `<plugin>__<name>` is unambiguous.
+fn local_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= MAX_ENTITY_LOCAL
+        && b[0].is_ascii_lowercase()
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+        && !s.contains("__")
+        && !s.ends_with('_')
+}
+
+/// The prefix a plugin's entities carry in the composed manifest.
+pub fn entity_prefix(plugin_id: &str) -> String {
+    plugin_id.replace('-', "_")
+}
+
+fn entity_check(bad: &mut Vec<Violation>, plugin_id: &str, raw: &[RawEntity]) -> Vec<PluginEntity> {
+    if raw.len() > MAX_ENTITIES {
+        bad.push(v(
+            "too_many",
+            "entity",
+            format!("at most {MAX_ENTITIES} entities"),
+        ));
+        return Vec::new();
+    }
+    let prefix = entity_prefix(plugin_id);
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (i, e) in raw.iter().enumerate() {
+        let at = format!("entity[{i}]");
+        if !local_name(&e.name) {
+            bad.push(v(
+                "bad_entity_name",
+                format!("{at}.name"),
+                format!(
+                    "lowercase letters, digits and single underscores, starting with a letter, up to {MAX_ENTITY_LOCAL}"
+                ),
+            ));
+        } else if prefix.len() + 2 + e.name.len() > 63 {
+            bad.push(v(
+                "entity_name_too_long",
+                format!("{at}.name"),
+                "plugin id plus entity name must fit in 63 characters",
+            ));
+        }
+        if !seen.insert(e.name.as_str()) {
+            bad.push(v(
+                "duplicate_entity",
+                format!("{at}.name"),
+                format!("entity \"{}\" declared twice", e.name),
+            ));
+        }
+        let table = toml::Value::Table(e.definition.clone());
+        match json(&table) {
+            Some(definition) => out.push(PluginEntity {
+                name: e.name.clone(),
+                definition,
+            }),
+            None => bad.push(v(
+                "bad_entity",
+                format!("{at}.definition"),
+                "use strings, integers, booleans, arrays or tables; write decimals as strings",
+            )),
+        }
+    }
+    out
 }
 
 fn policy_check(
