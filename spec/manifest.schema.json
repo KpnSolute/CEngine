@@ -180,6 +180,42 @@
     "projections": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/projection" } },
     "reports": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/report" } },
     "runtime": { "$ref": "#/$defs/runtime" },
+    "subscriptions": {
+      "type": "array",
+      "maxItems": 32,
+      "description": "Reactions to engine events. When the named event is stored, the engine creates the record in the same transaction. Needs the `events` tool. Values copy from the event or are literals; there is no code.",
+      "items": {
+        "type": "object",
+        "required": ["event", "create"],
+        "additionalProperties": false,
+        "properties": {
+          "event": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*$", "maxLength": 120 },
+          "create": {
+            "type": "object",
+            "required": ["entity", "values"],
+            "additionalProperties": false,
+            "properties": {
+              "entity": { "$ref": "#/$defs/name" },
+              "values": {
+                "type": "object",
+                "minProperties": 1,
+                "propertyNames": { "$ref": "#/$defs/name" },
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "minProperties": 1,
+                  "maxProperties": 1,
+                  "properties": {
+                    "from": { "type": "string", "description": "`name`, `subject`, `actor`, `at`, or `data.<field>[.<field>...]` of the event." },
+                    "value": { "description": "A literal." }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "provenance": {
       "type": "object",
       "description": "Written by composition, never by authors: which module and which digest-pinned plugin produced the rules. Recorded on every audit event.",

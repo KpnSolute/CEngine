@@ -450,6 +450,7 @@ pub fn check(m: &Value) -> Vec<Issue> {
         }
     }
 
+    subscriptions(&mut out, m, entities);
     for (rn, r) in obj(m, "reports").unwrap_or(&empty) {
         check_report(&mut out, rn, r, entities, &empty);
     }
@@ -896,6 +897,113 @@ fn check_report(out: &mut Vec<Issue>, rn: &str, r: &Value, entities: &Obj, empty
             Ok(f) => {
                 if let Err(why) = crate::projection::check_types(&f, fields) {
                     out.push(issue(format!("{pp}/filter"), "invalid_filter", why));
+                }
+            }
+        }
+    }
+}
+
+/// Event names: 2 to 4 dot-separated segments, each `[a-z][a-z0-9_]*`.
+fn event_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('.').collect();
+    (2..=4).contains(&parts.len())
+        && parts.iter().all(|p| {
+            let b = p.as_bytes();
+            !b.is_empty()
+                && b[0].is_ascii_lowercase()
+                && b.iter()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+        })
+}
+
+/// Where a subscription may copy a value from: the event's `name`, `subject`, `actor`, `at`, or
+/// a path into its `data`.
+fn event_source(from: &str) -> bool {
+    match from {
+        "name" | "subject" | "actor" | "at" => true,
+        _ => from.strip_prefix("data.").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest.split('.').all(|seg| {
+                    let b = seg.as_bytes();
+                    !b.is_empty()
+                        && b[0].is_ascii_lowercase()
+                        && b.iter()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+                })
+        }),
+    }
+}
+
+/// Subscriptions create records in an entity the manifest declares. They never target the
+/// engine's own server-written entities, so a reaction cannot forge events, audit or changesets.
+const SERVER_ENTITIES: &[&str] = &[
+    "outbox_event",
+    "audit_event",
+    "changeset",
+    "changeset_op",
+    "idempotency_key",
+];
+
+fn subscriptions(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
+    for (i, s) in m
+        .get("subscriptions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let p = format!("/subscriptions/{i}");
+        if let Some(ev) = s["event"].as_str() {
+            if !event_name(ev) {
+                out.push(issue(
+                    format!("{p}/event"),
+                    "bad_event_name",
+                    "2 to 4 dot-separated segments of lowercase letters, digits and underscores",
+                ));
+            }
+        }
+        let create = &s["create"];
+        let Some(entity) = create["entity"].as_str() else {
+            continue;
+        };
+        let Some(ent) = entities.get(entity) else {
+            out.push(issue(
+                format!("{p}/create/entity"),
+                "unknown_entity",
+                format!("no entity `{entity}`"),
+            ));
+            continue;
+        };
+        if SERVER_ENTITIES.contains(&entity) {
+            out.push(issue(
+                format!("{p}/create/entity"),
+                "server_entity",
+                format!("`{entity}` is written by the server only"),
+            ));
+        }
+        let fields = ent.get("fields").and_then(Value::as_object);
+        for (fname, v) in create["values"].as_object().into_iter().flatten() {
+            let vp = format!("{p}/create/values/{fname}");
+            match fields.and_then(|f| f.get(fname)) {
+                None => out.push(issue(
+                    &vp,
+                    "unknown_field",
+                    format!("`{entity}` has no field `{fname}`"),
+                )),
+                Some(f) if f["computed"].is_string() => out.push(issue(
+                    &vp,
+                    "computed_field",
+                    "a computed field cannot be set",
+                )),
+                Some(_) => {}
+            }
+            if let Some(from) = v["from"].as_str() {
+                if !event_source(from) {
+                    out.push(issue(
+                        format!("{vp}/from"),
+                        "bad_event_source",
+                        "use name, subject, actor, at, or data.<field>",
+                    ));
                 }
             }
         }

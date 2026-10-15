@@ -93,5 +93,56 @@ Two legacy MJCC behaviours need no engine change; they are policy and client pro
 - **Existing shortfalls stay editable, but never grow.** The `over_pull` slot can read `old.*`, so a plugin can write `opening_oh + received - pulled >= 0 or opening_oh + received - pulled >= coalesce(old.opening_oh, 0) + coalesce(old.received, 0) - coalesce(old.pulled, 0)` (with `ending_qty` set to `opening_oh + received - pulled` so a shortfall shows as negative). A line that is already short can have its pull lowered or an unrelated field changed; raising the pull, or creating a new short line, is refused with `stock.over_pull` (test `an_existing_shortfall_may_shrink_but_never_grow_under_the_legacy_over_pull_rule`, which opens history written under a permissive policy and then serves it under this rule).
 - **Rollover carries cost.** For each closed line with stock on hand the client sends `opening_oh` = closing `ending_qty`, `opening_unit_cost` = closing `ending_value` / `ending_qty` rounded to six places, and `unit_price` = the price going forward. A line with nothing on hand (`ending_qty` of 0, where the ratio is undefined) sends `opening_oh` 0 and no `opening_unit_cost`. Under the legacy valuation rules the opening stock keeps its carried cost, so a supplier's later price rise does not revalue what was already on hand (test `rollover_carries_cost_so_a_new_price_does_not_revalue_what_was_on_hand`: 6 on hand worth 8.57, carried at 1.428333, stay worth 8.57 after the price moves to 3, and a depleted line rolls over at 0). **Rounding:** the cost is stored to six places, so the carried value can differ from the closing value by up to half of one millionth of a currency unit per unit of stock (for example 87,654.321 units worth 1,047,086.42 carry at 11.945634 and open at 1,047,086.44). The legacy system has the same limit only if its carried cost is stored to six places; this needs the owner's acknowledgement before parity is claimed for very large lines.
 
+## Plugin-owned entities (tables)
+
+A plugin may add entities of its own, the way a Supabase project adds tables, but only as data the engine understands, never as SQL. In `plugin.toml`:
+
+```toml
+[[entity]]
+name = "limit"
+[entity.definition.fields.label]
+type = "string"
+required = true
+
+[[entity]]
+name = "check"
+[entity.definition.fields.limit]
+type = "ref"
+ref = "limit"
+```
+
+- `definition` is an ordinary manifest entity (fields, state, invariants, `governed`, ...). `ce-manifest` validates it when the plugin is composed, so a bad type or a `ref` to an unknown entity is refused at install time, not at request time.
+- Names: `name` is lowercase letters, digits and single underscores, up to 30. The entity is installed as `<plugin id with hyphens as underscores>__<name>` (plugin `food-safety`, entity `limit` becomes `food_safety__limit`). A `ref` to another of the plugin's own entities is rewritten to the namespaced name; a `ref` to a module or template entity is left as written.
+- A plugin cannot replace or shadow an existing entity: a name already in the template is `Clash`.
+- Limits: 16 entities per plugin; numbers follow the rule for parameters (decimal strings or integers, no floats).
+- Everything else comes from the engine as for any entity: `tenant_id` on every row, roles, audit with the plugin digest, changesets for `governed` entities. The template's roles are not changed, so who may read or write a plugin's entities is still the template's decision.
+- Because the entities are part of the composed manifest, they change its hash and are pinned with the plugin digest.
+
+Not in this increment: plugin-defined routes and actions, connector settings, what happens to a plugin's tables when it is disabled or removed (`ce-migrate` emits no `DROP` today, so data is kept, but this is not yet a tested guarantee), and a migration step for upgrading a plugin's entities across versions.
+
+## Event subscriptions
+
+A plugin can react to an engine event by creating a record in one of its own entities. This is how a plugin hooks into the engine without code: for example, an archive plugin queues a job each time a changeset is merged.
+
+```toml
+[[subscribe]]
+event = "changeset.merged"
+entity = "job"
+[subscribe.values.changeset]
+from = "subject"
+[subscribe.values.state]
+value = "queued"
+```
+
+- **Events.** With the `events` tool, a changeset merge stores `changeset.merged` and a revert stores `changeset.reverted` in the same transaction (subject: the changeset id; data: `id`, `actor`, `title`). Actions' `emit`s and period close/reopen are unchanged.
+- **Values.** Each field is `{from = "..."}` or `{value = ...}`. `from` is `name`, `subject`, `actor`, `at`, or `data.<field>[.<field>...]` of the event (missing paths give nothing). There are no expressions and no code.
+- **Scope.** A plugin's subscriptions create records only in that plugin's own entities (`entity` is the local name; composition installs the manifest form `subscriptions[]` with the namespaced name). A manifest cannot target the engine's server-written entities. Composition refuses a plugin with subscriptions when the template has no `events` tool.
+- **Same transaction.** The reaction runs when the event is stored, through the normal write path (rules, uniqueness, audit). If the merge rolls back, so does the reaction.
+- **A refused reaction never undoes the change.** If the record fails the entity's rules (a required field is missing, say), it is skipped and the outbox event's `data.reaction_errors` lists the subscription and the field errors, so a person can see it. A database error still rolls the whole transaction back.
+- **No loops.** Creating the record does not itself store an event, so reactions do not trigger reactions.
+- Limits: 16 subscriptions per plugin, 32 per manifest. Tested on Postgres in `crates/ce-server/tests/plugin_events.rs`.
+
+Not in this increment: reactions other than `create` (update, run an action), conditions (`when`), the connector that delivers a queued job to a destination, retry state for those jobs, plugin routes and SDK helpers.
+
 ## Not in this increment
 Fetching plugin folders from a customer repository (the host places the folder), a plugin release approval workflow beyond the owner commands, and the HTTP deploy.
