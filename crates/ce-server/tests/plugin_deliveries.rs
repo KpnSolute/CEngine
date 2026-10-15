@@ -373,3 +373,41 @@ async fn a_job_that_keeps_failing_ends_dead() {
     );
     r.finish().await;
 }
+
+#[tokio::test]
+async fn jobs_waiting_for_a_retry_never_hide_a_due_one() {
+    let Some(mut r) = rig().await else { return };
+    // More waiting jobs than one page holds, then the merge's job is the only due one.
+    let mut owner = Api {
+        app: r.reviewer.app.clone(),
+        n: 0,
+        role: "owner",
+        changeset: None,
+    };
+    for i in 0..120 {
+        let (s, v) = owner
+            .call(
+                "POST",
+                &format!("/v1/{INST}/archiver__job"),
+                Some(json!({"changeset": format!("w{i}"), "status": "queued", "attempts": 1, "not_before": 900_000})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+    }
+    assert_eq!(
+        r.run().await,
+        json!({"delivered": 1, "retrying": 0, "dead": 0})
+    );
+    let done = r
+        .reviewer
+        .list("archiver__job")
+        .await
+        .into_iter()
+        .filter(|j| j["status"] == "done")
+        .count();
+    assert_eq!(done, 1);
+    tokio::task::spawn_blocking(move || drop(owner))
+        .await
+        .unwrap();
+    r.finish().await;
+}

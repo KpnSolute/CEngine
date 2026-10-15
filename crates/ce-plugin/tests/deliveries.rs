@@ -143,3 +143,41 @@ fn the_entity_needs_the_queue_fields_and_params_must_name_its_fields() {
     let t = DELIVER.replace("archive.put", "Archive");
     assert!(codes(&t).contains(&"bad_operation"));
 }
+
+/// A plugin whose job entity breaks the relay's rules is refused when it is composed.
+fn compose_codes(plugin: &str) -> Vec<String> {
+    let p = parse(plugin, &builtin_registry(), &ENGINE).unwrap();
+    match compose(&shell(true), "business.inventory", Some((&p, DIGEST))).unwrap_err() {
+        ComposeError::Invalid(v) => v.into_iter().map(|(code, _, _)| code).collect(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn queue_fields_the_relay_cannot_write_safely_are_refused() {
+    let base = format!("{HEAD}{DELIVER}");
+    // a state machine that owns `status`
+    let t =
+        format!("{base}\n[entity.definition.state]\nfield = \"status\"\ninitial = \"queued\"\n[entity.definition.state.states.queued]\ncode = 100\n");
+    // (the state model needs its own transitions; only the ownership matters here)
+    let c = compose_codes(&t);
+    assert!(
+        c.contains(&"state_managed_queue_field".to_string()),
+        "{c:?}"
+    );
+    // a required field the relay clears
+    let t = base.replace(
+        "[entity.definition.fields.last_error]\ntype = \"string\"",
+        "[entity.definition.fields.last_error]\ntype = \"string\"\nrequired = true",
+    );
+    assert!(compose_codes(&t).contains(&"required_queue_field".to_string()));
+    // a result that is not json
+    let t = format!("{base}\n[entity.definition.fields.result]\ntype = \"integer\"\n");
+    assert!(compose_codes(&t).contains(&"result_not_json".to_string()));
+    // an enum status that lacks a relay value
+    let t = base.replace(
+        "[entity.definition.fields.status]\ntype = \"string\"",
+        "[entity.definition.fields.status]\ntype = \"enum\"\nvalues = [\"queued\", \"done\"]",
+    );
+    assert!(compose_codes(&t).contains(&"missing_status_value".to_string()));
+}

@@ -160,11 +160,12 @@ value = "snapshot"
 ```
 
 - **Entity.** The plugin's own entity must declare `status` (string or enum), `attempts` (integer), `not_before` (integer) and `last_error` (string); `result` (json) is filled with the connector's answer when declared. One delivery per entity, 8 per plugin, 32 per manifest. Composition needs the `events` tool.
+- **Field rules.** Composition refuses an entity whose state machine owns one of these fields, whose `attempts`, `not_before`, `last_error` or `result` is required, whose `result` is not json, or whose enum `status` lacks `queued`, `in_flight`, `done` or `dead`.
 - **States.** A subscription (or any write) sets `status = "queued"`. The relay writes `in_flight`, `done` or `dead`.
 - **Params.** Each is `{from = "<field of the entity>"}` (or `id`) or `{value = ...}`.
 - **Connector.** `connector` is one of the `ce-provider` connector types. `banking`, `payments` and `hr_payroll` are refused for plugins, so a plugin cannot move money. `operation` is 2 to 4 dotted lower-case segments.
 - **Running it.** `POST /v1/{inst}/deliveries/run` (role action `manage_events`) makes one pass for the caller's tenant and answers `{delivered, retrying, dead}`; the host calls it on a timer. Without a provider it answers 503. Library hosts call `ce_server::deliver_once`.
-- **Retries.** Each call is a write with idempotency key `<entity>:<record id>`, the same on every attempt, so the connector can refuse repeats. A failure backs off like events (5 s doubling, capped at one hour) and the record is `dead` after 5 attempts; a bad request or a missing approval is `dead` at once. A job claimed by a relay that then crashes is leased for 60 seconds and counts as an attempt. One failing job never blocks the others. A person puts a dead job back with `status = "queued"`, `attempts = 0`.
+- **Retries.** Each call is a write with idempotency key `<entity>:<record id>`, the same on every attempt, so the connector can refuse repeats. A failure backs off like events (5 s doubling, capped at one hour) and the record is `dead` after 5 attempts; a bad request or a missing approval is `dead` at once. A job claimed by a relay that then crashes is leased for 60 seconds and counts as an attempt. One failing job never blocks the others: a pass reads the queue page by page (up to 20 pages) and sends the first 50 due jobs. A person puts a dead job back with `status = "queued"`, `attempts = 0`.
 
 Tested on Postgres in `crates/ce-server/tests/plugin_deliveries.rs`. Not in this increment: the host timer, per-tenant connector settings, a requeue action.
 

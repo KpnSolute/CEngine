@@ -1061,6 +1061,49 @@ fn deliveries(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
                 ));
             }
         }
+        // The relay writes these fields with plain updates, so a state machine must not own
+        // them, `status` must allow the four relay values, and the others must be optional.
+        let state_field = ent["state"]["field"].as_str();
+        for name in ["status", "attempts", "not_before", "last_error", "result"] {
+            let f = fields.and_then(|f| f.get(name));
+            if f.is_some() && state_field == Some(name) {
+                out.push(issue(
+                    format!("{p}/entity"),
+                    "state_managed_queue_field",
+                    format!("`{name}` is owned by the state machine; use a plain field"),
+                ));
+            }
+            if f.is_some_and(|f| f["required"] == true) && name != "status" {
+                out.push(issue(
+                    format!("{p}/entity"),
+                    "required_queue_field",
+                    format!("`{name}` must not be required: the relay clears and sets it"),
+                ));
+            }
+        }
+        if let Some(values) = fields
+            .and_then(|f| f.get("status"))
+            .and_then(|f| f["values"].as_array())
+        {
+            for want in ["queued", "in_flight", "done", "dead"] {
+                if !values.iter().any(|v| v == want) {
+                    out.push(issue(
+                        format!("{p}/entity"),
+                        "missing_status_value",
+                        format!("`status` must allow `{want}`"),
+                    ));
+                }
+            }
+        }
+        if let Some(r) = fields.and_then(|f| f.get("result")) {
+            if r["type"] != "json" {
+                out.push(issue(
+                    format!("{p}/entity"),
+                    "result_not_json",
+                    "`result` keeps the connector's answer and must be json",
+                ));
+            }
+        }
         for (k, v) in d["params"].as_object().into_iter().flatten() {
             if let Some(f) = v["from"].as_str() {
                 if f != "id" && !fields.is_some_and(|fs| fs.contains_key(f)) {

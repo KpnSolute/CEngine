@@ -20,6 +20,8 @@ use serde_json::{json, Map, Value};
 /// How long a claimed job is held before another relay may take it again.
 const LEASE_SECS: u64 = 60;
 const BATCH: usize = 50;
+/// The most pages one pass reads per delivery, so a long queue of waiting jobs cannot stall it.
+const MAX_PAGES: usize = 20;
 
 pub(crate) fn enabled(m: &Manifest) -> bool {
     events::enabled(m)
@@ -56,8 +58,8 @@ pub fn run_once(
         ) else {
             continue;
         };
-        let keeps_result = m.value["entities"][entity]["fields"]["result"].is_object();
-        let req = ListRequest {
+        let keeps_result = m.value["entities"][entity]["fields"]["result"]["type"] == "json";
+        let mut req = ListRequest {
             select: None,
             filter: Some(json!({"field": "status", "op": "in", "value": ["queued", "in_flight"]})),
             search: None,
@@ -65,93 +67,112 @@ pub fn run_once(
             limit: Some(BATCH),
             after: None,
         };
-        for rec in store.list(scope, entity, &req)?.records {
-            let attempts =
-                u32::try_from(rec.data["attempts"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
-            if rec.data["not_before"].as_u64().unwrap_or(0) > now {
-                continue; // waiting for a retry, or leased by another relay
-            }
-            if rec.data["status"] == "in_flight" && attempts >= MAX_ATTEMPTS {
-                // The relay died on this job every time; it counts as a failed delivery.
-                store.update(
+        // Records are listed in pages, so a run of leased or waiting jobs at the front never hides
+        // the ones that are due behind them.
+        let mut due = 0;
+        for _ in 0..MAX_PAGES {
+            let page = store.list(scope, entity, &req)?;
+            for rec in page.records {
+                let attempts =
+                    u32::try_from(rec.data["attempts"].as_u64().unwrap_or(0)).unwrap_or(u32::MAX);
+                if rec.data["not_before"].as_u64().unwrap_or(0) > now {
+                    continue; // waiting for a retry, or leased by another relay
+                }
+                due += 1;
+                if rec.data["status"] == "in_flight" && attempts >= MAX_ATTEMPTS {
+                    // The relay died on this job every time; it counts as a failed delivery.
+                    store.update(
+                        scope,
+                        entity,
+                        &rec.id,
+                        rec.version,
+                        events::set(&rec, &[("status", json!("dead"))]),
+                    )?;
+                    report.dead += 1;
+                    continue;
+                }
+                let claimed = match store.update(
                     scope,
                     entity,
                     &rec.id,
                     rec.version,
-                    events::set(&rec, &[("status", json!("dead"))]),
-                )?;
-                report.dead += 1;
-                continue;
-            }
-            let claimed = match store.update(
-                scope,
-                entity,
-                &rec.id,
-                rec.version,
-                events::set(
-                    &rec,
-                    &[
-                        ("status", json!("in_flight")),
-                        ("attempts", json!(attempts + 1)),
-                        ("not_before", json!(now + LEASE_SECS)),
-                    ],
-                ),
-            ) {
-                Ok(c) => c,
-                Err(StoreError::VersionConflict { .. }) => continue, // another relay has it
-                Err(e) => return Err(e),
-            };
-            let mut params = Map::new();
-            for (k, v) in d["params"].as_object().into_iter().flatten() {
-                let val = match v["from"].as_str() {
-                    Some("id") => json!(rec.id),
-                    Some(f) => rec.data[f].clone(),
-                    None => v["value"].clone(),
+                    events::set(
+                        &rec,
+                        &[
+                            ("status", json!("in_flight")),
+                            ("attempts", json!(attempts + 1)),
+                            ("not_before", json!(now + LEASE_SECS)),
+                        ],
+                    ),
+                ) {
+                    Ok(c) => c,
+                    Err(StoreError::VersionConflict { .. }) => continue, // another relay has it
+                    Err(e) => return Err(e),
                 };
-                params.insert(k.clone(), val);
-            }
-            let call = ProviderRequest::write(
-                conn,
-                op,
-                Value::Object(params),
-                &format!("{entity}:{}", rec.id),
-            );
-            let mut edits: Vec<(&str, Value)> = Vec::new();
-            match provider.call(scope, &call) {
-                Ok(answer) => {
-                    report.delivered += 1;
-                    edits.push(("status", json!("done")));
-                    edits.push(("last_error", Value::Null));
-                    if keeps_result {
-                        edits.push(("result", answer.data));
-                    }
-                }
-                Err(e) => {
-                    let (why, retryable) = match e {
-                        ProviderError::Unavailable => ("the connector is unavailable".into(), true),
-                        ProviderError::Failed(m) => (m, true),
-                        ProviderError::Invalid(m) => (m.to_string(), false),
-                        ProviderError::ApprovalRequired => ("approval required".to_string(), false),
+                let mut params = Map::new();
+                for (k, v) in d["params"].as_object().into_iter().flatten() {
+                    let val = match v["from"].as_str() {
+                        Some("id") => json!(rec.id),
+                        Some(f) => rec.data[f].clone(),
+                        None => v["value"].clone(),
                     };
-                    if retryable && attempts + 1 < MAX_ATTEMPTS {
-                        report.retrying += 1;
-                        edits.push(("status", json!("queued")));
-                        edits.push(("not_before", json!(now + backoff(attempts + 1))));
-                    } else {
-                        report.dead += 1;
-                        edits.push(("status", json!("dead")));
-                    }
-                    edits.push(("last_error", json!(short(&why))));
+                    params.insert(k.clone(), val);
                 }
+                let call = ProviderRequest::write(
+                    conn,
+                    op,
+                    Value::Object(params),
+                    &format!("{entity}:{}", rec.id),
+                );
+                let mut edits: Vec<(&str, Value)> = Vec::new();
+                match provider.call(scope, &call) {
+                    Ok(answer) => {
+                        report.delivered += 1;
+                        edits.push(("status", json!("done")));
+                        edits.push(("last_error", Value::Null));
+                        if keeps_result {
+                            edits.push(("result", answer.data));
+                        }
+                    }
+                    Err(e) => {
+                        let (why, retryable) = match e {
+                            ProviderError::Unavailable => {
+                                ("the connector is unavailable".into(), true)
+                            }
+                            ProviderError::Failed(m) => (m, true),
+                            ProviderError::Invalid(m) => (m.to_string(), false),
+                            ProviderError::ApprovalRequired => {
+                                ("approval required".to_string(), false)
+                            }
+                        };
+                        if retryable && attempts + 1 < MAX_ATTEMPTS {
+                            report.retrying += 1;
+                            edits.push(("status", json!("queued")));
+                            edits.push(("not_before", json!(now + backoff(attempts + 1))));
+                        } else {
+                            report.dead += 1;
+                            edits.push(("status", json!("dead")));
+                        }
+                        edits.push(("last_error", json!(short(&why))));
+                    }
+                }
+                store.update(
+                    scope,
+                    entity,
+                    &claimed.id,
+                    claimed.version,
+                    events::set(&claimed, &edits),
+                )?;
             }
-            store.update(
-                scope,
-                entity,
-                &claimed.id,
-                claimed.version,
-                events::set(&claimed, &edits),
-            )?;
+            if due >= BATCH {
+                break;
+            }
+            match page.next {
+                Some(cursor) => req.after = Some(cursor),
+                None => break,
+            }
         }
     }
+
     Ok(report)
 }
