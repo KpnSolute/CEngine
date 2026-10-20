@@ -3,9 +3,9 @@
 **From:** owner / senior engineer on CEngine  
 **To:** Claude (engineering lead on `KpnSolute/CEngine` and `KpnWorld/MJCC-workspace`)  
 **Date issued:** Monday 2026-10-19  
-**Hard deadline:** Wednesday 2026-10-21 end of day: the **entire MJCC backend** runs on CEngine in staging, proven through the real HTTP API. Thursday we start the UI.
+**Hard deadline:** Wednesday 2026-10-21 end of day: the **entire MJCC backend** runs on CEngine in staging, proven through the real HTTP API, with the migration rehearsed against a read-only snapshot of real MJCC history. Thursday we start the UI.
 
-Read this whole file before touching code. It replaces every earlier plan that conflicts with it. Copy it to `CEngine/spec/mjcc-backend-complete-by-wednesday.md` so both repositories carry the same instructions, and keep both copies in sync when you amend it.
+Read this whole file before touching code. It replaces every earlier plan that conflicts with it. The single copy of this brief lives at `KpnSolute/CEngine/spec/mjcc-backend-complete-by-wednesday.md`; do not copy it into other repositories.
 
 ---
 
@@ -26,14 +26,118 @@ The food-service pack depends on core; core never depends on food service.
 
 1. **Live MJCC is untouched until the new one is confirmed.** Supabase project `mgvyylvmkxhhataavqjz` (MJCCv1, JobCorp org) is **read-only**. Use the `supabase` MCP tool `supabase_query` on it; never `supabase_execute_sql`. The old Compute app stays the system of record until the new one is confirmed complete: API, structure, data and UI, with a separate signed go-live.
    **We are not abandoning the old MJCC.** Its data, its AI stack and its working rules carry forward. Once staging is accepted, the new MJCC is merged into production and inherits everything. What changes is the home: `KpnSolute/Compute` stops being where MJCC lives; `KpnWorld/MJCC-workspace` (template, plugin, UI) on CEngine becomes the home. Design the migration (W1) so it can be re-run as the final cutover merge, not as a one-off copy.
-2. **Staging is `aqkhebljkagytsqtkkly`** ("CE-Engine MJCC", Testing org, schema `ce_mjcc_staging`). Full read and write there. `qprfonxvthmaoxfixigk` (MJCCv2) holds LunchVoice survey/menu data (dish_ratings, survey_answers, sessions); read it for the menu-feedback integration, do not write.
-3. **Synthetic or sanitized fixtures only** in repositories. Real MJCC rows may be read for migration mapping and reconciliation totals, never committed.
+2. **Staging is `aqkhebljkagytsqtkkly`** ("CE-Engine MJCC", Testing org, schema `ce_mjcc_staging`). Full read and write there. **It is a temporary, test-only hosting mode and throwaway data (§2a).** It is not the production tenancy model and nothing in it is a production record or backup. The production tenant data plane is MJCCv1 with schema `ce_mjcc_prod` (§2a, §4c–4d). `qprfonxvthmaoxfixigk` (MJCCv2) holds LunchVoice survey/menu data (dish_ratings, survey_answers, sessions); read it for the menu-feedback integration, do not write.
+3. **Synthetic or sanitized fixtures only** in repositories and CI. Real MJCC rows may be read for migration mapping and reconciliation totals, never committed. The one exception is the Wednesday rehearsal under the written authorisation in §2c, against a read-only snapshot only.
 4. **No old FastAPI behind the new API.** Every business decision executes in CEngine or an approved plugin.
 5. **Production grade, not a demo.** Every endpoint: tenant-scoped, role-checked, idempotent on POST, audited, covered by an HTTP + Postgres test. Decimal money, never float. Concurrency proven with two writers.
 6. **Backend before UI.** Thursday's UI team consumes `ui/API_CONTRACT_DRAFT.md`; by Wednesday night that file must be the *final* contract, generated from the running server's OpenAPI (`ce-server/src/openapi.rs`), not hand-written.
 7. Small PRs per capability with tests. Documentation alone is not a milestone.
 
 ---
+
+## 2a. Tenancy: staging is a test harness, not the production model
+
+Decided by the owner 2026-10-19. These points are not open for reinterpretation; do not build against the staging layout as if it were the product.
+
+**Permanent production architecture (the target):**
+- **One CEngine control plane** (KpnSolute's): installations, customer/installation identifiers, module catalog, template catalog, plugin approval records with hashes/digests, module and plugin version metadata, deployment/release state, capability grants, routing metadata, metering **aggregates**, billing/entitlement references, control-plane audit events.
+- **One data plane per production customer**: each tenant's own dedicated authorized data environment (Supabase project or equivalent). KpnSolute may provision and manage it; that does not make it the customer's problem to administer.
+- **MJCC's production data plane is MJCCv1 `mgvyylvmkxhhataavqjz`** in the JobCorp org. The production CEngine schema there is **`ce_mjcc_prod`**.
+
+**Rejected as the production target:** ten tenants in ten schemas inside CEngine's home project. That mode is a shared failure and security boundary. It exists only as testing, development, CI and temporary staging hosting.
+
+**What never crosses the boundary:** customer transactions, people, files, backups, business audit entries, notifications, jobs and idempotency records live with the tenant. CEngine keeps only minimal aggregated counts, never customer payloads.
+
+**Until a dedicated CEngine control-plane project exists:**
+- Use the existing staging/testing environment as the **temporary control plane**.
+- **Label every control-plane record created there as temporary** (a `temporary: true` marker or an equivalent column value), so the later move is a query, not a hunt.
+- **Do not create a new Supabase project** without explicit owner approval. Project creation may cost money; ask first.
+- Reconciliation, not assumption, decides when the temporary control plane is replaced.
+
+**Tenancy model at a glance:**
+```text
+KpnSolute / CEngine CONTROL PLANE        (today: temporary, in the staging environment)
+  installations · modules · templates · plugin approvals · releases · entitlements · metering aggregates
+
+TENANT DATA PLANES
+  Tenant 01 → dedicated environment
+  Tenant 02 → dedicated environment
+  ...
+  MJCC      → MJCCv1 (JobCorp) · schema ce_mjcc_prod
+  ...
+  Tenant 10 → dedicated environment
+```
+
+**Staging facts that must not leak into the production design:** `aqkhebljkagytsqtkkly`, schema `ce_mjcc_staging`, is throwaway. It is dropped and reinstalled during this week without ceremony. Nothing in it is a production record, a backup or a source of truth.
+
+---
+
+## 2b. Schema freeze: what "frozen before Monday" means
+
+The skeleton stops moving underneath the builders. Before implementation starts, decide and write down:
+
+- schema ownership (which schema belongs to the control plane, which to the tenant);
+- tenant identifiers and how a request resolves its tenant;
+- table families and their naming;
+- identifiers (entity id, installation id, request id, legacy id in provenance);
+- migration/version table design;
+- audit/event structures (business audit in the tenant, control audit in the control plane);
+- idempotency model;
+- job/outbox model;
+- file metadata model and blob layout;
+- plugin/version/digest references;
+- installation metadata boundary;
+- auth subject model (identity provider, scopes, delegated AI tokens);
+- the migration/versioning model from §5 M7.
+
+This does **not** freeze every column, index or field. Additive, backward-compatible changes remain expected after the freeze. What is frozen is the ownership boundary and the major relationships, so a correction costs hours instead of the week.
+
+The written freeze record goes to `spec/SCHEMA_FREEZE.md` before M1 begins. Reviewers read it before reading code.
+
+---
+
+## 2c. Written authorisation: Wednesday real-data rehearsal
+
+Copied here from the owner's decision so the authorisation lives in `spec/` as required.
+
+```
+APPROVER: KpnLLC / KpnSolute owner
+CUSTOMER: MJCC
+PURPOSE: migration rehearsal only
+SCOPE:
+  - read-only access to existing MJCC production data
+  - create an export/snapshot for migration validation
+  - load that data only into the isolated CEngine rehearsal schema
+  - run reconciliation and compatibility checks
+  - no production writes to the existing MJCC schema
+  - no cutover
+  - no modification or deletion of legacy records
+  - no use of customer data outside the MJCC migration task
+EXPIRY: end of Wednesday's migration rehearsal window
+REQUIREMENT:
+  - record the authorization in spec/
+  - record source snapshot time/checksum
+  - use a read-only legacy DB role
+  - use a separate writer restricted to the rehearsal schema
+  - log the migration run and reconciliation results
+  - remove/expire rehearsal credentials afterward
+```
+
+Rules that follow from it, and that override the repository README's "synthetic only" line for this one task and this one window:
+
+1. Rehearse against a **read-only copy, snapshot or export** of real MJCC history. Never operate directly against live mutable rows.
+2. Two roles, two purposes: a **read-only legacy role** for extraction, and a **separate writer** scoped only to the rehearsal schema. Neither role may write the live MJCC schema.
+3. Record snapshot time and checksum before loading; keep them in the run log.
+4. Log the migration run and every reconciliation result; keep customer rows out of git — only counts and totals go in committed reports.
+5. Expire the rehearsal credentials at the end of the window. Deleting them is part of W1's acceptance.
+6. This authorisation does not cover production. Cutover remains a separate signed decision (W5/W6 and the readiness board).
+
+---
+
+## 2d. Slip order, stated once
+
+If the schedule slips, cut in this order: **AI pass → scheduler/advanced automation → non-critical custom reports.** The **core migration and reconciliation never slip.** AI falls back to deterministic or manual import; scheduling falls back to manual runs; some reports fall back to exports or legacy read-only reports. A bad migration has no fallback.
+
 
 ## 3. Where we are (evidence, read 2026-10-19)
 
@@ -165,25 +269,48 @@ Plan:
 4. Production gets its own bucket in the production project at cutover; staging and production never share a bucket.
 5. Plan limits to check with the owner: Free plan 1 GB storage / 50 MB per file; Pro 100 GB included and larger per-file limits. Current volume (~54 MB) fits either.
 
-### 4c. Two kinds of database: CEngine control plane vs tenant (consumer) data
+### 4c. Two kinds of database: CEngine control plane vs tenant data planes (confirmed, permanent)
 
-CEngine is a platform that serves many tenants, so **CEngine's database is not the customer's database**.
+Owner decision 2026-10-19: **one CEngine control plane, many isolated tenant data planes.** Keep this architecture. It is not a staging convenience.
 
-| | **CEngine control DB** (KpnSolute owns; Supabase org "Testing") | **Tenant DB** (one per consumer; MJCC's is a JobCorp Supabase project) |
+| | **CEngine control DB** (KpnSolute owns; today temporarily in the staging environment) | **Tenant data plane** (one per production customer; MJCC → MJCCv1 `mgvyylvmkxhhataavqjz`, schema `ce_mjcc_prod`) |
 |---|---|---|
-| Holds | installations (tenant id → template, version, tenant DB location), plugin registry (slug, version, sha256 digest, approval, active/rollback log — today `installs.json`), manifest hashes, signing-key ids and token revocation, platform usage metering, platform operators | every business record of the template (all entities, `audit_event`, `outbox_event`, changesets, `_ce_staff`, `_ce_idempotency`, `_ce_job`, `_ce_notification`), the tenant's blob bucket, the tenant's **secrets in Supabase Vault** (AI provider keys, SMTP, any connector credentials) |
-| Never holds | tenant business rows, tenant files, tenant secrets | other tenants' anything, engine signing keys |
-| Who writes | engine operators, `ce-serve plugin approve/activate` | `ce-serve` acting for that installation only |
+| Holds | installations (tenant id → template, version, tenant DB location), customer/installation identifiers, module catalog, template catalog, plugin approval records with hashes/digests, module and plugin version metadata, deployment/release state, capability grants, routing metadata, metering **aggregates only**, billing/entitlement references, control-plane audit events | every business record of the template (all entities, `audit_event`, `outbox_event`, changesets, `_ce_staff`, `_ce_idempotency`, `_ce_job`, `_ce_notification`, `_ce_migration`), the tenant's blob bucket, the tenant's **secrets in Supabase Vault** (AI provider keys, SMTP, any connector credentials) |
+| Never holds | tenant business rows, tenant files, tenant secrets, tenant payloads of any kind | another tenant's anything, engine signing keys |
+| Who writes | engine operators, `ce-serve plugin approve/activate`, `ce-serve migrate` on the control plane if it has migrations | `ce-serve` acting for that installation only |
+
+**Example of the split:** a control-plane audit saying "MJCC installation upgraded from plugin A to B" stays central. An MJCC audit saying "Manager X approved invoice 24891" stays in MJCCv1.
 
 Rules:
 1. **Config split in `ce-serve`:** add `CE_CONTROL_DATABASE_URL` (+ `CE_CONTROL_SCHEMA`, default `ce_control`). `CE_DATABASE_URL`/`CE_SCHEMA` keep meaning *the tenant DB* for the installation. The install record moves from the `CE_INSTALLS` JSON file into control-DB tables `installation`, `plugin_release`, `plugin_install` (same fields as `installs.json`: slug, version, digest, active index, disabled, log). Keep the file path as a bootstrap/import path so the current `run-staging-test.sh` still works.
 2. **Tenant DB location is a reference, not a secret in the control DB.** `installation.tenant_db_ref` names a secret (env var name or a secret-manager key) holding the tenant connection string; the control DB stores the reference only.
 3. **Tenant secrets resolve at the tenant.** The AI service and connectors read keys from the tenant project's Vault using a dedicated tenant DB role with `select` on `vault.decrypted_secrets` and nothing else. CEngine passes `key_ref`s, never key values, and never logs them.
-4. **The Supabase org "Testing" (`dqztbguopqwbmhnmdsle`) is CEngine's home** (owner decision 2026-10-19). The CEngine control DB lives there, in its **own project**, separate from any tenant project: create "CEngine Control" in the Testing org (schema `ce_control`). Do not put `ce_control` inside a tenant project, and do not repurpose the Recon project (`luielvfdljkuxjezqnjb`) without the owner's say-so. Creating a project may add cost: ask the owner before calling the create-project API.
-5. **Tenant projects belong to the tenant's org.** Today the MJCC staging tenant DB (`aqkhebljkagytsqtkkly`, schema `ce_mjcc_staging`) also sits in the Testing org. That is fine for this week's build. At cutover the MJCC tenant DB is in the **JobCorp org** (`qggdncgjvnmedihxqpww`): either MJCCv1 `mgvyylvmkxhhataavqjz` receives the new schema via the W1 migration/merge, or a fresh JobCorp project (owner decides before cutover). JobCorp's data, files and Vault keys never leave JobCorp's org; CEngine control in the Testing org reaches them only through `installation.tenant_db_ref`.
-6. **Tests:** a second tenant installation on staging (synthetic "acme" template) proves the control DB routes each token to the right tenant DB and that one tenant cannot read another's rows, files or secrets.
+4. **Until a dedicated control-plane project exists** (owner decision): the staging/testing environment acts as the **temporary control plane**. Mark every control-plane row created there `temporary = true` (or an equivalent marker) and record the intended eventual home. **Do not create a Supabase project without owner approval.** The owner alone decides when and where the permanent control-plane project is created.
+5. **Production data plane:** MJCC's data plane is **MJCCv1 `mgvyylvmkxhhataavqjz`**. The production schema there is **`ce_mjcc_prod`**, never a copy of `ce_mjcc_staging` and never `ce_mjcc_staging` itself. The existing legacy schema stays in place at cutover and becomes read-only (§4d). JobCorp's data, files and Vault keys never leave JobCorp's org; CEngine's control plane reaches them only through `installation.tenant_db_ref`.
+6. **Staging does not equal production:** `ce_mjcc_staging` is throwaway (dropped and reinstalled freely). Do not carry staging names, staging identifiers or staging defaults into the production migration; do not treat a green staging run as evidence that `ce_mjcc_prod` is correct.
+7. **Tests:** a second tenant installation on staging (synthetic "acme" template) proves the control plane routes each token to the right tenant data plane and that one tenant cannot read another's rows, files or secrets. Also test that a control-plane request without a resolvable `tenant_db_ref` fails closed.
 
 Add to Monday as **M6 `control plane: CE_CONTROL_DATABASE_URL + installation/plugin tables`**, doc `spec/plugins.md` §"Installing and running a plugin" and new `spec/control-plane.md`.
+
+### 4d. Cutover and the 14-day rollback window
+
+One writer at every instant. No dual writes.
+
+```text
+Before cutover:  Compute = writer        CEngine = validation only
+At cutover:      one signed decision, one write switch
+After cutover:   CEngine = writer        Compute = read-only fallback
+```
+
+After cutover:
+- CEngine writes only to `ce_mjcc_prod`; the legacy schema is read-only.
+- Compute remains deployed and available for rollback and reconciliation for **14 days**.
+- Reconciliation checks continue daily for the full window; results go in the run log.
+- **No dual writes**, including for "just one small fix".
+- After 14 clean days: the Compute MJCC runtime is disabled, the legacy database is retained per the archive/backup policy, and MJCC-specific Compute code becomes eligible for removal after extraction verification.
+- If a reconciliation blocker appears, the window may be extended **only by a recorded formal extension**. The fallback never becomes permanent architecture by silence.
+
+Cutover is out of scope for this week. It is listed here so nothing built this week assumes it can happen twice.
 
 ---
 
@@ -198,16 +325,26 @@ Each item names the repo, the PR title, the test that proves it, and the doc to 
 - **M2 `scheduler: ce-jobs crate`** — table `_ce_job` (tenant, name, cron or `run_at`, payload, lease, attempts, last_error), leased by `ce-serve` loop (`CE_JOBS=1`), manifest `jobs:` block (`{name, schedule, action|event}`). Test: two serve processes, one DB, each job runs once; failed job retries with backoff; dead-letter after N. Doc: `spec/plugins.md` → new `spec/jobs.md`.
 - **M3 `scan + labels endpoints`** — `GET /v1/{inst}/scan/{code}`, `POST …/scan/{code}/move`, `GET …/labels/{entity}/{id}.svg`. Generic: any entity with a field `type: "code"` (new field type, auto-ULID) is scannable. Test: the four failure modes + a happy receive and pull with idempotency replay. Doc: `spec/manifest.schema.json` (field type `code`), `spec/README.md`.
 - **M4 `pii: enforce field flags`** — engine reads `pii: true`: strip from public projections, mask in `audit_event.before/after` unless role has `pii_read`, exclude from search index. Test: projection leak test, audit mask test. Doc: `spec/README.md` security section.
+- **M7 `migrations: ce-serve migrate`** — today `ce-serve install` is not idempotent and there is no migration command (`deploy/render/STAGING.md:86`); every layout change costs a schema replacement. Build the reviewed, forward-only migration path this week. Scope, exactly:
+  - **Forward-only, reviewed** migrations. No down migrations.
+  - **Versioned migration records** stored in the installation schema (table `_ce_migration`: version, name, sha256 of the SQL, applied_at, applied_by, manifest_hash, duration_ms, status). The control plane keeps its own migration history if it has migrations.
+  - **Additive/backward-compatible changes first.** Add column, add index, add table, add enum value, backfill in batches. Destructive operations (`drop column`, `drop table`, narrowing a type) are refused by the tool this week.
+  - **Dry-run/plan output** where practical: `ce-serve migrate --plan` prints pending migrations, target schema, and the statements it would run without executing them.
+  - **Explicit failure** when migration order or version is invalid: unknown version, a gap, a migration whose sha256 changed after being applied, or a schema whose recorded version is ahead of the binary. Fail closed with a named error; never "best effort".
+  - **Migration history in the installation schema**, so a tenant data plane carries its own history and the control plane carries its own.
+  - **Tests:** fresh install then migrate on the same manifest; migrate with no pending changes is a no-op; a changed checksum is refused; a gap in versions is refused; a destructive statement is refused; `--plan` changes nothing.
+  - **No destructive automatic migrations this week.** Ordinary layout corrections (missing column, wrong index, extra table) must cost hours. If a breaking change is genuinely needed inside this first implementation window, it may still require a clean new schema with owner sign-off, recorded in the daily log.
+  Doc: new `spec/migrations.md`, update `deploy/render/STAGING.md` (remove the "no migration command" limitation once true), `spec/README.md`.
 - ⇄ **MJCC-workspace M5 `ci: goldens + proof on every PR`** — `.github/workflows/ci.yml`: pin CEngine image digest, Postgres service, run `ops_smoke.py`, `backend_proof.py`, golden comparison. Doc: `README.md`.
 
-**End-of-day check (Monday):** `cargo test --workspace` green; staging has a bucket with one uploaded fixture PDF; `GET /scan/{code}` answers for a staged `stock_item`; CI badge on MJCC-workspace.
+**End-of-day check (Monday):** `cargo test --workspace` green; `spec/SCHEMA_FREEZE.md` committed before M1 started; `ce-serve migrate --plan` runs and a fresh install→migrate test passes; staging has a bucket with one uploaded fixture PDF; `GET /scan/{code}` answers for a staged `stock_item`; CI badge on MJCC-workspace; every control-plane row created today is marked temporary.
 
 ### Tuesday 2026-10-20: the two pipelines and the core pack
 
 **CEngine**
-- **T1 `intake: ce-intake crate + /intake endpoints`** — `POST /intake/{kind}` (kind from manifest `intake:` block) takes a file id, sends it to the MJCC provider service (§4a) through `ce-provider-http` (timeout, usage written to `ai_usage_log`), and emits a **changeset** with provenance per op.
+- **T1 `intake: ce-intake crate + /intake endpoints`** — `POST /intake/{kind}` (kind from manifest `intake:` block) takes a file id, sends it to the MJCC provider service (§4a) through `ce-provider-http` (timeout, usage written to `ai_usage_log`), and emits a **changeset** with provenance per op.Never writes entities directly. Test: fixture PDF → changeset with 12 ops; parser offline → `import_batch.status = needs_manual`, nothing posted; same file twice → one batch (sha256). Doc: `spec/intake.md` (new), diagram B from the blueprint moved here. 
 - **T1a `ai: generated tools, delegated tokens, _ai/call, _mcp`** — §4a "How it lands" item 1. Tool catalog generated per role from the composed manifest; delegated AI token (`actor_kind=ai`, `on_behalf_of`, TTL ≤ 15 min); `_ai/call` enforces read-direct / write-as-changeset / `ai:` direct-allowlist / never-callable actions; provenance on audit; `_mcp` endpoint serving the same tools. Tests: the six AI tests in §4a. Doc: `spec/ai.md` (new); fix the "Infajn" wording in `ai.rs` and `ce-tools/src/lib.rs` doc comments.
-- ⇄ **MJCC-workspace T1b `services/ai: port the Compute AI stack`** — move `backend/ai/*` logic into `services/ai/` (FastAPI or Starlette, stateless, no DB): `POST /extract/invoice` (native text → OCR fallback → Gemini vision → recap totals → lines + provenance), `POST /chat` (streamed; native function calling over `_ai/tools` + `_ai/call` with the user's delegated token), `POST /automations/run/{name}` (called by the scheduler). Provider registry and per-operation model choice from `ai_stack_config`. Template adds `ai_provider`, `ai_stack_config`, `ai_usage_log`, `ai_thread`, `ai_message`, `ai_automation` and an `ai:` block listing direct-write entities (`haccp_log`, `opening_checklist_entry`, `task.status`, `meal_count`, `waste_log`). Tests: the 42 migrated invoice PDFs are not fixtures (real data); build 5 synthetic invoice PDFs per vendor layout and golden their extracted lines. Never writes entities directly. Test: fixture PDF → changeset with 12 ops; parser offline → `import_batch.status = needs_manual`, nothing posted; same file twice → one batch (sha256). Doc: `spec/intake.md` (new), diagram B from the blueprint moved here.
+- ⇄ **MJCC-workspace T1b `services/ai: port the Compute AI stack`** — move `backend/ai/*` logic into `services/ai/` (FastAPI or Starlette, stateless, no DB): `POST /extract/invoice` (native text → OCR fallback → Gemini vision → recap totals → lines + provenance), `POST /chat` (streamed; native function calling over `_ai/tools` + `_ai/call` with the user's delegated token), `POST /automations/run/{name}` (called by the scheduler). Provider registry and per-operation model choice from `ai_stack_config`. Template adds `ai_provider`, `ai_stack_config`, `ai_usage_log`, `ai_thread`, `ai_message`, `ai_automation` and an `ai:` block listing direct-write entities (`haccp_log`, `opening_checklist_entry`, `task.status`, `meal_count`, `waste_log`). Tests: the 42 migrated invoice PDFs are not fixtures (real data); build 5 synthetic invoice PDFs per vendor layout and golden their extracted lines.
 - **T2 `notify: connector + templates`** — outbox subscriber `notify` with channels `inapp` (table `_ce_notification`, `GET /notifications`, `POST /notifications/read`), `email` (SMTP or Resend via env), `webhook`. Manifest `notifications:` maps event → recipients (role or field) → template. Test: HACCP out-of-range creates in-app + email record; mark-read; retry on 5xx. Doc: `spec/notifications.md`.
 - **T3 `search: /search?q=`** — Postgres `tsvector` over fields marked `searchable`, tenant-scoped, role-filtered, PII-excluded. Test: finds item by SKU and description, not by PII field. Doc: `spec/README.md`.
 - **T4 `reports: csv + pdf output`** — `GET /reports/{name}.csv|.pdf?params`. PDF via a pure-Rust renderer (e.g. `printpdf`/`genpdf`), one portrait template with title, params, table, totals, footer with manifest hash and generated-at. Test: `stock_valuation_by_period` CSV totals equal JSON report; PDF non-empty and contains title. Doc: `spec/README.md`.
@@ -222,7 +359,22 @@ Each item names the repo, the PR title, the test that proves it, and the doc to 
 ### Wednesday 2026-10-21: migration, hardening, contract freeze
 
 **MJCC-workspace**
-- **W1 `migration: v1 → CEngine ETL`** — `tools/migrate_v1.py` reads MJCCv1 **read-only** (pooler session mode or MCP `supabase_query`) and writes staging via the CEngine API (not SQL) so every row is validated and audited. Mapping table in `docs/MIGRATION_MAP.md`: `inventory_items→stock_item+stock_item_detail`, `monthly_inventory→stock_line` (w1..w3 received/pulled → `stock_movement` rows), `inventory_transactions→stock_movement`, `invoices/invoice_items→supplier_invoice(_line)`, `menu_*`, `events→calendar_event`, `user_profiles→staff_member` (no PINs copied; staff re-enrol), `archived_files→document` (45 objects, ~54 MB, copied from the home archive into Supabase `mjcc-archive`, sha256-verified), `budget_*`, `vendors`, `servsafe_certifications→certification`, `flow_assignments→task`, `ai_stack_config/ai_providers→ai_stack_config/ai_provider` (no key values), `ai_usage_logs→ai_usage_log`, `agent_conversations/agent_threads` → provider-service store. The script must be **re-runnable** (upsert on legacy id kept in `provenance.legacy_id`) because the same script performs the final merge at cutover. Reconciliation script prints per-period opening/received/pulled/ending totals old vs new to the cent; differences must be explained in the doc (legacy float rounding cases are known). Run against a **sanitized** copy for CI; run against real v1 read-only once, keep only totals in the report.
+- **W1 `migration: v1 → CEngine ETL`** — `tools/migrate_v1.py` reads a **read-only snapshot/export of MJCCv1** (never live mutable rows; §2c) and writes into the **isolated rehearsal schema** via the CEngine API so every row is validated and audited. Mapping table in `docs/MIGRATION_MAP.md`: `inventory_items→stock_item+stock_item_detail`, `monthly_inventory→stock_line` (w1..w3 received/pulled → `stock_movement` rows), `inventory_transactions→stock_movement`, `invoices/invoice_items→supplier_invoice(_line)`, `menu_*`, `events→calendar_event`, `user_profiles→staff_member` (no PINs copied; staff re-enrol), `archived_files→document` (45 objects, ~54 MB, copied from the home archive into the tenant bucket, sha256-verified), `budget_*`, `vendors`, `servsafe_certifications→certification`, `flow_assignments→task`, `ai_stack_config/ai_providers→ai_stack_config/ai_provider` (no key values), `ai_usage_logs→ai_usage_log`, `agent_conversations/agent_threads` → provider-service store. The script must be **re-runnable** (upsert on legacy id kept in `provenance.legacy_id`) because the same script performs the final merge at cutover.
+  **Rehearsal success gate — every item must pass and be logged:**
+  - row counts, old vs new, per table;
+  - legacy→new ID mapping integrity (every legacy id resolves to exactly one new record; no orphans);
+  - inventory opening/received/pulled/ending reconciliation to the cent, per period and in total;
+  - valuation reconciliation (opening, received, pulled, ending values);
+  - invoice totals (subtotal, discount, tax, fuel, net, stated, delta);
+  - accepted price history (each accepted price matches the legacy accepted price; held observations explained);
+  - menu and history counts (cycles, days, slots, items, meal periods);
+  - user/role mappings (role ladder, location scopes, no missing active staff);
+  - audit/history preservation (counts and the rule that historical acts are attributed, not re-attributed to the migration);
+  - file-reference checks (45 objects, sha256 match, linked document rows resolve);
+  - period-lock semantics (legacy closed/locked periods map to closed/locked periods; no reopen);
+  - rejected/unmapped record report, listing every row the script could not map and why.
+  Record the snapshot time and checksum, and the run log, in `docs/MIGRATION_MAP.md`. Only counts and totals go in git; no customer rows. Expire the rehearsal credentials at the end of the window.
+
 - **W2 `multiuser proof`** — two concurrent pulls on one low-stock line, two concurrent intake merges touching the same item, idempotency replay under load. Record results in `docs/RELIABILITY.md`.
 - **W3 `contract freeze`** — generate `ui/API_CONTRACT.md` from the live OpenAPI; per-screen call map updated in `ui/SCREEN_ACTION_MATRIX.md` (every S00–S27 row gets a CEngine endpoint or an explicit "dropped: reason"). Add the new screens: Receiving, Tasks, Calendar/Shifts, Equipment, Certifications, Purchase Orders, Meal Counts/Waste, Scan.
 - **W4 `readiness board`** — fill the matrix from blueprint §11 in `spec/mjcc-go-live-assessment.md` with real evidence links (PR, test name, CI run URL, staging request id). Every row must say "staging tested: yes" or carry a blocker.
@@ -259,8 +411,10 @@ Each item names the repo, the PR title, the test that proves it, and the doc to 
 
 ## 8. Tools you have
 
-- `supabase` MCP (full control over every project the PAT sees): `supabase_list_projects`, `supabase_list_tables`, `supabase_describe_table`, `supabase_query` (read-only, safe on production), `supabase_execute_sql` (writes; **staging only**).
+- `supabase` MCP (full control over every project the PAT sees): `supabase_list_projects`, `supabase_list_tables`, `supabase_describe_table`, `supabase_query` (read-only, safe on production), `supabase_execute_sql` (writes; **staging and the rehearsal schema only** — never MJCCv1's live schema).
 - `run-staging-test.sh` in `/home/ogdev/CEngine/new-testing-db/` starts `ce-serve` on :8099 against staging and runs the smoke test.
+
+**First artifact of the week:** `spec/SCHEMA_FREEZE.md` (§2b) and the §2c authorisation copied verbatim into `spec/MJCC_REHEARSAL_AUTHORIZATION.md`. Commit both before M1. If either is missing at the Monday end-of-day check, stop and ask the owner.
 - Repos: `/home/ogdev/CEngine/new-testing-db/CEngine`, `/home/ogdev/CEngine/new-testing-db/MJCC-workspace`, legacy read-only `/home/ogdev/CEngine/old-mjcc-db/compute`.
 - Previous assessment with table-by-table evidence: `spec/mjcc-go-live-assessment.md` (this repo).
 
