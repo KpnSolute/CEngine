@@ -1,3 +1,7 @@
+# DRAFT TEMPLATE — AUDITOR MUST REWRITE BEFORE HANDOFF
+
+**Status:** Seed only. This file is not yet the final worker prompt. The migration auditor must first inspect the current repositories, build/update the migration audit matrix and CI gates, then replace this draft with an evidence-based prompt containing the actual remaining implementation gaps. Do not hand this draft directly to Claude Code.
+
 # Claude Code Handoff: implement MJCC historical migration and CEngine migration safety
 
 You are the primary builder for the MJCC historical migration program.
