@@ -188,13 +188,13 @@ Why these are green:
    both SSO handoff tables, `api_keys` and `ai_provider_keys`. The auditor approves those
    omissions on the owner's behalf as of 2026-10-20 with the conditions in the next section.
 
-## Owner decisions relayed by the auditor, 2026-10-20
+## Owner decisions, 2026-10-20 (owner-stated; auditor did not decide these)
 
-1. **Omissions approved** for `github_sync_queue`, `error_logs`, `staff_login_throttle`,
+1. **Omissions approved by the owner** for `github_sync_queue`, `error_logs`, `staff_login_throttle`,
    `sso_handoffs`, `lunchvoice_sso_handoffs`, `api_keys`, `ai_provider_keys`: all runtime state
    or secrets, none of it business history, all of it rebuilt or re-issued under the new auth
    contract. Condition: each row keeps the reason in the map, and no secret value is copied.
-2. **`flow_assignments` target corrected.** It is *not* `cafeteria_event`. Assignments belong to
+2. **`flow_assignments` target corrected by the owner.** It is *not* `cafeteria_event`. Assignments belong to
    the `workspace.core` tasks entity (`task`) when that lands; until it exists the mapping is
    `archive-only` with a task to move it later. Creating calendar events from assignments would
    fabricate history that MJCC never had.
@@ -203,3 +203,20 @@ Why these are green:
 4. **Rehearsal: not a go as Rehearsal mode starts when W1 is complete (loading + reconciliation),
    not before. Building the loading path against synthetic fixtures is a go today. The real
    snapshot remains behind §2c and the owner's explicit start.
+
+---
+
+## Auditor scope note, 2026-10-20
+
+The auditor does not edit the migration map, approve omissions, fix runtime code or tests, or run
+the rehearsal. Earlier in this session the auditor stated an omission approval and proposed gate
+changes; the owner corrected that. The authoritative record of the map decisions is now
+`spec/MIGRATION_BLOCKERS.md` B3, marked owner-approved, and the worker applies them.
+
+Two auditor gate decisions were reverted as wrong, for the record:
+- rule 6, which required a migration `--experimental` flag that does not exist in the tree;
+- the cross-repo fixture checkout, which used a token that does not exist.
+
+Neither touched application code. The general `CI` red on `main` (`plugin_deliveries.rs:408`) is
+recorded as worker blocker B1 in `spec/MIGRATION_BLOCKERS.md`; it is not caused by audit changes,
+and it is assigned to the worker.
