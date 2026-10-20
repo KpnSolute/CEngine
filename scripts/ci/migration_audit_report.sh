@@ -26,7 +26,7 @@ fi
 rows=$(grep -cE '^\| [A-Z][0-9]+ ' "$matrix" || true)
 red=$(grep -E '^\| [A-Z][0-9]+ ' "$matrix" | grep -cE '\*\*red\*\*|\| red' || true)
 partial=$(grep -E '^\| [A-Z][0-9]+ ' "$matrix" | grep -c 'partial' || true)
-green=$(grep -E '^\| [A-Z][0-9]+ ' "$matrix" | grep -cE '\*\*green\*\*|\| green' || true)
+green=$(grep -E '^\| [A-Z][0-9]+ ' "$matrix" | grep -cE '\*\*green\*\*\|\| green|green \(branch\)' || true)
 verdict=$(grep -m1 -iE '^Verdict|Verdict \|' "$matrix" | sed 's/^/  /')
 
 {
