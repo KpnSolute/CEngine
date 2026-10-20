@@ -124,3 +124,37 @@ fn a_schema_without_history_is_refused_until_adopted() {
         "adopting twice is refused"
     );
 }
+
+#[test]
+fn a_schema_installed_at_an_older_version_migrates_forward_to_current() {
+    let Some(url) = url() else { return };
+    let (m, sch, list) = (manifest(), schema(), embedded());
+    let store = TypedPgStore::install_with_migrations(
+        &url,
+        &m,
+        &sch,
+        ce_store_pg::PoolConfig::default(),
+        &list[..1],
+    )
+    .unwrap();
+    assert_eq!(store.migration_plan(&list).unwrap().current, 1);
+
+    let done = store.migrate(&list, "tester").unwrap();
+    assert_eq!(done.pending, vec![(2, "migration_provenance".to_string())]);
+
+    let hist = store.migration_history().unwrap();
+    assert_eq!(hist.len(), 2);
+    assert_eq!(hist[0].applied_by, "install");
+    let step = &hist[1];
+    assert_eq!(
+        (step.version, step.status.as_str(), step.applied_by.as_str()),
+        (2, "applied", "tester")
+    );
+    assert_eq!(
+        step.sha256,
+        list[1].checksum(),
+        "the recorded checksum is the SQL's"
+    );
+    assert_eq!(step.manifest_hash, m.hash);
+    assert_eq!(store.migration_plan(&list).unwrap().current, 2);
+}
