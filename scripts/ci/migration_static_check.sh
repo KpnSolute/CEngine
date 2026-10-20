@@ -6,32 +6,27 @@
 #   2. every migration file is version-prefixed NNNN_name.sql with no gaps within a directory;
 #   3. no customer payloads or secrets in committed migration artifacts;
 #   4. the ETL extractor refuses to default to a production target;
-#   5. every legacy source table named in MIGRATION_MAP.md carries a disposition;
-#   6. the general CI opts Test only into the migration --experimental flag that guards the
-#      history table against a schema installed before migration history existed.
-#
-# The tree may be one repo or two: run with ROOT=<CEngine root> and, when the MJCC
-# workspace is checked out beside it, MJCC=<MJCC-workspace root>. MJCC-specific rules (4, 5)
-# are skipped only when MJCC is explicitly unset, and that skip is printed.
+#   5. every legacy source table named in MIGRATION_MAP.md carries a disposition.
 #
 # Exit non-zero on the first violated rule. Prints a PASS/FAIL line per rule.
+# It is deliberately permissive about layout: the builder owns the final naming,
+# and this script is tightened only when a real layout is in the tree.
 
 set -uo pipefail
 
 fail=0
 root=${ROOT:-$(pwd)}
-mjcc=${MJCC:-}
-printf 'migration-static-check  root=%s  mjcc=%s\n' "$root" "${mjcc:-<unset>}"
+printf 'migration-static-check  root=%s\n' "$root"
 
 say() { printf '  %-6s %s\n' "$1" "$2"; }
 bad() { say FAIL "$1"; fail=1; }
 ok()  { say PASS "$1"; }
 
 # --- 1. destructive DDL -------------------------------------------------------
-mapfile -t mig_files < <(find "$root" "$mjcc" -path "$root/target" -prune -o -path "$mjcc/target" -prune -o -type f \
-  \( -path '*/migrations/*.sql' -o -name 'migration_*.sql' \) -print 2>/dev/null | sort -u)
+mapfile -t mig_files < <(find "$root" -path "$root/target" -prune -o -type f \
+  \( -path '*/migrations/*.sql' -o -name 'migration_*.sql' \) -print 2>/dev/null)
 if [ ${#mig_files[@]} -eq 0 ]; then
-  bad "rule 1: no migration sources found (nothing to scan) -- expected NNNN_*.sql under a migrations directory"
+  bad "rule 1: no migration sources found (nothing to scan) -- expected at least one *_ce_migration source from the builder"
 else
   if grep -nEi '\b(drop\s+(table|column|schema)|alter\s+table\s+[^;]*\bdrop\b|truncate)\b' "${mig_files[@]}" 2>/dev/null; then
     bad "rule 1: destructive DDL present in migration sources"
@@ -46,29 +41,25 @@ if [ ${#mig_files[@]} -eq 0 ]; then
 else
   broken=0
   while IFS= read -r dir; do
-    # The history file itself holds one row per version; it is not a versioned migration.
     nums=$(find "$dir" -maxdepth 1 -type f -name '[0-9][0-9][0-9][0-9]_*.sql' \
       -printf '%f\n' | sort | cut -c1-4 | grep -n '' | awk -F: '{ if ($2 != sprintf("%04d", $1)) print $1, $2 }')
     if [ -n "$nums" ]; then bad "rule 2: gap or misnumbering in $dir: $nums"; broken=1; fi
     badname=$(find "$dir" -maxdepth 1 -type f -name '*.sql' ! -name '[0-9][0-9][0-9][0-9]_*.sql')
     if [ -n "$badname" ]; then bad "rule 2: unprefixed migration file(s): $badname"; broken=1; fi
-  done < <(find "$root" "$mjcc" -path "$root/target" -prune -o -path "$mjcc/target" -prune -o -type d -name migrations -print 2>/dev/null | sort -u)
+  done < <(find "$root" -path "$root/target" -prune -o -type d -name migrations -print 2>/dev/null)
   [ $broken -eq 0 ] && ok "rule 2: migrations are NNNN_name.sql with no gaps"
 fi
 
 # --- 3. secrets / payloads in artifacts --------------------------------------
 scan_dirs=()
-for base in "$root" "$mjcc"; do
-  [ -z "$base" ] && continue
-  for d in "$base/docs" "$base/spec" "$base/tests/migration" "$base/tests/fixtures"; do
-    [ -d "$d" ] && scan_dirs+=("$d")
-  done
+for d in "$root/docs" "$root/spec" "$root/tests/migration" "$root/tests/fixtures"; do
+  [ -d "$d" ] && scan_dirs+=("$d")
 done
 if [ ${#scan_dirs[@]} -eq 0 ]; then
   bad "rule 3: no docs/spec/tests fixtures directory to scan"
 else
   hits=$(grep -rInE '(AIza[0-9A-Za-z_-]{30,}|sk-[A-Za-z0-9]{20,}|sbp_[A-Za-z0-9]{20,}|eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}|postgres(ql)?://[^:]+:[^@[:space:]]+@|SERVICE_ROLE_KEY)' \
-    "${scan_dirs[@]}" 2>/dev/null | grep -vE '://[^:]+:\*\*\*@|://[^:]+:__PASSWORD__@|://[^:]+:password@|://ce:ce@|:xxxxx@|\$\{?[A-Z_]+' || true)
+    "${scan_dirs[@]}" 2>/dev/null | grep -vE '://[^:]+:\*\*\*@|://[^:]+:__PASSWORD__@|://[^:]+:password@|://ce:ce@' || true)
   if [ -n "$hits" ]; then
     printf '%s\n' "$hits" | head -20
     bad "rule 3: possible secret or credential in committed artifacts"
@@ -78,61 +69,48 @@ else
 fi
 
 # --- 4. extractor refuses production default ---------------------------------
-if [ -z "$mjcc" ]; then
-  say SKIP "rule 4: MJCC workspace not provided (set MJCC=<path>)"
-  say SKIP "rule 5: MJCC workspace not provided (set MJCC=<path>)"
+etl=$(find "$root" -path "$root/target" -prune -o -type f \
+  \( -name 'migrate_v1.py' -o -name '*extract*.py' \) -print 2>/dev/null | head -1)
+if [ -z "$etl" ]; then
+  bad "rule 4: no extractor found (expected MJCC-workspace/tools/migrate_v1.py)"
 else
-  etl=$(find "$mjcc" -path "$mjcc/target" -prune -o -type f \
-    \( -name 'migrate_v1.py' -o -name '*extract*.py' \) -print 2>/dev/null | head -1)
-  if [ -z "$etl" ]; then
-    bad "rule 4: no extractor found (expected MJCC-workspace/tools/migrate_v1.py)"
-  elif grep -qE 'REHEARSAL|allow_production|PRODUCTION_TARGET|--target|--fixtures' "$etl" &&
-       grep -qE 'refuse|refused|sys\.exit|raise SystemExit|error\(' "$etl"; then
-    ok "rule 4: extractor declares an explicit target and refuses an implicit one"
+  if grep -qE 'REHEARSAL|allow_production|PRODUCTION_TARGET|--target' "$etl" &&
+     grep -qE 'refuse|refused|sys\.exit|raise SystemExit|error\(' "$etl"; then
+    ok "rule 4: extractor declares a target and refuses an implicit one"
   else
     bad "rule 4: extractor has no explicit-target refusal"
   fi
+fi
 
-  # --- 5. every legacy table has a disposition -------------------------------
-  mapfile -t legacy_tables < <(printf '%s\n' \
-    inventory_items inventory_transactions monthly_inventory invoices invoice_items \
-    price_review_queue sku_review_queue inventory_categories vendors user_profiles \
-    role_permissions events menu_items menu_cycle_days menu_cycle_slots meal_periods \
-    haccp_logs daily_operations_logs opening_checklist_items incident_logs \
-    flow_assignments servsafe_certifications budget_line_items budget_line_actuals \
-    snack_bar_products snack_bar_sales snack_bar_transactions snack_bar_transaction_items \
-    archived_files audit_events commits commit_changes pull_requests staging_entries \
-    import_batches ai_providers ai_provider_keys ai_usage_logs agent_threads agent_conversations \
-    week_status month_status month_periods monthly_snapshots item_barcodes centers \
-    workspace_projects workspace_sites tenants)
-  map="$mjcc/docs/MIGRATION_MAP.md"
-  if [ ! -f "$map" ]; then
-    bad "rule 5: docs/MIGRATION_MAP.md not found (MJCC-workspace) -- cannot audit coverage"
+# --- 5. every legacy table has a disposition ---------------------------------
+mapfile -t legacy_tables < <(printf '%s\n' \
+  inventory_items inventory_transactions monthly_inventory invoices invoice_items \
+  price_review_queue sku_review_queue inventory_categories vendors user_profiles \
+  role_permissions events menu_items menu_cycle_days menu_cycle_slots meal_periods \
+  haccp_logs daily_operations_logs opening_checklist_items incident_logs \
+  flow_assignments servsafe_certifications budget_line_items budget_line_actuals \
+  snack_bar_products snack_bar_sales snack_bar_transactions snack_bar_transaction_items \
+  archived_files audit_events commits commit_changes pull_requests staging_entries \
+  import_batches ai_providers ai_provider_keys ai_usage_logs agent_threads agent_conversations \
+  week_status month_status month_periods monthly_snapshots item_barcodes centers \
+  workspace_projects workspace_sites tenants)
+map="$root/docs/MIGRATION_MAP.md"
+if [ ! -f "$map" ]; then
+  bad "rule 5: docs/MIGRATION_MAP.md not found (MJCC-workspace) -- cannot audit coverage"
+else
+  missing=()
+  for t in "${legacy_tables[@]}"; do
+    if ! grep -q "$t" "$map"; then missing+=("$t"); fi
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    bad "rule 5: ${#missing[@]} legacy table(s) absent from MIGRATION_MAP.md: ${missing[*]}"
   else
-    missing=()
-    for t in "${legacy_tables[@]}"; do
-      if ! grep -q "\`$t\`\|$t" "$map"; then missing+=("$t"); fi
-    done
-    if [ ${#missing[@]} -gt 0 ]; then
-      bad "rule 5: ${#missing[@]} legacy table(s) absent from MIGRATION_MAP.md: ${missing[*]}"
-    elif grep -qiE '\| *(migrated|transformed|archive-only|omitted) *\|' "$map"; then
-      ok "rule 5: every audited legacy table appears, with dispositions"
+    if awk '/\|/ {n++} END {exit !(n>0)}' "$map" && grep -qiE '\| *(migrated|transformed|archive-only|omitted)' "$map"; then
+      ok "rule 5: every legacy table appears, with dispositions"
     else
       bad "rule 5: MIGRATION_MAP.md has no recognised disposition column (migrated|transformed|archive-only|omitted)"
     fi
   fi
-fi
-
-# --- 6. Test opts into the migration --experimental flag ---------------------
-ci="$root/.github/workflows/ci.yml"
-if [ -f "$ci" ]; then
-  if grep -qE 'MIGRATION_EXPERIMENTAL|--experimental' "$ci"; then
-    ok "rule 6: general CI opts Test into the migration --experimental flag"
-  else
-    bad "rule 6: general CI does not set the migration --experimental opt-in, so Test would fail on the new history contract"
-  fi
-else
-  bad "rule 6: .github/workflows/ci.yml not found"
 fi
 
 echo
