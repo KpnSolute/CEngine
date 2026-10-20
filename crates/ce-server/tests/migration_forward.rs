@@ -247,3 +247,55 @@ fn a_binary_list_that_is_not_in_order_is_rejected() {
         Err(MigrateError::BadList(_))
     ));
 }
+
+#[test]
+fn a_dash_dash_inside_a_string_does_not_hide_destructive_sql() {
+    assert!(is_destructive("SELECT '--'; DROP TABLE x;"));
+    assert!(is_destructive("SELECT \"a--b\"; TRUNCATE t;"));
+    assert!(is_destructive(
+        "DO $$ BEGIN EXECUTE 'drop table x'; END $$;"
+    ));
+    assert!(is_destructive("/* note */ DROP /* inline */ TABLE x"));
+    assert!(!is_destructive(
+        "/* DROP TABLE x */ SELECT 1; -- truncate t"
+    ));
+    assert!(!is_destructive(
+        "/* outer /* nested drop */ still a comment */ SELECT 1"
+    ));
+}
+
+#[test]
+fn plan_includes_the_schema_expanded_sql_of_each_pending_migration() {
+    let Some(url) = url() else { return };
+    let (store, sch) = previous(&url);
+    let plan = store.migration_plan(&embedded()).unwrap();
+    assert_eq!(plan.statements.len(), plan.pending.len());
+    assert!(plan.statements[0].contains(&format!(r#""{sch}"."migration_runs""#)));
+    assert!(!plan.statements[0].contains("__SCHEMA__"));
+}
+
+#[test]
+fn two_concurrent_migrators_apply_each_version_once_and_neither_fails() {
+    let Some(url) = url() else { return };
+    let (store, _) = previous(&url);
+    let list = embedded();
+    let (a, b) = std::thread::scope(|s| {
+        let x = s.spawn(|| store.migrate(&list, "first"));
+        let y = s.spawn(|| store.migrate(&list, "second"));
+        (x.join().unwrap(), y.join().unwrap())
+    });
+    assert!(a.is_ok(), "{a:?}");
+    assert!(b.is_ok(), "{b:?}");
+    let hist = store.migration_history().unwrap();
+    assert_eq!(
+        hist.iter().filter(|h| h.status == "failed").count(),
+        0,
+        "{hist:?}"
+    );
+    let applied: Vec<u32> = hist
+        .iter()
+        .filter(|h| h.status == "applied")
+        .map(|h| h.version)
+        .collect();
+    assert_eq!(applied, vec![1, 2], "each version recorded exactly once");
+}

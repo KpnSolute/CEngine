@@ -132,6 +132,8 @@ pub struct Plan {
     pub current: u32,
     /// Versions still to apply, in order.
     pub pending: Vec<(u32, String)>,
+    /// The schema-expanded SQL of each pending version, in the same order, for review.
+    pub statements: Vec<String>,
 }
 
 /// One row of the history, for display and tests.
@@ -179,15 +181,93 @@ fn check_list(list: &[Migration]) -> Result<(), MigrateError> {
     Ok(())
 }
 
-/// True when the SQL contains prohibited destructive statements (`drop ...`, `truncate`).
-/// Comments are ignored; the match is on whole words so a column named `dropped_at` is fine.
-pub fn is_destructive(sql: &str) -> bool {
-    let mut cleaned = String::with_capacity(sql.len());
-    for line in sql.lines() {
-        cleaned.push_str(line.split("--").next().unwrap_or(""));
-        cleaned.push(' ');
+/// Removes SQL comments (`-- ...` and `/* ... */`, which nest in Postgres) without touching
+/// quoted text: a `--` inside a string literal, quoted identifier or dollar-quoted body is not a
+/// comment. Everything that is not a real comment is kept, including string contents, so the
+/// destructive scan below errs on the side of refusing.
+fn strip_comments(sql: &str) -> String {
+    let b = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let next = b.get(i + 1).copied();
+        if c == b'-' && next == Some(b'-') {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if c == b'/' && next == Some(b'*') {
+            let mut depth = 1;
+            i += 2;
+            while i < b.len() && depth > 0 {
+                if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                    depth += 1;
+                    i += 2;
+                } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(' ');
+        } else if c == b'\'' || c == b'"' {
+            // A quoted string or identifier; a doubled quote is an escaped quote.
+            let q = c;
+            let start = i;
+            i += 1;
+            while i < b.len() {
+                if b[i] == q {
+                    if b.get(i + 1) == Some(&q) {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str(&sql[start..i]);
+        } else if c == b'$' {
+            // A dollar-quoted body: $tag$ ... $tag$ (the tag may be empty).
+            let rest = &sql[i..];
+            let tag_len = rest[1..]
+                .find('$')
+                .filter(|n| {
+                    rest[1..=*n]
+                        .bytes()
+                        .all(|x| x.is_ascii_alphanumeric() || x == b'_')
+                })
+                .map(|n| n + 2);
+            match tag_len {
+                Some(n) => {
+                    let tag = &rest[..n];
+                    let end = rest[n..]
+                        .find(tag)
+                        .map(|e| i + n + e + n)
+                        .unwrap_or(sql.len());
+                    out.push_str(&sql[i..end]);
+                    i = end;
+                }
+                None => {
+                    out.push('$');
+                    i += 1;
+                }
+            }
+        } else {
+            let ch = sql[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
     }
-    let lower = cleaned.to_ascii_lowercase();
+    out
+}
+
+/// True when the SQL contains prohibited destructive statements (`drop ...`, `truncate`).
+/// Real comments are ignored; the match is on whole words, so a column named `dropped_at` is
+/// fine. Quoted text is scanned too: this guard refuses when unsure.
+pub fn is_destructive(sql: &str) -> bool {
+    let lower = strip_comments(sql).to_ascii_lowercase();
     let mut word = String::new();
     let mut words: Vec<String> = Vec::new();
     for c in lower.chars() {
@@ -299,9 +379,15 @@ impl TypedPgStore {
                 return Err(MigrateError::Destructive { version: m.version });
             }
         }
+        let statements = list
+            .iter()
+            .filter(|m| m.version > highest)
+            .map(|m| m.sql.replace("__SCHEMA__", &self.schema))
+            .collect();
         Ok(Plan {
             current: highest,
             pending,
+            statements,
         })
     }
 
@@ -317,6 +403,7 @@ impl TypedPgStore {
         Ok(Plan {
             current: plan.current,
             pending: done,
+            statements: plan.statements,
         })
     }
 
@@ -326,6 +413,23 @@ impl TypedPgStore {
         let mut conn = self.lock()?;
         let outcome = (|| -> Result<(), postgres::Error> {
             let mut tx = conn.transaction()?;
+            // One migrator at a time per schema. A second run waits here, then sees the version
+            // already applied and skips it instead of repeating the DDL and recording a failure.
+            tx.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                &[&format!("{}/_ce_migration", self.schema)],
+            )?;
+            let already = tx.query_opt(
+                &format!(
+                    r#"SELECT 1 FROM "{}"."_ce_migration"
+                       WHERE version = $1 AND status = 'applied'"#,
+                    self.schema
+                ),
+                &[&(m.version as i32)],
+            )?;
+            if already.is_some() {
+                return tx.commit();
+            }
             tx.batch_execute(&sql)?;
             tx.execute(
                 &format!(

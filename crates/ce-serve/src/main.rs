@@ -721,8 +721,12 @@ fn migrate_command(
             if plan.pending.is_empty() {
                 println!("nothing pending");
             }
-            for (v, name) in plan.pending {
+            for ((v, name), sql) in plan.pending.iter().zip(&plan.statements) {
                 println!("pending {v:04} {name}");
+                println!(
+                    "--- {v:04} {name} on schema {schema}\n{}\n---",
+                    sql.trim_end()
+                );
             }
             Ok(())
         }
