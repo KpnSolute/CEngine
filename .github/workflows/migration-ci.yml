@@ -1,0 +1,247 @@
+name: Migration CI
+
+# Auditor gate set for the MJCC historical migration (docs/MIGRATION_AUDIT_MATRIX.md).
+# Runs on every PR and on main. Deliberately separate from the general CI workflow so a red
+# migration gate cannot be hidden inside a green general build.
+#
+# These gates start RED. The builder makes them green with implementation and tests; the
+# auditor re-scores docs/MIGRATION_AUDIT_MATRIX.md from the evidence. No gate may be
+# skipped or weakened to reach green: if a gate is wrong, open a defect against it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: migration-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CE_TEST_DATABASE_URL: postgresql://ce:ce@127.0.0.1:5432/ce_test
+  CE_REQUIRE_DB: '1'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Static rules: no destructive DDL, ordered NNNN migrations, no secrets in
+  #    artifacts, explicit target in the extractor, every legacy table mapped.
+  # ---------------------------------------------------------------------------
+  migration-static-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static migration rules
+        run: bash scripts/ci/migration_static_check.sh
+
+  # ---------------------------------------------------------------------------
+  # 2. Fresh install still works, then migrate is a no-op on a current schema.
+  # ---------------------------------------------------------------------------
+  fresh-install-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ce
+          POSTGRES_PASSWORD: ce
+          POSTGRES_DB: ce_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ce -d ce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - name: Fresh install then migrate (no-op)
+        run: cargo test -p ce-server --test migration_install -- --nocapture
+
+  # ---------------------------------------------------------------------------
+  # 3. Forward migration: order, checksum, gap, ahead-of-binary, destructive refusal,
+  #    --plan writes nothing.
+  # ---------------------------------------------------------------------------
+  forward-migration-test:
+    runs-on: ubuntu-latest
+    needs: fresh-install-test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ce
+          POSTGRES_PASSWORD: ce
+          POSTGRES_DB: ce_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ce -d ce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - name: Forward migration contract
+        run: cargo test -p ce-server --test migration_forward -- --nocapture
+
+  # ---------------------------------------------------------------------------
+  # 4. Synthetic fixture ETL: an offline, deterministic migration run over fixtures.
+  # ---------------------------------------------------------------------------
+  migration-fixture-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ce
+          POSTGRES_PASSWORD: ce
+          POSTGRES_DB: ce_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ce -d ce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cengine
+      - uses: actions/checkout@v4
+        with:
+          repository: KpnWorld/MJCC-workspace
+          path: mjcc
+          token: ${{ secrets.MJCC_WORKSPACE_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r mjcc/tools/requirements-migration.txt
+      - name: Fixture ETL
+        run: python mjcc/tools/migrate_v1.py --fixtures tests/migration/fixtures --target "$CE_TEST_DATABASE_URL" --check
+        working-directory: mjcc
+
+  # ---------------------------------------------------------------------------
+  # 5. Reconciliation gates over the fixture run.
+  # ---------------------------------------------------------------------------
+  reconciliation-test:
+    runs-on: ubuntu-latest
+    needs: migration-fixture-test
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - name: Reconciliation
+        run: cargo test -p ce-server --test migration_reconciliation -- --nocapture
+
+  # ---------------------------------------------------------------------------
+  # 6. A second run must not duplicate; it must resolve the same target IDs.
+  # ---------------------------------------------------------------------------
+  migration-idempotency-test:
+    runs-on: ubuntu-latest
+    needs: migration-fixture-test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ce
+          POSTGRES_PASSWORD: ce
+          POSTGRES_DB: ce_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ce -d ce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - name: Idempotent re-run and delta
+        run: cargo test -p ce-server --test migration_idempotency -- --nocapture
+
+  # ---------------------------------------------------------------------------
+  # 7. Two synthetic tenants cannot see each other, including migration artifacts.
+  # ---------------------------------------------------------------------------
+  tenant-isolation-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ce
+          POSTGRES_PASSWORD: ce
+          POSTGRES_DB: ce_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ce -d ce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - name: Tenant isolation
+        run: cargo test -p ce-server --test migration_tenant_isolation -- --nocapture
+
+  # ---------------------------------------------------------------------------
+  # 8. Privileges: reader SELECT only, writer limited to its schema, runtime separate.
+  # ---------------------------------------------------------------------------
+  schema-security-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ce
+          POSTGRES_PASSWORD: ce
+          POSTGRES_DB: ce_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ce -d ce_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - name: Privilege boundaries
+        run: cargo test -p ce-server --test migration_privileges -- --nocapture
+
+  # ---------------------------------------------------------------------------
+  # 9. Performance: the fixture dataset migrates within a recorded ceiling.
+  # ---------------------------------------------------------------------------
+  migration-performance-test:
+    runs-on: ubuntu-latest
+    needs: migration-fixture-test
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - name: Migration performance ceiling
+        run: cargo test --release -p ce-server --test migration_performance -- --nocapture
+
+  # ---------------------------------------------------------------------------
+  # 10. Report: counts the audit matrix and fails while any required row is red.
+  # ---------------------------------------------------------------------------
+  migration-audit-report:
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - migration-static-check
+      - fresh-install-test
+      - forward-migration-test
+      - migration-fixture-test
+      - reconciliation-test
+      - migration-idempotency-test
+      - tenant-isolation-test
+      - schema-security-test
+      - migration-performance-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit matrix summary
+        run: bash scripts/ci/migration_audit_report.sh
+      - name: Gate results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "### Gate results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| gate | result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "$RESULTS" | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(f"| {k} | {v[\"result\"]} |") for k,v in d.items()]' >> "$GITHUB_STEP_SUMMARY"
