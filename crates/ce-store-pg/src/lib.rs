@@ -17,6 +17,7 @@
 //! from user input.
 
 mod blobs;
+pub mod migrations;
 mod pool;
 mod staff;
 mod tls;

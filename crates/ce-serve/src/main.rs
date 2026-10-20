@@ -546,9 +546,9 @@ fn run() -> Result<(), String> {
         return plugin_command(&args[1..]);
     }
     let cmd = args.first().cloned().unwrap_or_else(|| "serve".into());
-    if !matches!(cmd.as_str(), "serve" | "install" | "files") {
+    if !matches!(cmd.as_str(), "serve" | "install" | "files" | "migrate") {
         return Err(format!(
-            "unknown command `{cmd}` (use `install` or `serve`)"
+            "unknown command `{cmd}` (use `install`, `migrate` or `serve`)"
         ));
     }
     let url = var("CE_DATABASE_URL")?;
@@ -592,6 +592,9 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("sweep failed: {e:?}"))?;
         println!("deleted {n} unreferenced file(s)");
         return Ok(());
+    }
+    if cmd == "migrate" {
+        return migrate_command(&args[1..], &url, &manifest, &schema, pool);
     }
     if cmd == "install" {
         let store = TypedPgStore::install_with(&url, &manifest, &schema, pool.clone())
@@ -668,6 +671,77 @@ fn run() -> Result<(), String> {
     drop(rt);
     drop(app);
     Ok(())
+}
+
+/// `ce-serve migrate [--plan] [--adopt]`: applies the migrations this binary carries to an
+/// installed schema (forward-only, ordered, checksum-pinned). `--plan` prints what is pending
+/// and writes nothing. `--adopt` records the baseline for a schema installed before migration
+/// history existed; it is never done implicitly.
+fn migrate_command(
+    flags: &[String],
+    url: &str,
+    manifest: &ce_manifest::Manifest,
+    schema: &str,
+    pool: ce_store_pg::PoolConfig,
+) -> Result<(), String> {
+    use ce_store_pg::migrations::{embedded, MigrateError};
+    let mut plan_only = false;
+    let mut adopt = false;
+    for f in flags {
+        match f.as_str() {
+            "--plan" => plan_only = true,
+            "--adopt" => adopt = true,
+            other => return Err(format!("unknown flag `{other}` (use --plan or --adopt)")),
+        }
+    }
+    if plan_only && adopt {
+        return Err("--plan writes nothing, so it cannot be combined with --adopt".into());
+    }
+    if !schema_exists(url, &pool.tls, schema)? {
+        return Err(format!(
+            "schema {schema} does not exist (run `ce-serve install` first)"
+        ));
+    }
+    let store = TypedPgStore::open_with(url, manifest, schema, pool)
+        .map_err(|e| format!("cannot open schema {schema}: {e:?}"))?;
+    let list = embedded();
+    let actor = std::env::var("CE_MIGRATE_ACTOR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "ce-serve".into());
+    if adopt {
+        store
+            .adopt_migration_baseline(&list, &actor)
+            .map_err(|e| e.to_string())?;
+        println!("schema {schema}: baseline (version 1) recorded");
+    }
+    match store.migration_plan(&list) {
+        Ok(plan) if plan_only => {
+            println!("schema {schema}: at version {}", plan.current);
+            if plan.pending.is_empty() {
+                println!("nothing pending");
+            }
+            for (v, name) in plan.pending {
+                println!("pending {v:04} {name}");
+            }
+            Ok(())
+        }
+        Ok(_) => {
+            let done = store.migrate(&list, &actor).map_err(|e| e.to_string())?;
+            if done.pending.is_empty() {
+                println!(
+                    "schema {schema}: already at version {} (nothing to do)",
+                    done.current
+                );
+            }
+            for (v, name) in done.pending {
+                println!("applied {v:04} {name}");
+            }
+            Ok(())
+        }
+        Err(MigrateError::NoHistory) => Err(MigrateError::NoHistory.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Resolves on Ctrl-C or, on Unix, SIGTERM (what Render and Docker send to stop a service).
