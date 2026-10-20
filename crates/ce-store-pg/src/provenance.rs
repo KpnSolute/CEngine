@@ -159,7 +159,9 @@ impl TypedPgStore {
             .map_err(db)?;
         let entity: String = r.get(1);
         if entity != target_entity {
-            return Err(StoreError::Constraint("source id already maps to another entity"));
+            return Err(StoreError::Constraint(
+                "source id already maps to another entity",
+            ));
         }
         Ok(Mapped {
             target_id: r.get(0),
@@ -194,7 +196,15 @@ impl TypedPgStore {
                        VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5, $6, $7, 'error')"#,
                     self.schema
                 ),
-                &[&tenant, &run, &source_table, &source_id, &code, &safe_message, &hash],
+                &[
+                    &tenant,
+                    &run,
+                    &source_table,
+                    &source_id,
+                    &code,
+                    &safe_message,
+                    &hash,
+                ],
             )
             .map_err(db)?;
         Ok(())
