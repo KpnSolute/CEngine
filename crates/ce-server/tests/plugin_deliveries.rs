@@ -64,8 +64,29 @@ fn build(url: &str, m: Value, clock: Arc<AtomicU64>, provider: Arc<Fake>) -> Rou
     router(st)
 }
 
+/// The store closes its connections on drop, which blocks on its own runtime. Dropped on a
+/// runtime thread (as happens when an assertion panics) that aborts the process and hides every
+/// other result, so the drop always runs on a thread of its own.
+#[derive(Clone)]
+struct Off(Option<Router>);
+
+impl std::ops::Deref for Off {
+    type Target = Router;
+    fn deref(&self) -> &Router {
+        self.0.as_ref().unwrap()
+    }
+}
+
+impl Drop for Off {
+    fn drop(&mut self) {
+        if let Some(app) = self.0.take() {
+            let _ = std::thread::spawn(move || drop(app)).join();
+        }
+    }
+}
+
 struct Api {
-    app: Router,
+    app: Off,
     n: u32,
     role: &'static str,
     changeset: Option<String>,
@@ -90,7 +111,9 @@ impl Api {
         }
         let res = self
             .app
+            .0
             .clone()
+            .unwrap()
             .oneshot(
                 req.body(match body {
                     Some(b) => Body::from(b.to_string()),
@@ -107,12 +130,23 @@ impl Api {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
     }
+    /// Every record, following the page cursor: one page of an unsorted list is not the set.
     async fn list(&mut self, entity: &str) -> Vec<Value> {
-        let (s, v) = self
-            .call("GET", &format!("/v1/{INST}/{entity}?limit=100"), None)
-            .await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        v["data"].as_array().unwrap().clone()
+        let mut out = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut uri = format!("/v1/{INST}/{entity}?limit=100");
+            if let Some(a) = &after {
+                uri.push_str(&format!("&after={a}"));
+            }
+            let (s, v) = self.call("GET", &uri, None).await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+            out.extend(v["data"].as_array().unwrap().iter().cloned());
+            match v["meta"]["next"].as_str() {
+                Some(n) => after = Some(n.to_string()),
+                None => return out,
+            }
+        }
     }
 }
 
@@ -231,7 +265,7 @@ async fn rig() -> Option<Rig> {
         .await
         .unwrap();
     let mk = |role| Api {
-        app: app.clone(),
+        app: Off(Some(app.clone())),
         n: 0,
         role,
         changeset: None,
