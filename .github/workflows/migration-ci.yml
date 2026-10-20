@@ -105,20 +105,17 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: cengine
-      - uses: actions/checkout@v4
-        with:
-          repository: KpnWorld/MJCC-workspace
-          path: mjcc
-          token: ${{ secrets.MJCC_WORKSPACE_TOKEN || github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r mjcc/tools/requirements-migration.txt
       - name: Fixture ETL
-        run: python mjcc/tools/migrate_v1.py --fixtures tests/migration/fixtures --target "$CE_TEST_DATABASE_URL" --check
-        working-directory: mjcc
+        working-directory: tools
+        run: |
+          # --check and the unit tests use the standard library only; psycopg is
+          # needed once the loader exists.
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          python migrate_v1.py --fixtures ../tests/migration/fixtures --check \
+            --target "postgresql://ce:ce@127.0.0.1:5432/ce_test"
 
   # ---------------------------------------------------------------------------
   # 5. Reconciliation gates over the fixture run.
