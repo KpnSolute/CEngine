@@ -244,11 +244,15 @@ The artifacts may contain counts, totals, hashes, statuses and test evidence. Th
 
 ## 6. Third deliverable: prompt for Claude Code
 
-After the audit matrix and CI skeleton exist, create:
+After the audit matrix and CI skeleton exist, **you, the auditor, own the final worker prompt**.
+
+Create or replace:
 
 spec/CLAUDE_MIGRATION_IMPLEMENTATION_PROMPT.md
 
-This is the prompt the owner will hand directly to Claude Code.
+A draft may already exist in the repository. Treat it only as a seed/reference. **Do not hand that draft to Claude unchanged.** Rewrite it from your actual audit findings, current CI gates, current repository state, and the remaining red gaps.
+
+This final auditor-authored file is the prompt the owner will hand directly to Claude Code.
 
 It must be implementation-ready, not motivational prose.
 
@@ -392,8 +396,8 @@ The auditor must not approve production cutover. Production cutover remains a se
 3. Check for QUESTIONS_TOPOLOGY; use it only as a resolution checklist.
 4. Produce migration audit matrix.
 5. Build migration CI skeleton/jobs.
-6. Produce the Claude Code implementation prompt.
-7. Hand the prompt to Claude.
+6. Rewrite the draft Claude prompt from the actual audit findings and current red CI gaps.
+7. Return the final auditor-authored prompt to the owner for handoff to Claude.
 8. Audit Claude's branch/PR.
 9. Keep CI red until the implementation truly satisfies the contract.
 
