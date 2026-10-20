@@ -20,6 +20,7 @@ mod blobs;
 pub mod migrations;
 mod pool;
 pub mod privileges;
+pub mod provenance;
 mod staff;
 mod tls;
 mod typed;
