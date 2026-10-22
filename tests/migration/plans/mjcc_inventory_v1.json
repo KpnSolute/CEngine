@@ -42,6 +42,18 @@
      "fields": {"vendor_sku": "sku", "description": "description", "qty": "quantity_shipped", "unit_price": "unit_price"},
      "refs": [{"target": "invoice", "source": "invoice_id", "table": "invoices"}],
      "transforms": {"line_no": {"ordinal": {"within": "invoice_id"}}},
-     "ignore": ["extended_price"]}
+     "ignore": ["extended_price"]},
+    {"source": "price_review_queue", "entity": "price_observation",
+     "fields": {"observed_price": "observed_price", "previous_price": "previous_price",
+                "applied_price": "applied_price", "source": "source_file"},
+     "derive": {"period_id": {"find": {"table": "month_periods",
+                                       "match": {"month": {"col": "month", "add": 1}, "year": "year"},
+                                       "field": "id"}}},
+     "refs": [{"target": "line", "table": "monthly_inventory", "by": {"item_id": "item_id", "period_id": "period_id"}}],
+     "transforms": {"decision": {"map": {"from": "status", "values": {
+        "auto_applied": "apply", "applied": "apply", "kept": "hold", "pending": "hold", "dismissed": "skip"}}}},
+     "state_from": "status",
+     "ignore": ["sku", "description", "week", "invoice_number", "staging_entry_id", "change_pct",
+                "reason", "created_by", "resolved_by", "resolved_at", "created_at"]}
   ]
 }

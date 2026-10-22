@@ -810,7 +810,14 @@ impl TypedPgStore {
         }
     }
 
-    fn set_state_on(
+    /// Whether `entity` declares `state` among its states.
+    pub(crate) fn declares_state(&self, entity: &str, state: &str) -> bool {
+        self.manifest.value["entities"][entity]["state"]["states"]
+            .get(state)
+            .is_some()
+    }
+
+    pub(crate) fn set_state_on(
         &self,
         c: &mut impl GenericClient,
         scope: &TenantScope,

@@ -398,6 +398,7 @@ fn the_fixture_loads_parents_then_children_and_nothing_is_dropped() {
         ("inventory_transactions", 3),
         ("invoices", 2),
         ("invoice_items", 3),
+        ("price_review_queue", 3),
     ] {
         let c = &report[table];
         assert_eq!((c.written, c.rejected), (n, 0), "{table}: {c:?}");
@@ -783,4 +784,92 @@ fn invoices_reconcile_per_invoice_and_line_totals_match_to_the_cent() {
     assert!(o.pass, "legacy lines {legacy_lines} engine {engine_lines}");
     let _ = passes;
     assert_eq!(e.count("supplier_invoice_line"), 3);
+}
+
+#[test]
+fn price_history_keeps_state_decision_and_prices() {
+    let Some(url) = url() else { return };
+    let e = Env::with(&url, &inventory_manifest());
+    let fx = read_json("tests/migration/fixtures/normal_month.json");
+    let run = e.run("rehearsal");
+    e.s().migration_set_run_status(&run, "running").unwrap();
+    load(&e, &run, &fx["tables"]);
+    e.s().migration_set_run_status(&run, "reconciling").unwrap();
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    let rows = fx["tables"]["price_review_queue"].as_array().unwrap();
+    // Count by status: the legacy status is the engine state, row for row.
+    for status in ["applied", "pending", "dismissed", "auto_applied", "kept"] {
+        let legacy = rows.iter().filter(|r| r["status"] == status).count();
+        let engine: i64 = c
+            .query_one(
+                &format!(
+                    r#"SELECT count(*) FROM "{}".price_observation WHERE status = $1"#,
+                    e.schema
+                ),
+                &[&status],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(engine as usize, legacy, "status {status}");
+    }
+    // Each row lands on the line of its item and its month (legacy months count from 0).
+    for r in rows {
+        let sid = e
+            .s()
+            .migration_lookup(T, "mjcc", "price_review_queue", r["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let row = c
+            .query_one(
+                &format!(
+                    r#"SELECT o.observed_price::text, coalesce(o.applied_price::text, ''), o.decision,
+                              round(o.change * 100, 4)::text, i.sku
+                       FROM "{s}".price_observation o
+                       JOIN "{s}".stock_line l ON l.id = o.line
+                       JOIN "{s}".stock_item i ON i.id = l.item
+                       WHERE o.id::text = $1"#,
+                    s = e.schema
+                ),
+                &[&sid],
+            )
+            .unwrap();
+        let (obs, applied, decision, change, sku): (String, String, String, String, String) =
+            (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
+        let cents = |v: &str| v.parse::<f64>().unwrap();
+        assert_eq!(sku, r["sku"].as_str().unwrap());
+        assert!((cents(&obs) - cents(r["observed_price"].as_str().unwrap())).abs() < 1e-9);
+        match r["applied_price"].as_str() {
+            Some(a) => assert!((cents(&applied) - cents(a)).abs() < 1e-9, "{}", r["id"]),
+            None => assert_eq!(applied, ""),
+        }
+        let want = match r["status"].as_str().unwrap() {
+            "auto_applied" | "applied" => "apply",
+            "kept" | "pending" => "hold",
+            _ => "skip",
+        };
+        assert_eq!(decision, want);
+        // The change is recomputed by the engine; it must agree with what the legacy rule stored.
+        assert!(
+            (cents(&change) - cents(r["change_pct"].as_str().unwrap())).abs() < 1e-3,
+            "{}: engine {change} legacy {}",
+            r["id"],
+            r["change_pct"]
+        );
+    }
+    assert_eq!(e.count("price_observation"), 3);
+}
+
+#[test]
+fn a_status_the_entity_does_not_declare_is_refused_by_name() {
+    let Some(url) = url() else { return };
+    let e = Env::with(&url, &inventory_manifest());
+    let mut fx = read_json("tests/migration/fixtures/normal_month.json");
+    fx["tables"]["price_review_queue"][0]["status"] = serde_json::json!("archived");
+    let run = e.run("rehearsal");
+    e.s().migration_set_run_status(&run, "running").unwrap();
+    let report = load(&e, &run, &fx["tables"]);
+    let c = &report["price_review_queue"];
+    assert_eq!((c.written, c.rejected), (2, 1), "{c:?}");
+    assert_eq!(e.count("price_observation"), 2);
+    assert_eq!(e.count("migration_errors"), 1);
 }

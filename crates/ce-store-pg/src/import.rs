@@ -28,6 +28,9 @@ pub struct ImportRecord<'a> {
     pub actor: &'a str,
     /// When it happened in the legacy system, seconds since the epoch.
     pub at: i64,
+    /// The state the record was in when it left the legacy system. Must be one the entity
+    /// declares; the legacy history is not replayed through the transitions.
+    pub state: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +98,14 @@ impl TypedPgStore {
             .get(0);
         let mut body = rec.data.as_object().cloned().unwrap_or_default();
         body.insert("id".into(), json!(id));
-        let record = self.insert_row_on(&mut tx, scope, rec.entity, Value::Object(body), None)?;
+        let mut record =
+            self.insert_row_on(&mut tx, scope, rec.entity, Value::Object(body), None)?;
+        if let Some(state) = rec.state {
+            if !self.declares_state(rec.entity, state) {
+                return Err(StoreError::BadData("state is not declared by the entity"));
+            }
+            record = self.set_state_on(&mut tx, scope, rec.entity, &id, record.version, state)?;
+        }
         // The record is as old as it was in the legacy system.
         tx.execute(
             &format!(

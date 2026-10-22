@@ -125,6 +125,40 @@ fn lookup_value(
         .cloned()
 }
 
+/// A `by` entry is a column name, or `{"col": "month", "add": 1}` for a source that counts
+/// differently from the parent (the legacy price queue counts months from 0).
+fn by_value(spec: &Value, row: &Map<String, Value>) -> Option<String> {
+    match spec.as_str() {
+        Some(c) => row.get(c).and_then(text),
+        None => {
+            let n = row.get(spec["col"].as_str()?)?.as_i64()?;
+            Some((n + spec["add"].as_i64().unwrap_or(0)).to_string())
+        }
+    }
+}
+
+/// `{"table": "month_periods", "match": {"month": {"col": "month", "add": 1}, "year": "year"},
+/// "field": "id"}`: `field` of the row of `table` whose columns equal these values of this row.
+fn find_value(
+    spec: &Value,
+    row: &Map<String, Value>,
+    tables: &Map<String, Value>,
+) -> Option<Value> {
+    let want = spec["match"].as_object()?;
+    tables
+        .get(spec["table"].as_str()?)?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_object)
+        .find(|p| {
+            want.iter().all(|(pc, rc)| {
+                by_value(rc, row).is_some() && by_value(rc, row) == p.get(pc).and_then(text)
+            })
+        })
+        .and_then(|p| p.get(spec["field"].as_str()?))
+        .cloned()
+}
+
 fn used_columns(t: &Value) -> BTreeSet<String> {
     let mut used = BTreeSet::new();
     fn add(used: &mut BTreeSet<String>, v: &Value) {
@@ -139,13 +173,24 @@ fn used_columns(t: &Value) -> BTreeSet<String> {
     for v in t["ignore"].as_array().into_iter().flatten() {
         add(&mut used, v);
     }
-    for k in ["actor", "at"] {
+    for k in ["actor", "at", "state_from"] {
         add(&mut used, &t[k]);
+    }
+    for d in t["derive"].as_object().into_iter().flat_map(|o| o.values()) {
+        for v in d["find"]["match"]
+            .as_object()
+            .into_iter()
+            .flat_map(|o| o.values())
+        {
+            add(&mut used, v);
+            add(&mut used, &v["col"]);
+        }
     }
     for r in t["refs"].as_array().into_iter().flatten() {
         add(&mut used, &r["source"]);
         for v in r["by"].as_object().into_iter().flat_map(|o| o.values()) {
             add(&mut used, v);
+            add(&mut used, &v["col"]);
         }
     }
     for spec in t["transforms"]
@@ -171,6 +216,7 @@ fn used_columns(t: &Value) -> BTreeSet<String> {
             }
         }
         add(&mut used, &spec["lookup"]["by"]);
+        add(&mut used, &spec["map"]["from"]);
         add(&mut used, &spec["ordinal"]["within"]);
     }
     used
@@ -276,6 +322,21 @@ impl TypedPgStore {
                     );
                 };
 
+                // Columns the source row does not have but the plan can find in another table
+                // (the price queue names a month and a year; the parent is keyed by period).
+                let derived;
+                let row = if let Some(d) = t["derive"].as_object() {
+                    let mut r = row.clone();
+                    for (name, spec) in d {
+                        if let Some(v) = find_value(&spec["find"], &r, tables) {
+                            r.insert(name.clone(), v);
+                        }
+                    }
+                    derived = r;
+                    &derived
+                } else {
+                    row
+                };
                 let mut data = Map::new();
                 for (target, col) in t["fields"].as_object().into_iter().flatten() {
                     if let Some(v) = col.as_str().and_then(|c| row.get(c)) {
@@ -289,7 +350,14 @@ impl TypedPgStore {
                 }
                 let mut bad = None;
                 for (target, spec) in t["transforms"].as_object().into_iter().flatten() {
-                    let found = if spec.get("lookup").is_some() {
+                    let found = if let Some(m) = spec.get("map") {
+                        // One column's value looked up in a fixed table; an unknown value is refused.
+                        m["from"]
+                            .as_str()
+                            .and_then(|c| row.get(c))
+                            .and_then(text)
+                            .and_then(|v| m["values"].get(&v).cloned())
+                    } else if spec.get("lookup").is_some() {
                         lookup_value(&spec["lookup"], row, tables)
                     } else if let Some(col) = spec["ordinal"]["within"].as_str() {
                         // 1, 2, 3 ... in the order the rows appear, restarting per parent.
@@ -326,10 +394,8 @@ impl TypedPgStore {
                             .flatten()
                             .filter_map(Value::as_object)
                             .find(|p| {
-                                by.iter().all(|(pc, rc)| {
-                                    rc.as_str().and_then(|rc| row.get(rc)).and_then(text)
-                                        == p.get(pc).and_then(text)
-                                })
+                                by.iter()
+                                    .all(|(pc, rc)| by_value(rc, row) == p.get(pc).and_then(text))
                             })
                             .and_then(|p| p.get(pk).and_then(text))
                     } else {
@@ -369,6 +435,10 @@ impl TypedPgStore {
                     .and_then(Value::as_i64)
                     .or_else(|| t["at_const"].as_i64())
                     .unwrap_or(default_at);
+                let state = t["state_from"]
+                    .as_str()
+                    .and_then(|c| row.get(c))
+                    .and_then(Value::as_str);
                 let rec = ImportRecord {
                     run,
                     source_system: &system,
@@ -379,6 +449,7 @@ impl TypedPgStore {
                     data: Value::Object(data),
                     actor: &actor,
                     at,
+                    state,
                 };
                 match self.migration_import(scope, &rec) {
                     Ok(o) if o.created => count.written += 1,

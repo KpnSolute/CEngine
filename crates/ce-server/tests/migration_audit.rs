@@ -115,6 +115,7 @@ fn rec<'a>(run: &'a str, id: &'a str, data: serde_json::Value) -> ImportRecord<'
         data,
         actor: ACTOR,
         at: AT,
+        state: None,
     }
 }
 
