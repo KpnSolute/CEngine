@@ -18,6 +18,7 @@
 
 mod blobs;
 pub mod import;
+pub mod loader;
 pub mod migrations;
 mod pool;
 pub mod privileges;

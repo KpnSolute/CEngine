@@ -1,0 +1,21 @@
+{
+  "description": "Synthetic fixture: one normal month with two weeks of movements. No real MJCC data.",
+  "tables": {
+    "inventory_categories": [{"id": "c1", "name": "Dry goods"}, {"id": "c2", "name": "Dairy"}],
+    "vendors": [{"id": "v1", "name": "Synthetic Foods"}],
+    "inventory_items": [
+      {"id": "i1", "sku": "SYN-100", "description": "Rice", "category_id": "c1", "unit_price": "1.25", "par_level": 10},
+      {"id": "i2", "sku": "SYN-200", "description": "Milk", "category_id": "c2", "unit_price": "2.10", "par_level": 6}
+    ],
+    "month_periods": [{"id": "p1", "month": 11, "year": 2026}],
+    "monthly_inventory": [
+      {"id": "m1", "item_id": "i1", "period_id": "p1", "opening_oh": "12", "opening_unit_cost": "1.20", "unit_price": "1.25"},
+      {"id": "m2", "item_id": "i2", "period_id": "p1", "opening_oh": "4", "opening_unit_cost": "2.00", "unit_price": "2.10"}
+    ],
+    "inventory_transactions": [
+      {"id": "t1", "item_id": "i1", "period_id": "p1", "week": 1, "received": "5", "pulled": "0"},
+      {"id": "t2", "item_id": "i1", "period_id": "p1", "week": 1, "received": "0", "pulled": "3"},
+      {"id": "t3", "item_id": "i2", "period_id": "p1", "week": 2, "received": "0", "pulled": "2"}
+    ]
+  }
+}

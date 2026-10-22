@@ -813,3 +813,153 @@ mod tests {
         }
     }
 }
+
+/// What [`settle_imported`] did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SettleReport {
+    /// Records whose derived fields changed.
+    pub updated: u32,
+    /// Rules the imported history breaks, as `(entity, record id, code)`. They are findings for
+    /// the migration report, not refusals: the legacy system allowed them.
+    pub findings: Vec<(String, String, String)>,
+}
+
+/// After a bulk import, recomputes the derived fields of every record of every entity that has
+/// any, until nothing changes (children feed parents, so a few passes settle a deep chain), then
+/// reports the invariants the imported records break. Writes go straight to the store: the
+/// imported history may already sit in a closed period or over-pull an item, so period locks and
+/// invariants are not allowed to refuse it.
+pub fn settle_imported<S: Store>(
+    store: &S,
+    manifest: &Manifest,
+    scope: &TenantScope,
+    now_unix: i64,
+) -> Result<SettleReport, StoreError> {
+    use ce_store::ListRequest;
+    let ctx = Context {
+        actor_id: "legacy-import".to_string(),
+        actor_role: None,
+        now_unix,
+    };
+    let env = Env {
+        manifest,
+        scope,
+        ctx: &ctx,
+        request_id: "legacy-import",
+    };
+    let entities: Vec<String> = manifest.value["entities"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, e)| {
+            e["fields"]
+                .as_object()
+                .is_some_and(|f| f.values().any(|d| !d["computed"].is_null()))
+        })
+        .map(|(n, _)| n.clone())
+        .collect();
+    let mut report = SettleReport::default();
+    for _ in 0..=MAX_DEPTH {
+        let mut changed = false;
+        for entity in &entities {
+            let mut req = ListRequest {
+                select: None,
+                filter: None,
+                search: None,
+                sort: Vec::new(),
+                limit: Some(200),
+                after: None,
+            };
+            loop {
+                let page = store.list(scope, entity, &req)?;
+                for rec in page.records {
+                    let Value::Object(before) = &rec.data else {
+                        continue;
+                    };
+                    let mut after = before.clone();
+                    let r = StoreResolver {
+                        store,
+                        env: &env,
+                        entity,
+                        id: Some(&rec.id),
+                        failed: RefCell::new(None),
+                        seen: RefCell::new(HashMap::new()),
+                    };
+                    let _ = evaluate_computed_with(
+                        manifest,
+                        entity,
+                        &mut after,
+                        Some(before),
+                        &ctx,
+                        Some(&r),
+                    );
+                    if let Some(e) = r.failed.into_inner() {
+                        return Err(e);
+                    }
+                    if &after != before {
+                        store.update(scope, entity, &rec.id, rec.version, Value::Object(after))?;
+                        report.updated += 1;
+                        changed = true;
+                    }
+                }
+                match page.next {
+                    Some(c) => req.after = Some(c),
+                    None => break,
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // Findings, once the values have settled.
+    for entity in manifest.value["entities"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, e)| e["invariants"].as_array().is_some_and(|i| !i.is_empty()))
+        .map(|(n, _)| n.clone())
+    {
+        let mut req = ListRequest {
+            select: None,
+            filter: None,
+            search: None,
+            sort: Vec::new(),
+            limit: Some(200),
+            after: None,
+        };
+        loop {
+            let page = store.list(scope, &entity, &req)?;
+            for rec in page.records {
+                let Value::Object(data) = &rec.data else {
+                    continue;
+                };
+                let r = StoreResolver {
+                    store,
+                    env: &env,
+                    entity: &entity,
+                    id: Some(&rec.id),
+                    failed: RefCell::new(None),
+                    seen: RefCell::new(HashMap::new()),
+                };
+                let out =
+                    check_invariants_with(manifest, &entity, data, Some(data), &ctx, Some(&r));
+                if let Some(e) = r.failed.into_inner() {
+                    return Err(e);
+                }
+                if let Err(errors) = out {
+                    for e in errors {
+                        report
+                            .findings
+                            .push((entity.clone(), rec.id.clone(), e.code.to_string()));
+                    }
+                }
+            }
+            match page.next {
+                Some(c) => req.after = Some(c),
+                None => break,
+            }
+        }
+    }
+    Ok(report)
+}

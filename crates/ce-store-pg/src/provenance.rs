@@ -304,3 +304,29 @@ impl TypedPgStore {
         }
     }
 }
+
+impl TypedPgStore {
+    /// The target id already mapped for a source identity, if any.
+    pub fn migration_lookup(
+        &self,
+        tenant: &str,
+        source_system: &str,
+        source_table: &str,
+        source_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.prov_ok()?;
+        let r = self
+            .lock()?
+            .query_opt(
+                &format!(
+                    r#"SELECT target_id::text FROM "{}".migration_id_map
+                       WHERE tenant_id = $1::text::uuid AND source_system = $2
+                         AND source_table = $3 AND source_id = $4"#,
+                    self.schema
+                ),
+                &[&tenant, &source_system, &source_table, &source_id],
+            )
+            .map_err(db)?;
+        Ok(r.map(|r| r.get(0)))
+    }
+}
