@@ -378,6 +378,10 @@ impl TypedPgStore {
         self.pool.get()
     }
 
+    pub(crate) fn has_entity(&self, entity: &str) -> bool {
+        self.ents.contains_key(entity)
+    }
+
     fn ent(&self, entity: &str) -> Result<&Ent, StoreError> {
         self.ents.get(entity).ok_or(StoreError::NotFound)
     }
@@ -617,7 +621,7 @@ impl TypedPgStore {
 
     /// Writes the record row (and, with a key, stores the result against it). `body` is the
     /// caller's fields with any derived ones merged in.
-    fn insert_row_on(
+    pub(crate) fn insert_row_on(
         &self,
         c: &mut impl GenericClient,
         scope: &TenantScope,

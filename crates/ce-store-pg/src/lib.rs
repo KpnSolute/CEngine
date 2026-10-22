@@ -17,6 +17,7 @@
 //! from user input.
 
 mod blobs;
+pub mod import;
 pub mod migrations;
 mod pool;
 pub mod privileges;
