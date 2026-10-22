@@ -1,11 +1,11 @@
-# Migration builder report, 2026-10-20
+# Migration builder report, 2026-10-22
 
 Nothing here is called done. Each line says what is proven and by which command.
 
 ## 1. Branches and commits
 
 - CEngine, `claude/project-thread-v5aqkl` (PR #92): migrate command and provenance (5aef206, 22741da), delivery-test fix (ce521ab), roles and isolation tests plus M10 (358a883), provenance writers and three gate tests (latest on the branch).
-- MJCC-workspace, `claude/migration-map-and-extractor` (PR #12): map and extractor (5f5f15d), Codex fixes (4c622e6), owner-approved rows and `--plan-only` (2f8b4df).
+- MJCC-workspace PR #12 (map and extractor): merged by the owner on 2026-10-22 (52aaf06). PR #13, `claude/migration-loader-plan`: loader plan and synthetic fixture tables (latest 09b8399).
 - MJCC-workspace, `claude/legacy-formulas-reorders-audits` (PR #11): over-pull audit report.
 
 ## 2. G1: the flaky delivery test
@@ -25,49 +25,51 @@ Fixture command and the control-plane history answer are in `spec/migrations.md`
 
 ## 5. G13
 
-- M10: `migration_install.rs::a_schema_installed_at_an_older_version_migrates_forward_to_current` (history shows install row then v2 by `tester`, checksum equal, `plan.current == 2`). Passes.
-- P6: not built. The audit path has no way to import an event with its original actor and timestamp. That needs an engine decision first.
+- M10: `migration_install.rs::a_schema_installed_at_an_older_version_migrates_forward_to_current`. Passes.
+- P6: `migration_audit.rs` (4 tests). A legacy event is imported with its original actor and timestamp and the `legacy-import` request id; a re-import adds no second event.
 
 ## 6. G5 to G8: what exists
 
-Built and tested (synthetic data, local Postgres 16):
+Built and tested (synthetic data only, local Postgres 16, no MJCCv1 connection):
 
-- Provenance writers (`ce_store_pg::provenance`): run lifecycle, id map, rejection, reconciliation check, run finish.
-- Idempotency (`migration_idempotency.rs`, 2 tests): 50 mapped rows, second run creates 0 and returns the same 50 target ids; a source id cannot change entity.
-- Reconciliation (`migration_reconciliation.rs`, 4 tests): one cent off fails; a delta passes only with a committed explanation; a run passes only with at least one check, none failed and no rejection; a rejected row keeps a code and a sha256, and the payload text is not stored.
-- Privileges (`migration_privileges.rs`, 5 tests): SELECT-only reader, writer limited to its schema, runtime role without DDL or history writes, a broader reader detected. Mutation check: removing the `_ce_migration` revoke makes the runtime test fail.
-- Tenant isolation (`migration_tenant_isolation.rs`, 3 tests): rows, files (including a forged file pointer) and provenance per tenant; the same legacy id maps to different targets per tenant.
-- Performance (`migration_performance.rs`): 10,000 mappings, first run 9.8 s, rerun 6.6 s, ceiling 60 s, on this sandbox.
+- Provenance writers, idempotency, privileges, tenant isolation and performance: unchanged from the earlier round (`migration_idempotency.rs`, `migration_privileges.rs`, `migration_tenant_isolation.rs`, `migration_performance.rs`).
+- Loader (`ce_store_pg::loader`, `import`): plan-driven, parents then children, one transaction per row, legacy id mapped, original timestamp and actor kept, legacy state kept, unmapped source columns refuse the whole load, a missing parent or a refused row is rejected by table, id and code with a payload hash only. Transforms: format, month start/end, lookup, ordinal, value map; derived match columns.
+- Engine recompute: `settle_imported` recomputes derived fields after a load; they are never copied.
+- Reconciliation (`migration_reconciliation.rs`, 12 tests): inventory totals (received, pulled, ending quantity, ending value) equal the legacy formulas to the cent using the `mjcc-legacy-valuation` plugin; a cent off fails; per-invoice goods total and delta equal the legacy figures and only the invoice that adds up is `reconciled`; line totals equal; price history keeps status, decision, prices and the month-0 offset; an undeclared status is refused by name; a second load creates nothing.
+- Files (`migration_files.rs`, 6 tests, G7): source hash and size checked, copy read back and hashed, link only after that, missing/empty/mismatch/missing-record/corrupt copy rejected by code with no leftover bytes, duplicates counted, orphan sources listed, re-run changes nothing, `verify_files` finds missing, tampered, cross-tenant and wrongly owned links.
 
 Not built, so the matching rows stay red:
 
-- The loader (G5): nothing reads MJCCv1 rows and writes CEngine entities. Parents-then-children, history reconstruction and the SOP section 18 reconciliation checks against real totals do not exist. The reconciliation tests prove the check rules, not the migration.
-- Audit actor/timestamp preservation (G6) and file copy verification (G7). The `main` blob backend is in memory; the S3 store would need to come first for real file work.
+- Real MJCCv1 column conversions beyond the synthetic slice: `monthly_inventory` weekly columns, `week_gross`, menus, HACCP, events, budgets.
+- Week locks (`week_status` to the period lock flags: needs an update-parent step), users and staff (needs staff provisioning and PIN handling), rejected-row reconciliation across the whole run.
+- Files against a real blob backend: the `main` backend is in memory, so G7 is proven with the trait and `MemoryBlobs` only.
+- The Python extractor still does not load; only the Rust loader does.
 
 ## 7. Test counts
 
-`cargo test --workspace -q` with `CE_REQUIRE_DB=1`: 437 passed, 0 failed. `cargo clippy --all-targets -D warnings` on `ce-server` and `ce-store-pg`: clean. Extractor: 16 tests OK.
+`cargo test --workspace -q` with `CE_REQUIRE_DB=1`: 455 passed, 0 failed. `cargo clippy --workspace --all-targets -D warnings`: clean. Extractor: 16 tests OK; fixtures validate against the map (9 tables).
 
 ## 8. Gates
 
-CI on the latest head is recorded in PR #92 once it finishes; at 358a883, `fresh-install-test`, `schema-security-test` and `tenant-isolation-test` were green, `migration-static-check` and `migration-fixture-test` red for the cross-repo reason in section 4. I have not edited any gate.
+On head e940156: `fresh-install-test`, `schema-security-test` and `tenant-isolation-test` green. `migration-static-check` fails rules 4 and 5 because the job checks out only CEngine (auditor-owned layout fix). `migration-fixture-test` now passes its checkout with `MJCC_WORKSPACE_TOKEN`, then fails because MJCC-workspace's default branch is not `main` (owner setting). `migration-audit-report`: 15 green, 1 partial, 27 red at e940156. I have not edited any gate.
 
 ## 9. Rehearsal and live systems
 
-Rehearsal: blocked, as instructed (loader not built, no owner start). Live systems changed: no. MJCCv1: no connection and no writes. Schemas created and dropped: only throwaway ones in a local Postgres. Nothing was run against the testing project this round.
+Rehearsal: blocked; `MIGRATION_REHEARSAL_GATE.md` is not satisfied and there is no owner "start". Live systems changed: no. MJCCv1: no connection and no writes. Only throwaway schemas in a local Postgres.
 
 ## 10. Blockers
 
-- PR #12 must merge (Othniel or the owner) for the static and fixture gates to see the extractor. Slips: static check and fixture gate stay red until then.
-- Loader design: which API or SQL path writes CEngine entities with a source-supplied id and original timestamps, and how P6 audit import works. Owner/auditor decision; slips the Wednesday history rehearsal.
+- MJCC-workspace default branch must be `main` (owner setting) for the fixture gate.
+- Static-check rules 4 and 5 need the two-repo layout (auditor).
+- Real column conversions need the real MJCCv1 schema; reading it is a read-only step that needs the owner's say.
 
 ## 11. Rollback
 
-Revert the commits listed in section 1 on each branch. The two new migrations are additive; nothing is dropped. Roles exist only as generated SQL; none were applied to a shared database.
+Revert the commits on each branch. Migrations are additive; nothing is dropped. Roles exist only as generated SQL.
 
 ## 12. Next bounded tasks
 
-1. Decide the loader write path and P6 import (needs a decision).
-2. Loader skeleton and parents (`location`, `inventory_category`, `vendor`, `staff_member`) against the fixtures.
-3. Stock items, then weekly history and reconciliation to the cent on `normal_month`.
+1. Week locks and users in the loader (update-parent step, staff provisioning).
+2. Weekly gross, budgets and HACCP slices with fixtures.
+3. Whole-run reconciliation of rejected rows.
 4. Refresh `docs/CONTRACT_PARITY.md`.
