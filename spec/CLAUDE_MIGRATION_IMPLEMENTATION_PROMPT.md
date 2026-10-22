@@ -1,493 +1,179 @@
-# DRAFT TEMPLATE — AUDITOR MUST REWRITE BEFORE HANDOFF
-
-**Status:** Seed only. This file is not yet the final worker prompt. The migration auditor must first inspect the current repositories, build/update the migration audit matrix and CI gates, then replace this draft with an evidence-based prompt containing the actual remaining implementation gaps. Do not hand this draft directly to Claude Code.
-
-# Claude Code Handoff: implement MJCC historical migration and CEngine migration safety
-
-You are the primary builder for the MJCC historical migration program.
-
-Do not stop for ordinary implementation questions. Use the repository SOPs as your operating companion and keep them synchronized with implementation.
-
-## Authority order
-
-Read and follow, in this order:
-
-1. spec/MJCC_HISTORICAL_DATA_MIGRATION_SOP.md
-2. spec/mjcc-backend-complete-by-wednesday.md
-3. spec/SCHEMA_FREEZE.md if present
-4. accepted repository governance and Loom decisions
-5. deploy/render/STAGING.md for current runtime limitations
-6. existing code/tests as implementation evidence
-
-If an implementation detail is ambiguous but can be resolved from these sources, choose the safest reversible option, document it, amend the relevant SOP/document when necessary, and continue.
-
-Do not ask the owner ordinary architecture or coding questions already answered by these documents.
-
-## QUESTIONS_TOPOLOGY rule
-
-QUESTIONS_TOPOLOGY is not a blocker.
-
-If the file exists locally, use it only as a checklist:
-- mark already-decided questions resolved by reference to canonical docs;
-- do not reopen resolved decisions;
-- leave genuinely unresolved questions open;
-- if it conflicts with newer canonical decisions, update the question status rather than implementing stale wording.
-
-If it is missing, continue. Do not wait for it.
-
-The following are already decided:
-- separate CEngine control plane and tenant data planes;
-- one dedicated production data environment per customer;
-- MJCC production data plane is MJCCv1;
-- MJCC target schema is ce_mjcc_prod;
-- ce_mjcc_staging is throwaway/test-only;
-- no customer business data in the CEngine control-plane database;
-- real-data rehearsal uses a read-only source and isolated target;
-- no dual writes;
-- Compute becomes read-only at cutover for 14 days;
-- MJCC UI lives in MJCC-workspace and CEngine is the business API;
-- old MJCC data is transformed into new CEngine tables;
-- archived files move to tenant-controlled storage;
-- current AI provider adapter is temporary and the permanent template contract is capability-based.
-
-## Mission
-
-Implement the migration foundation required to move legacy MJCC history into the new CEngine tables safely and repeatably.
-
-You own the builder side of:
-
-- ce-serve migrate
-- migration version/history contracts
-- migration metadata/provenance
-- legacy-to-target ID mapping
-- MJCC source-to-target ETL
-- reconciliation
-- idempotent re-run behavior
-- protected rehearsal tooling
-- file/object migration verification
-- delta migration
-- migration docs and tests
-- fixes required to satisfy migration CI
-
-Generic engine/runtime work belongs in KpnSolute/CEngine.
-
-MJCC-specific mappings, ETL, sanitized migration fixtures and reconciliation goldens belong in KpnWorld/MJCC-workspace.
-
-KpnSolute/Compute is read-only source/reference. Do not move new implementation back into Compute.
-
-## Preserve existing work
-
-Before editing:
-- inspect git status in both repos;
-- preserve unrelated local changes;
-- do not reset, clean, checkout over, delete or rewrite unrelated work;
-- use a dedicated branch/worktree if necessary.
-
-No real customer data or secrets may be committed.
-
-## Work package 1: ce-serve migrate
-
-Implement the reviewed forward migration path described in the schedule.
-
-Required behavior:
-
-- forward-only migrations;
-- versioned migration records in each installation schema;
-- record at least version, name, SQL/content hash, applied_at, applied_by or actor identifier, manifest hash where available, duration and status;
-- additive/backward-compatible operations first;
-- no automatic destructive migration this week;
-- plan/dry-run mode;
-- no-op when current;
-- fail closed on changed checksum;
-- fail closed on version gaps;
-- fail closed when DB migration version is ahead of the binary;
-- fail closed on prohibited destructive operations;
-- transaction boundaries explicit;
-- failure leaves a diagnosable state and does not claim success;
-- fresh install followed by migrate must be tested.
-
-Do not implement a vague "execute arbitrary SQL folder" feature without validating order and immutability.
-
-Update deploy/render/STAGING.md only after the migration command actually exists and tests prove it.
-
-## Work package 2: migration provenance model
-
-Implement the contract from the migration SOP using established naming conventions.
-
-Required concepts:
-
-- migration run
-- source snapshot identity/time/hash
-- code/migration version
-- source-to-target ID mapping
-- reconciliation result
-- migration error
-- safe migration artifact metadata
-
-Do not store raw unrestricted customer payloads in migration error/audit tables.
-
-Stable mapping is mandatory. Re-running the same source record must resolve to the same target record.
-
-## Work package 3: MJCC migration map
-
-In MJCC-workspace create/update docs/MIGRATION_MAP.md.
-
-Inventory every legacy source table relevant to the migration.
-
-Every source table must have an explicit disposition:
-
-- migrated
-- transformed
-- archive-only
-- intentionally omitted with documented reason
-
-At minimum implement mappings for:
-
-- user/staff identity and historical attribution
-- roles/location scopes
-- locations
-- categories
-- vendors
-- inventory items/SKUs/aliases
-- periods and operational weeks
-- opening state
-- inventory transactions/movements
-- receipts
-- pulls/issues
-- invoices
-- invoice lines
-- accepted prices and price-review history
-- menu structures and meal periods
-- HACCP/compliance
-- daily logs/checklists/incidents/events
-- certifications/training where target model supports them
-- approvals/governed changes
-- business audit history
-- file/document metadata
-- archive object references
-- approved AI configuration/usage metadata without secret values
-
-Do not copy provider API keys, service-role keys, passwords or PINs.
-
-## Work package 4: ETL implementation
-
-Build the migration tool in MJCC-workspace.
-
-Use the naming/layout that best matches the repo, but keep extraction, transformation, loading and reconciliation separable enough to test.
-
-Required properties:
-
-- source read-only;
-- target explicitly selected;
-- target rehearsal schema cannot accidentally default to production;
-- source project/schema and target project/schema printed in a safe startup summary;
-- production target requires an explicit production mode and separate authorization later;
-- mapping uses stable provenance keys;
-- child records resolve target parent IDs through the mapping table;
-- invalid/ambiguous rows are rejected explicitly, never silently coerced;
-- rerun is idempotent;
-- partial failure can be resumed or safely re-run;
-- safe dry-run or plan mode where practical;
-- run log records counts, rejected rows and reconciliation state;
-- no customer rows written to git output.
-
-Prefer using the CEngine API/validated write path where practical.
-
-If a historical bulk-load path is necessary for performance or historical attribution, document why, isolate it, and run equivalent validation afterward. Do not bypass invariants just because migration is faster through SQL.
-
-## Work package 5: historical inventory reconstruction
-
-Do not migrate only current on-hand values.
-
-Reconstruct history so the target preserves:
-
-- opening quantity
-- opening carried cost
-- receipts by operational week
-- pulls/issues by operational week
-- accepted supplier prices
-- price observations/reviews
-- ending quantity
-- ending value
-- period state/locks
-- source invoice linkage
-
-CEngine must recompute historical results and reconcile them against legacy totals.
-
-Use decimal math. Never use binary float equality for money.
-
-## Work package 6: invoice and valuation reconciliation
-
-Implement machine-verifiable reconciliation for:
-
-- invoice count
-- invoice-line count
-- vendor mapping
-- subtotal
-- discount
-- tax
-- fuel/fees
-- stated total
-- calculated/net total
-- accepted unit-price chronology
-- price review status
-- opening value
-- received value
-- ending value
-- carried unit cost
-- approved rounding/tolerance behavior
-
-Unexplained deltas fail.
-
-Do not silently rewrite old periods using current price rules.
-
-## Work package 7: actor/audit preservation
-
-Historical business events must remain historical.
-
-Required behavior:
-
-- preserve original actor when known;
-- preserve original timestamp;
-- preserve meaningful event/action identity;
-- add migration provenance separately;
-- do not attribute old business acts to the migration service;
-- separate imported business audit from migration-system audit;
-- do not bulk-copy HTTP request logs into the business audit unless explicitly mapped.
-
-## Work package 8: staff/auth data
-
-Migrate profile/identity information required for history.
-
-Do not migrate reusable auth secrets.
-
-Active users may require re-enrollment/first-login PIN reset according to the new auth contract.
-
-Historical records must still resolve to historical actor identities even if that user is no longer active.
-
-## Work package 9: file migration
-
-Implement file/object migration for the approved MJCC archive destination.
-
-For each object:
-
-1. identify source object;
-2. compute source SHA-256;
-3. record size/MIME;
-4. copy to target tenant bucket;
-5. compute destination SHA-256;
-6. compare;
-7. create/update target document metadata;
-8. link migrated business record;
-9. mark verified only after hash/reference checks pass.
-
-Must detect:
-- missing source object;
-- hash mismatch;
-- duplicate content;
-- orphan metadata;
-- orphan required object;
-- cross-tenant key/path.
-
-The home archive must not remain a permanent runtime dependency after accepted migration.
-
-## Work package 10: delta migration
-
-The final cutover will need either a final full migration or a rehearsed baseline plus cutoff delta.
-
-Implement support for reliable delta selection when source change timestamps/event identity allow it.
-
-Requirements:
-
-- same source ID resolves to same target ID;
-- new records insert;
-- approved changed records update deterministically;
-- deletes/tombstones require explicit mapping, never guess;
-- locked historical periods remain protected;
-- delta passes the same reconciliation path as full migration.
-
-## Work package 11: security boundaries
-
-Implement/test separate roles in the migration test model:
-
-legacy migration reader:
-- SELECT only
-- no source mutation
-
-target migration writer:
-- target schema only
-- cannot mutate source
-- cannot write another tenant
-
-normal runtime role:
-- separate from migration privilege
-
-Tests must demonstrate the boundary, not merely document it.
-
-## Work package 12: normal CI fixtures
-
-Only synthetic or sanitized fixtures may enter git and normal CI.
-
-Build realistic legacy-shaped fixtures that cover:
-
-- normal inventory month
-- multiple operational weeks
-- over-pull history
-- accepted and held price changes
-- invoice totals
-- role mappings
-- closed/locked period
-- file metadata and synthetic file object/hash
-- one rejected/unmapped record
-- repeated migration run
-- two synthetic tenants
-
-Do not use the real invoice archive as CI fixtures.
-
-## Auditor CI gates you must make green
-
-The migration auditor is expected to create or maintain these gates:
-
-- migration-static-check
-- fresh-install-test
-- forward-migration-test
-- migration-fixture-test
-- reconciliation-test
-- migration-idempotency-test
-- tenant-isolation-test
-- schema-security-test
-- migration-performance-test
-- migration-audit-report
-
-Treat red CI as a contract failure.
-
-Do not disable, skip or weaken a gate to get green.
-
-If a gate is wrong relative to the SOP, document the conflict and fix the gate transparently.
-
-## Protected Wednesday rehearsal
-
-Real MJCC history may be used only under the written rehearsal authorization already recorded in spec/mjcc-backend-complete-by-wednesday.md.
-
-The rehearsal must use:
-
-- read-only source snapshot/export;
-- separate writer limited to isolated rehearsal schema;
-- source snapshot timestamp;
-- source snapshot/export checksum where practical;
-- migration run log;
-- no production cutover;
-- no legacy modification/deletion;
-- no raw customer rows committed to git;
-- safe counts/totals/hashes only in committed reports;
-- credentials expired/removed at end of authorization window.
-
-Do not reinterpret this as production authorization.
-
-## Mandatory reconciliation before rehearsal can pass
-
-Log and verify:
-
-- row counts by mapped source/target
-- legacy-to-target ID mapping integrity
-- no orphan required relationships
-- inventory opening/received/pulled/ending
-- valuation
-- invoice totals
-- accepted price history
-- menu/history counts
-- active user/role mapping
-- historical actor mapping
-- business-audit preservation
-- file object count/hash/reference
-- period lock semantics
-- rejected/unmapped report
-
-Every difference must be explained. "Close enough" is not a status.
-
-## One-writer cutover design
-
-Do not implement dual writes.
-
-The design remains:
-
-before cutover:
-- Compute writes
-- CEngine validates/rehearses
-
-at cutover:
-- legacy writes stop
-- final backup/snapshot
-- final migration/delta
-- reconcile
-- explicit cutover decision
-
-after cutover:
-- CEngine writes
-- Compute read-only for 14 days
-
-Cutover itself requires separate authorization.
-
-## Documentation updates
-
-As implementation changes reality, keep documentation synchronized.
-
-At minimum update/create as appropriate:
-
-CEngine:
-- spec/migrations.md
-- deploy/render/STAGING.md
-- spec/MJCC_HISTORICAL_DATA_MIGRATION_SOP.md only when implementation discovers a real contract clarification
-- relevant runtime docs
-
-MJCC-workspace:
-- docs/MIGRATION_MAP.md
-- docs/migration/reconciliation documentation or equivalent
-- daily/reliability notes required by the schedule
-
-Do not let docs claim a migration feature exists before tests prove it.
-
-## Required verification
-
-Run all applicable existing tests plus new migration tests.
-
-At minimum report:
-
-- cargo test --workspace result
-- fresh install result
-- migrate --plan result
-- install -> migrate result
-- checksum mutation refusal
-- version gap refusal
-- destructive migration refusal
-- sanitized ETL result
-- idempotent second run result
-- reconciliation result
-- tenant isolation result
-- privilege-boundary result
-- file-hash result
-
-If local tooling/environment prevents a test, create the smallest safe alternate verification environment and record exactly what was and was not executed.
-
-## Final response format
-
-Return a concise evidence report with:
-
-1. branches/commits
-2. files changed
-3. migrations/schema contracts added
-4. ce-serve migrate status
-5. ETL status
-6. mapping coverage
-7. reconciliation coverage
-8. CI gates and results
-9. tests and exact counts/results
-10. real-data rehearsal status
-11. live systems changed: yes/no, with exact scope
-12. remaining blockers
-13. rollback/recovery state
-14. next bounded tasks
-
-Do not say "done" without executable evidence.
-
-Start now by reading the canonical migration SOP and schedule, inventorying current migration/install code and the two repo worktrees, then implement the smallest dependency-correct sequence that drives the auditor CI from red to green.
+# Claude Code handoff: MJCC migration — gaps G1–G13
+
+**Status:** FINAL, auditor-authored, 2026-10-20. Replaces the auditor seed of 2026-10-19 and
+supersedes `MIGRATION_BUILDER_PROMPT_V2.md` and `MIGRATION_BUILDER_PROMPT_V3.md`.
+**Builder:** Claude Code. **Auditor:** Codex. **Owner:** the principal.
+This prompt is the worker's authority for what to do; it carries no production or cutover authority.
+
+The red gaps below are the auditor's finding from the tree, the two open PRs and CI. Each one names
+the test or gate that must prove it. Work them in order: G1 first because it blocks every CI signal.
+
+---
+
+## 0. Read first
+
+1. `spec/MJCC_HISTORICAL_DATA_MIGRATION_SOP.md` — the contract.
+2. `spec/SCHEMA_FREEZE.md` — schema, provenance, idempotency and auth decisions.
+3. `spec/mjcc-backend-complete-by-wednesday.md` — schedule and ground rules.
+4. `docs/MIGRATION_AUDIT_MATRIX.md` — what is red and why, grouped G1–G13.
+5. `spec/MIGRATION_BLOCKERS.md` — the blocker register.
+6. `spec/MIGRATION_REHEARSAL_GATE.md` — what unlocks the real-data rehearsal.
+7. `MJCC-workspace/docs/MIGRATION_MAP.md` — the map you will update.
+
+`docs/QUESTIONS_TOPOLOGY.md` is a checklist only, now at
+`KpnSolute/Compute/docs/mjcc-migration/`. Mark decided entries "resolved by `<doc>`"; do not wait
+on it.
+
+## 1. Closed decisions
+
+- CEngine is the shared runtime; MJCC is one tenant template.
+- Control plane separate from tenant data planes. MJCC's data plane is MJCCv1; production schema
+  `ce_mjcc_prod`. `ce_mjcc_staging` is throwaway and is the temporary control plane this week.
+- Full write only to staging. **Never write MJCCv1.**
+- No customer payloads, files or secrets in the control plane.
+- Rehearsal: read-only snapshot, isolated target, blocked until §6 is satisfied.
+- One writer at cutover; Compute read-only for 14 days.
+- UI in MJCC-workspace; AI adapter temporary; template contract capability-based.
+
+## 2. G1 — runtime blocker (do this first)
+
+**Test:** `crates/ce-server/tests/plugin_deliveries.rs:408`,
+`jobs_waiting_for_a_retry_never_hide_a_due_one`, `assert_eq!(done, 1)` → left 0.
+**Evidence:** CI run `39369255125`, job `rust`, commit `74eb88d`, failed; re-run failed again at
+`09:46:25Z`, same test, same assertion. Reproducible twice.
+
+```text
+thread 'jobs_waiting_for_a_retry_never_hide_a_due_one' panicked at crates/ce-server/tests/plugin_deliveries.rs:408:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+```
+
+The relay lists `status in (queued, in_flight)` with `sort: []` in `crates/ce-server/src/deliveries.rs`,
+so it pages a changing row set in whatever order Postgres returns. The due job is created before
+120 waiters. `BATCH = 50`, `MAX_PAGES = 20`, so page starvation is not the explanation; ordering is
+the suspect.
+
+Required:
+1. Reproduce locally, report pass/fail over five runs.
+2. Confirm or refute the ordering hypothesis with page logs (page sizes, the page the due job lands
+   on). If a deterministic sort (`created_at, id`) makes it deterministic, say so with the run.
+3. Fix the cause. Do **not** raise `MAX_PAGES`, shrink the fixture, or add sleeps.
+4. Fix the failure path: a failed assertion currently panics inside the runtime and the cleanup then
+   aborts with `Cannot start a runtime from within a runtime` (SIGABRT), hiding other results.
+5. Prove it: five clean local runs plus a green `rust` job link on your branch.
+
+## 3. G3 — apply the owner-approved map (eight rows)
+
+Owner-approved: **2026-10-20**. Apply exactly in `MJCC-workspace/docs/MIGRATION_MAP.md`:
+`github_sync_queue`, `error_logs`, `staff_login_throttle`, `sso_handoffs`,
+`lunchvoice_sso_handoffs`, `api_keys`, `ai_provider_keys` → **omitted**, each with the note
+`owner-approved: 2026-10-20` and its one-line reason (transient runtime, auth, integration, log or
+secret state; rebuilt, reissued or regenerated).
+
+`flow_assignments` → **archive-only**. Remove the `cafeteria_event` target; it must not become
+`cafeteria_event` or another operational entity, because that would invent historical meaning the
+source never had.
+
+`snack_bar_entity_rates → snack_bar_rate` stays unchanged.
+
+Then: `migrate_v1.py --check` passes, static gate rule 5 passes, and no test asserts the old
+disposition.
+
+## 4. G4/G11 — make the gates measure something (E2–E5, C1)
+
+Five DB-backed gates currently fail with "no test target named …". Create the files with real
+tests, or the gate cannot mean anything:
+
+| Gate | Test file to create |
+|---|---|
+| `migration-fixture-test` | `MJCC-workspace/tools/tests/` (extend) |
+| `reconciliation-test` | `crates/ce-server/tests/migration_reconciliation.rs` |
+| `migration-idempotency-test` | `crates/ce-server/tests/migration_idempotency.rs` |
+| `tenant-isolation-test` | `crates/ce-server/tests/migration_tenant_isolation.rs` |
+| `schema-security-test` | `crates/ce-server/tests/migration_privileges.rs` |
+| `migration-performance-test` | `crates/ce-server/tests/migration_performance.rs` |
+
+Names are the gates' contract; do not rename the gates. A test that skips when no database is set
+is fine; a test that asserts nothing is not.
+
+## 5. G12 — the fixture contract (C2)
+
+State in `spec/migrations.md` the exact command the CEngine fixture gate should run without a
+database, given the fixtures and map live in MJCC-workspace. Choose:
+- (a) `migrate_v1.py --plan-only --fixtures DIR --map FILE`, no network, no database; or
+- (b) a scripted export of fixtures and map into CEngine `tests/migration/`, with the MJCC copy as
+  source of truth.
+Give me the command line. I write the gate to your contract; you do not edit the gate.
+
+Also answer in one paragraph: where the **control plane's** own migration history lives when the
+control plane is migrated (Freeze §9). A decision, not implementation, is enough this week.
+
+## 6. G5/G6/G7/G8 — loading, reconciliation, audit, files (E, R, A, F, S)
+
+Implement in this order, each with a test that fails when the code is removed:
+
+1. **Loader skeleton.** Open the target; write `migration_runs` `planned` → `running`; reuse the
+   extractor's production and same-database refusals rather than duplicating them.
+2. **Parents, then children.** Parents first (`location`, `inventory_category`, `vendor`,
+   `staff_member`, `period`, `period_week`, `stock_item` + `stock_item_detail`); children resolve
+   through `migration_id_map`. Every entity write and its id-map row are in the same transaction.
+3. **History, not snapshots.** Opening quantity and carried cost, receipts and pulls per week,
+   accepted prices and observations, ending quantity and value, period locks, invoice links. CEngine
+   recomputes; decimal only.
+4. **Reconciliation.** One `migration_reconciliation_results` row per SOP §18 check, with
+   `legacy_value`, `target_value`, `delta`, and `pass` only when the delta is zero or explained in a
+   committed note. "Close enough" fails.
+5. **Rejected rows.** Every refusal writes `migration_errors` with source table, source id, code and
+   a safe message — never the payload.
+6. **Idempotency.** Second run: same target ids, zero new rows.
+7. **Audit preservation (G6).** Original actor and timestamp survive; the migrator is never the
+   actor of a business act; request logs are excluded from business audit.
+8. **Files (G7).** Copy with source sha256 → copy → destination sha256 → compare → metadata → link →
+   verified. Detect missing, mismatch, duplicate, orphan and cross-tenant. The `main` blob backend is
+   in-memory; if you need the S3 store first, say so and order it.
+9. **Privileges and isolation (G8).** Prove a SELECT-only legacy reader, a schema-limited writer, a
+   runtime role separate from migration, and two synthetic tenants that cannot see each other's rows,
+   files or migration artifacts.
+
+## 7. G13 — M10 and P6
+
+- **M10:** `install_with_migrations(old)` → `migrate(&embedded())` → history shows the forward step,
+  checksums correct, `plan.current == 2`.
+- **P6:** a migrated record's `audit_event` keeps the original actor and timestamp, while the
+  migration is recorded only in `migration_runs`/`migration_artifacts`.
+
+## 8. G9/G10 — do not start these
+
+Rehearsal (G9) and performance/delta (G10) wait until section 6 passes on fixtures. The rehearsal
+gate is `spec/MIGRATION_REHEARSAL_GATE.md`: eight prerequisites, a snapshot with time and sha256, a
+rehearsal-only writer, and the owner's explicit start. **Do not run against real data. Do not touch
+MJCCv1.**
+
+## 9. Report
+
+Save as `spec/MIGRATION_BUILDER_REPORT.md` and post in chat:
+
+1. branches and commits per repo;
+2. G1: five local runs with pass/fail, the ordering evidence, the fix, the CI link;
+3. G3: the eight rows before and after;
+4. G12: the fixture command you want gated, and the control-plane history answer;
+5. G13: the two tests with output;
+6. G5–G8: per table written/rejected/skipped counts, the reconciliation table with deltas and
+   explanations, idempotency ids before and after, file hash results, privilege test results;
+7. `cargo test --workspace` exact counts;
+8. live systems changed: yes/no with scope (MJCCv1 must read "no writes"; staging schema names
+   created or dropped);
+9. blockers, who unblocks them, and daily slip;
+10. rollback: what a revert looks like;
+11. next bounded tasks.
+
+State what is proven and by which command or link. Never say "done". No customer rows or secrets in
+any committed file or in chat.
+
+## 10. How this is reviewed
+
+The auditor re-reads the diff, re-runs `rust` and every `migration-*` gate on your branch twice,
+checks B1 stays green, and re-scores the matrix. A row is green only with a test that bites, a gate
+run, and synthetic data. Defects are filed, not silently repaired. I will not approve production
+cutover.

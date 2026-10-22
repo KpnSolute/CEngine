@@ -66,12 +66,12 @@ ls .github/workflows
 
 | # | Requirement | Implementation | Proof | Gate | Status |
 |---|---|---|---|---|---|
-| R1 | Opening quantity and carried cost | Plugin logic proven on goldens (`CONTRACT_PARITY.md`), no migration path | `golden/rollover_week2.expected.json` (template side) | `reconciliation-test` | red (migration) |
-| R2 | Receipts and pulls per operational week | same | `golden/week1.expected.json` | `reconciliation-test` | red (migration) |
-| R3 | Accepted prices and observations | same | `golden/price_observations.expected.json` | `reconciliation-test` | red (migration) |
-| R4 | Ending quantity and value to the cent | same | `golden/*` | `reconciliation-test` | red (migration) |
+| R1 | Opening quantity and carried cost | Plugin logic proven on goldens (`CONTRACT_PARITY.md`), no migration path | `golden/rollover_week2.expected.json` (template side) | `reconciliation-test` | **red** |
+| R2 | Receipts and pulls per operational week | same | `golden/week1.expected.json` | `reconciliation-test` | **red** |
+| R3 | Accepted prices and observations | same | `golden/price_observations.expected.json` | `reconciliation-test` | **red** |
+| R4 | Ending quantity and value to the cent | same | `golden/*` | `reconciliation-test` | **red** |
 | R5 | Invoice totals (subtotal, discount, tax, fuel, stated, net) | template report `invoice_reconciliation`; no migration check | none | `reconciliation-test` | red |
-| R6 | Period lock semantics preserved | `period_week` state machine proven in `ops_smoke.py` | `tests/ops_smoke.py` | `reconciliation-test` | red (migration) |
+| R6 | Period lock semantics preserved | `period_week` state machine proven in `ops_smoke.py` | `tests/ops_smoke.py` | `reconciliation-test` | **red** |
 | R7 | Rejected/unmapped report | none | none | `reconciliation-test` | red |
 
 ## 5. Audit, staff, files (SOP §11–13)
@@ -143,6 +143,9 @@ summaries, ran the static gate against one tree containing both branches, and ra
 tests and fixture check locally.
 
 **Promoted to green on branch evidence (14 rows):** M1–M9, M11, P1–P5.
+**Current totals (2026-10-20, after the owner's map decision):** 43 rows: 15 green, 1 partial, 27 red.
+The map decision removes no row from the matrix; it fixes the **disposition** of eight tables and is
+recorded under "Owner-approved map dispositions" below.
 
 Why these are green:
 - `crates/ce-store-pg/src/migrations.rs` is a real implementation: one transaction per version,
@@ -220,3 +223,65 @@ Two auditor gate decisions were reverted as wrong, for the record:
 Neither touched application code. The general `CI` red on `main` (`plugin_deliveries.rs:408`) is
 recorded as worker blocker B1 in `spec/MIGRATION_BLOCKERS.md`; it is not caused by audit changes,
 and it is assigned to the worker.
+
+---
+
+## Owner-approved map dispositions, 2026-10-20
+
+Recorded by the owner as **owner-approved: 2026-10-20**. These are the owner's decision, not the
+auditor's; the auditor only verified the wording and that no disposition invents history.
+
+| Table | Disposition | Basis |
+|---|---|---|
+| `github_sync_queue` | omitted | transient runtime queue; regenerated |
+| `error_logs` | omitted | operational log; not business history |
+| `staff_login_throttle` | omitted | authentication runtime state; rebuilt |
+| `sso_handoffs` | omitted | transient sign-in handoff |
+| `lunchvoice_sso_handoffs` | omitted | transient sign-in handoff |
+| `api_keys` | omitted | secret material; reissued |
+| `ai_provider_keys` | omitted | secret material; stays in the tenant Vault |
+| `flow_assignments` | archive-only | assignments have no operational target yet; **must not** become `cafeteria_event` — that would invent history the source never had |
+
+Verification the auditor will perform on the worker's change (not performed yet):
+1. all eight rows carry `owner-approved: 2026-10-20`, not any auditor attribution;
+2. no omitted row has a target entity;
+3. `flow_assignments` has no `cafeteria_event` target anywhere in the map or the extractor;
+4. `snack_bar_entity_rates → snack_bar_rate` is unchanged;
+5. `migrate_v1.py --check` still validates the fixtures against the map;
+6. static gate rule 5 still passes (every audited table present).
+
+Until those six checks pass on the worker's branch, **E1 stays red** even though the decision is
+made. A decision is not a merged disposition.
+
+## Red gaps that remain, and what each actually needs
+
+Grouped so the worker prompt maps to them one-to-one. This is deliverable 3 of the audit.
+
+| Gap | Rows | What is missing (verified against the tree) | Gate that proves it |
+|---|---|---|---|
+| G1. Runtime blocker | (blocker) | `plugin_deliveries::jobs_waiting_for_a_retry_never_hide_a_due_one` fails on `main` twice; paging over `sort: []` | `rust` job (general CI) |
+| G2. Provenance vs audit | P6 | no test shows original actor/timestamp preserved while the migrator is not the actor | `reconciliation-test` |
+| G3. Map not yet updated | E1 | decisions made, not applied; no operator-visible approval marker | `migration-static-check` |
+| G4. No loader | E2–E5 | extractor validates and refuses, writes nothing; no `migration_runs` row, no id map writes, no re-run proof | `migration-fixture-test`, `migration-idempotency-test` |
+| G5. No reconciliation | R1–R7 | no engine recompute, no per-check result rows, no rejected-row report | `reconciliation-test` |
+| G6. No audit preservation | A1–A3 | no test, no mapping of historical actors, no exclusion of request logs | `migration-static-check`, `reconciliation-test` |
+| G7. Files | F1–F2 | blob backend on `main` is in-memory; no hash-compare copy, no failure detection | `migration-fixture-test` |
+| G8. Privileges and isolation | S1–S4 | no SELECT-only reader role, no schema-limited writer, no two-tenant migration test | `schema-security-test`, `tenant-isolation-test` |
+| G9. Rehearsal | H1 | blocked by B2; prerequisites unmet | `migration-audit-report` |
+| G10. Performance and delta | L1, D1 | no baseline, no delta mode | `migration-performance-test`, `migration-idempotency-test` |
+| G11. CI wiring | C1 | `migration-ci.yml` exists; its four DB-backed jobs call test targets that do not exist yet (`migration_reconciliation`, `migration_idempotency`, `migration_tenant_isolation`, `migration_privileges`, `migration_performance`), so they fail with "no test target" rather than a meaningful assertion | every migration gate |
+| G12. Fixture contract | C2 | fixtures exist and pass `--check`; the CEngine-side gate has no agreed way to see the MJCC fixtures (B5) | `migration-fixture-test` |
+| G13. Older-version onward | M10 | partial: install→migrate proven, install-older→migrate not proven | `fresh-install-test`, `forward-migration-test` |
+
+A decision is not a merge. E1 becomes green only when the six checks above pass on the worker's
+branch; until then it stays red even though the owner has decided.
+
+## Auditor CI state, stated plainly
+
+- `migration-ci.yml` runs on every PR and on `main`. Its red jobs are **by design** until the
+  implementation exists; they are the contract, not a bug.
+- Four gates are currently red for the wrong reason: they name test files that do not exist. When
+  the worker creates those files with real tests, the gates start measuring something. Until then
+  the auditor treats "no test target" as red, never as pass.
+- The auditor's own rule 6 and the cross-repo fixture job were withdrawn (see B4). They will not
+  come back without the worker's contract from B5.
