@@ -56,12 +56,12 @@ struct Ent {
 
 pub struct TypedPgStore {
     pool: std::sync::Arc<Pool>,
-    schema: String,
-    manifest: Manifest,
+    pub(crate) schema: String,
+    pub(crate) manifest: Manifest,
     ents: HashMap<String, Ent>,
 }
 
-fn ident_ok(s: &str) -> bool {
+pub(crate) fn ident_ok(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
         && s.starts_with(|c: char| c.is_ascii_lowercase())
@@ -78,7 +78,7 @@ fn is_uuid(s: &str) -> bool {
         })
 }
 
-fn db(e: postgres::Error) -> StoreError {
+pub(crate) fn db(e: postgres::Error) -> StoreError {
     match e.code().map(|c| c.code()) {
         Some("23505") => StoreError::Constraint("unique"),
         Some("23503") => StoreError::Constraint("reference"),
@@ -177,6 +177,18 @@ impl TypedPgStore {
         schema: &str,
         cfg: PoolConfig,
     ) -> Result<Self, StoreError> {
+        Self::install_with_migrations(url, m, schema, cfg, &crate::migrations::embedded())
+    }
+
+    /// Like [`install_with`](Self::install_with), recording and running exactly `migrations`
+    /// as the schema's history. Tests use it to install an older supported version.
+    pub fn install_with_migrations(
+        url: &str,
+        m: &Manifest,
+        schema: &str,
+        cfg: PoolConfig,
+        migrations: &[crate::migrations::Migration],
+    ) -> Result<Self, StoreError> {
         let ddl = ce_migrate::generate(m, schema)
             .map_err(|_| StoreError::BadData("manifest cannot be installed"))?;
         let pool = Self::pool(url, cfg)?;
@@ -198,6 +210,21 @@ impl TypedPgStore {
         .map_err(db)?;
         tx.batch_execute(&crate::blobs::ddl(schema)).map_err(db)?;
         tx.batch_execute(&crate::staff::ddl(schema)).map_err(db)?;
+        tx.batch_execute(&crate::migrations::history_ddl(schema))
+            .map_err(db)?;
+        for mig in migrations {
+            tx.batch_execute(&mig.sql.replace("__SCHEMA__", schema))
+                .map_err(db)?;
+            tx.execute(
+                &format!(
+                    r#"INSERT INTO "{schema}"."_ce_migration"
+                       (version, name, sha256, applied_by, manifest_hash, status)
+                       VALUES ($1, $2, $3, 'install', $4, 'applied')"#
+                ),
+                &[&(mig.version as i32), &mig.name, &mig.checksum(), &m.hash],
+            )
+            .map_err(db)?;
+        }
         tx.commit().map_err(db)?;
         drop(client);
         Self::build(pool, m, schema)
@@ -347,8 +374,12 @@ impl TypedPgStore {
             .map_err(db)
     }
 
-    fn lock(&self) -> Result<Conn<'_>, StoreError> {
+    pub(crate) fn lock(&self) -> Result<Conn<'_>, StoreError> {
         self.pool.get()
+    }
+
+    pub(crate) fn has_entity(&self, entity: &str) -> bool {
+        self.ents.contains_key(entity)
     }
 
     fn ent(&self, entity: &str) -> Result<&Ent, StoreError> {
@@ -590,7 +621,7 @@ impl TypedPgStore {
 
     /// Writes the record row (and, with a key, stores the result against it). `body` is the
     /// caller's fields with any derived ones merged in.
-    fn insert_row_on(
+    pub(crate) fn insert_row_on(
         &self,
         c: &mut impl GenericClient,
         scope: &TenantScope,
@@ -779,7 +810,14 @@ impl TypedPgStore {
         }
     }
 
-    fn set_state_on(
+    /// Whether `entity` declares `state` among its states.
+    pub(crate) fn declares_state(&self, entity: &str, state: &str) -> bool {
+        self.manifest.value["entities"][entity]["state"]["states"]
+            .get(state)
+            .is_some()
+    }
+
+    pub(crate) fn set_state_on(
         &self,
         c: &mut impl GenericClient,
         scope: &TenantScope,

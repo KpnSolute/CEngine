@@ -1,0 +1,59 @@
+{
+  "source_system": "mjcc",
+  "note": "Inventory slice of the MJCCv1 mapping. Parents first. Every source column is mapped, referenced, derived or ignored on purpose.",
+  "tables": [
+    {"source": "inventory_categories", "entity": "inventory_category", "fields": {"name": "name"}},
+    {"source": "vendors", "entity": "vendor", "fields": {"name": "name"}},
+    {"source": "month_periods", "entity": "period",
+     "transforms": {
+       "label": {"format": "{year:04}-{month:02}"},
+       "starts_on": {"month_start": ["year", "month"]},
+       "ends_on": {"month_end": ["year", "month"]}
+     },
+     "ignore": ["month", "year"]},
+    {"source": "inventory_items", "entity": "stock_item",
+     "fields": {"sku": "sku", "description": "description", "unit_price": "unit_price", "par_level": "par_level"},
+     "ignore": ["category_id"]},
+    {"source": "inventory_items", "source_key": "inventory_items#category", "entity": "stock_item_detail",
+     "refs": [
+       {"target": "item", "source": "id", "table": "inventory_items"},
+       {"target": "category", "source": "category_id", "table": "inventory_categories"}
+     ],
+     "ignore": ["sku", "description", "unit_price", "par_level"]},
+    {"source": "monthly_inventory", "entity": "stock_line",
+     "fields": {"opening_oh": "opening_oh", "opening_unit_cost": "opening_unit_cost", "unit_price": "unit_price"},
+     "refs": [
+       {"target": "item", "source": "item_id", "table": "inventory_items"},
+       {"target": "period", "source": "period_id", "table": "month_periods"}
+     ]},
+    {"source": "inventory_transactions", "entity": "stock_movement",
+     "fields": {"week": "week", "received": "received", "pulled": "pulled"},
+     "refs": [
+       {"target": "line", "table": "monthly_inventory", "by": {"item_id": "item_id", "period_id": "period_id"}},
+       {"target": "period", "source": "period_id", "table": "month_periods"}
+     ],
+     "ignore": ["item_id"]},
+    {"source": "invoices", "entity": "supplier_invoice",
+     "fields": {"invoice_no": "invoice_number", "invoice_date": "invoice_date", "tax": "tax",
+                "vizient_discount": "discount", "fuel_charge": "fuel_surcharge", "stated_total": "total"},
+     "transforms": {"vendor": {"lookup": {"table": "vendors", "by": "vendor_id", "field": "name"}}},
+     "ignore": ["subtotal"]},
+    {"source": "invoice_items", "entity": "supplier_invoice_line",
+     "fields": {"vendor_sku": "sku", "description": "description", "qty": "quantity_shipped", "unit_price": "unit_price"},
+     "refs": [{"target": "invoice", "source": "invoice_id", "table": "invoices"}],
+     "transforms": {"line_no": {"ordinal": {"within": "invoice_id"}}},
+     "ignore": ["extended_price"]},
+    {"source": "price_review_queue", "entity": "price_observation",
+     "fields": {"observed_price": "observed_price", "previous_price": "previous_price",
+                "applied_price": "applied_price", "source": "source_file"},
+     "derive": {"period_id": {"find": {"table": "month_periods",
+                                       "match": {"month": {"col": "month", "add": 1}, "year": "year"},
+                                       "field": "id"}}},
+     "refs": [{"target": "line", "table": "monthly_inventory", "by": {"item_id": "item_id", "period_id": "period_id"}}],
+     "transforms": {"decision": {"map": {"from": "status", "values": {
+        "auto_applied": "apply", "applied": "apply", "kept": "hold", "pending": "hold", "dismissed": "skip"}}}},
+     "state_from": "status",
+     "ignore": ["sku", "description", "week", "invoice_number", "staging_entry_id", "change_pct",
+                "reason", "created_by", "resolved_by", "resolved_at", "created_at"]}
+  ]
+}
