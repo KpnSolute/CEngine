@@ -396,6 +396,8 @@ fn the_fixture_loads_parents_then_children_and_nothing_is_dropped() {
         ("inventory_items#category", 2),
         ("monthly_inventory", 2),
         ("inventory_transactions", 3),
+        ("invoices", 2),
+        ("invoice_items", 3),
     ] {
         let c = &report[table];
         assert_eq!((c.written, c.rejected), (n, 0), "{table}: {c:?}");
@@ -660,4 +662,125 @@ fn a_target_that_differs_by_a_cent_fails_the_run() {
     assert!(!o.pass, "legacy {l_val} target {t_val}");
     e.s().migration_set_run_status(&run, "reconciling").unwrap();
     assert_eq!(e.s().migration_finish_run(&run, 1).unwrap(), "failed");
+}
+
+#[test]
+fn invoices_reconcile_per_invoice_and_line_totals_match_to_the_cent() {
+    let Some(url) = url() else { return };
+    let e = Env::with(&url, &inventory_manifest());
+    let fx = read_json("tests/migration/fixtures/normal_month.json");
+    let run = e.run("rehearsal");
+    e.s().migration_set_run_status(&run, "running").unwrap();
+    load(&e, &run, &fx["tables"]);
+    e.s().migration_set_run_status(&run, "reconciling").unwrap();
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    let t = &fx["tables"];
+    let num = |c: &mut ce_store_pg::Client,
+               sql: &str,
+               args: &[&(dyn ce_store_pg::ToSql + Sync)]|
+     -> String { c.query_one(sql, args).unwrap().get(0) };
+    let mut passes = 0;
+    for inv in t["invoices"].as_array().unwrap() {
+        let id = inv["id"].as_str().unwrap();
+        // Legacy side: the stated figures and the lines' own quantity x price.
+        let goods = t["invoice_items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|l| l["invoice_id"] == inv["id"])
+            .fold("0".to_string(), |a, l| {
+                let (q, p) = (l["quantity_shipped"].as_str().unwrap(), l["unit_price"].as_str().unwrap());
+                num(&mut c, "SELECT ($1::text::numeric + round($2::text::numeric * $3::text::numeric, 2))::text", &[&a, &q, &p])
+            });
+        let g = |k: &str| inv[k].as_str().unwrap().to_string();
+        let legacy_delta = num(
+            &mut c,
+            "SELECT round($5::text::numeric - ($1::text::numeric + $2::text::numeric + $3::text::numeric - $4::text::numeric), 2)::text",
+            &[&goods, &g("fuel_surcharge"), &g("tax"), &g("discount"), &g("total")],
+        );
+        let sid = e
+            .s()
+            .migration_lookup(T, "mjcc", "invoices", id)
+            .unwrap()
+            .unwrap();
+        let row = c
+            .query_one(
+                &format!(
+                    r#"SELECT goods_total::text, delta::text, reconciled FROM "{}".supplier_invoice WHERE id::text = $1"#,
+                    e.schema
+                ),
+                &[&sid],
+            )
+            .unwrap();
+        let (eng_goods, eng_delta, eng_reconciled): (String, String, bool) =
+            (row.get(0), row.get(1), row.get(2));
+        let o = e
+            .s()
+            .migration_check(
+                T,
+                &run,
+                "invoice_goods_total",
+                "invoice",
+                id,
+                &goods,
+                &eng_goods,
+                None,
+            )
+            .unwrap();
+        assert!(
+            o.pass,
+            "invoice {id}: legacy goods {goods} engine {eng_goods}"
+        );
+        let o = e
+            .s()
+            .migration_check(
+                T,
+                &run,
+                "invoice_delta",
+                "invoice",
+                id,
+                &legacy_delta,
+                &eng_delta,
+                None,
+            )
+            .unwrap();
+        assert!(
+            o.pass,
+            "invoice {id}: legacy delta {legacy_delta} engine {eng_delta}"
+        );
+        // The reconciled flag is recomputed, not copied: only the invoice that adds up is true.
+        assert_eq!(eng_reconciled, legacy_delta == "0.00", "invoice {id}");
+        passes += 2;
+    }
+    // Line totals: each line's quantity x price, summed over the whole table.
+    let legacy_lines: String = t["invoice_items"].as_array().unwrap().iter().fold("0".to_string(), |a, l| {
+        let (q, p) = (l["quantity_shipped"].as_str().unwrap(), l["unit_price"].as_str().unwrap());
+        num(&mut c, "SELECT ($1::text::numeric + round($2::text::numeric * $3::text::numeric, 2))::text", &[&a, &q, &p])
+    });
+    let engine_lines: String = c
+        .query_one(
+            &format!(
+                r#"SELECT coalesce(sum(ext_price),0)::text FROM "{}".supplier_invoice_line"#,
+                e.schema
+            ),
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let o = e
+        .s()
+        .migration_check(
+            T,
+            &run,
+            "invoice_line_total",
+            "table",
+            "invoice_items",
+            &legacy_lines,
+            &engine_lines,
+            None,
+        )
+        .unwrap();
+    assert!(o.pass, "legacy lines {legacy_lines} engine {engine_lines}");
+    let _ = passes;
+    assert_eq!(e.count("supplier_invoice_line"), 3);
 }

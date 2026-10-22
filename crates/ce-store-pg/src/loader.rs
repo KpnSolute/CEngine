@@ -105,6 +105,26 @@ fn transform(spec: &Value, row: &Map<String, Value>) -> Option<Value> {
     Some(json!(format!("{y:04}-{m:02}-{d:02}")))
 }
 
+/// `{"table": "vendors", "by": "vendor_id", "field": "name"}`: the value of `field` on the row of
+/// `table` whose key (default `id`) equals this row's `by` column.
+fn lookup_value(
+    spec: &Value,
+    row: &Map<String, Value>,
+    tables: &Map<String, Value>,
+) -> Option<Value> {
+    let want = row.get(spec["by"].as_str()?).and_then(text)?;
+    let key = spec["key"].as_str().unwrap_or("id");
+    tables
+        .get(spec["table"].as_str()?)?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_object)
+        .find(|p| p.get(key).and_then(text).as_deref() == Some(want.as_str()))
+        .and_then(|p| p.get(spec["field"].as_str()?))
+        .filter(|v| !v.is_null())
+        .cloned()
+}
+
 fn used_columns(t: &Value) -> BTreeSet<String> {
     let mut used = BTreeSet::new();
     fn add(used: &mut BTreeSet<String>, v: &Value) {
@@ -150,6 +170,8 @@ fn used_columns(t: &Value) -> BTreeSet<String> {
                 add(&mut used, c);
             }
         }
+        add(&mut used, &spec["lookup"]["by"]);
+        add(&mut used, &spec["ordinal"]["within"]);
     }
     used
 }
@@ -220,6 +242,7 @@ impl TypedPgStore {
             let source_key = t["source_key"].as_str().unwrap_or(source);
             let key = t["key"].as_str().unwrap_or("id");
             let count = report.entry(source_key.to_string()).or_default();
+            let mut seen_in_group: BTreeMap<String, i64> = BTreeMap::new();
             for row in tables
                 .get(source)
                 .and_then(Value::as_array)
@@ -266,7 +289,19 @@ impl TypedPgStore {
                 }
                 let mut bad = None;
                 for (target, spec) in t["transforms"].as_object().into_iter().flatten() {
-                    match transform(spec, row) {
+                    let found = if spec.get("lookup").is_some() {
+                        lookup_value(&spec["lookup"], row, tables)
+                    } else if let Some(col) = spec["ordinal"]["within"].as_str() {
+                        // 1, 2, 3 ... in the order the rows appear, restarting per parent.
+                        let n = seen_in_group
+                            .entry(row.get(col).and_then(text).unwrap_or_default())
+                            .or_insert(0);
+                        *n += 1;
+                        Some(json!(*n))
+                    } else {
+                        transform(spec, row)
+                    };
+                    match found {
                         Some(v) => {
                             data.insert(target.clone(), v);
                         }

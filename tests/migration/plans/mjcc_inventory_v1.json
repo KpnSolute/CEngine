@@ -32,6 +32,16 @@
        {"target": "line", "table": "monthly_inventory", "by": {"item_id": "item_id", "period_id": "period_id"}},
        {"target": "period", "source": "period_id", "table": "month_periods"}
      ],
-     "ignore": ["item_id"]}
+     "ignore": ["item_id"]},
+    {"source": "invoices", "entity": "supplier_invoice",
+     "fields": {"invoice_no": "invoice_number", "invoice_date": "invoice_date", "tax": "tax",
+                "vizient_discount": "discount", "fuel_charge": "fuel_surcharge", "stated_total": "total"},
+     "transforms": {"vendor": {"lookup": {"table": "vendors", "by": "vendor_id", "field": "name"}}},
+     "ignore": ["subtotal"]},
+    {"source": "invoice_items", "entity": "supplier_invoice_line",
+     "fields": {"vendor_sku": "sku", "description": "description", "qty": "quantity_shipped", "unit_price": "unit_price"},
+     "refs": [{"target": "invoice", "source": "invoice_id", "table": "invoices"}],
+     "transforms": {"line_no": {"ordinal": {"within": "invoice_id"}}},
+     "ignore": ["extended_price"]}
   ]
 }

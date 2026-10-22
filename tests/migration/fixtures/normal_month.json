@@ -16,6 +16,15 @@
       {"id": "t1", "item_id": "i1", "period_id": "p1", "week": 1, "received": "5", "pulled": "0"},
       {"id": "t2", "item_id": "i1", "period_id": "p1", "week": 1, "received": "0", "pulled": "3"},
       {"id": "t3", "item_id": "i2", "period_id": "p1", "week": 2, "received": "0", "pulled": "2"}
+    ],
+    "invoices": [
+      {"id": "n1", "vendor_id": "v1", "invoice_number": "S-1001", "invoice_date": "2026-11-03", "subtotal": "100.00", "discount": "2.00", "tax": "1.50", "fuel_surcharge": "3.00", "total": "102.50"},
+      {"id": "n2", "vendor_id": "v1", "invoice_number": "S-1002", "invoice_date": "2026-11-10", "subtotal": "40.50", "discount": "0.00", "tax": "0.00", "fuel_surcharge": "0.00", "total": "41.00"}
+    ],
+    "invoice_items": [
+      {"id": "l1", "invoice_id": "n1", "sku": "SYN-100", "description": "Rice", "quantity_shipped": "10", "unit_price": "5.00", "extended_price": "50.00"},
+      {"id": "l2", "invoice_id": "n1", "sku": "SYN-200", "description": "Milk", "quantity_shipped": "4", "unit_price": "12.50", "extended_price": "50.00"},
+      {"id": "l3", "invoice_id": "n2", "sku": "SYN-100", "description": "Rice", "quantity_shipped": "3", "unit_price": "13.50", "extended_price": "40.50"}
     ]
   }
 }

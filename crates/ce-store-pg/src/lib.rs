@@ -32,6 +32,7 @@ pub use tls::{connect, Tls};
 pub use typed::{PoolConfig, TypedPgStore};
 
 use ce_store::{Record, Store, StoreError, TenantScope};
+pub use postgres::types::ToSql;
 pub use postgres::Client;
 use postgres::NoTls;
 use serde_json::{json, Value};
