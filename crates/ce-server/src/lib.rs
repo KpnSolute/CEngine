@@ -20,6 +20,7 @@ mod changesets;
 mod deliveries;
 mod events;
 mod files;
+pub mod files_migrate;
 mod login;
 mod openapi;
 mod periods;
