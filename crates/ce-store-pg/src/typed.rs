@@ -713,7 +713,7 @@ impl TypedPgStore {
         self.insert_row_on(c, scope, entity, data, idempotency_key)
     }
 
-    fn get_on(
+    pub(crate) fn get_on(
         &self,
         c: &mut impl GenericClient,
         scope: &TenantScope,
@@ -741,7 +741,7 @@ impl TypedPgStore {
         Ok(ent.record(entity, &row))
     }
 
-    fn update_on(
+    pub(crate) fn update_on(
         &self,
         c: &mut impl GenericClient,
         scope: &TenantScope,

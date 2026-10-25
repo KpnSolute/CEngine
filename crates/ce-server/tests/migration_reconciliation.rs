@@ -325,6 +325,12 @@ fn inventory_manifest() -> ce_manifest::Manifest {
                 "week_4_locked": {"type": "boolean", "default": false}
             }, "sort_keys": ["label"]},
             "inventory_category": {"fields": {"name": {"type": "string", "required": true, "unique": true, "max_length": 80}}},
+            "staff_member": {"fields": {
+                "username": {"type": "string", "required": true, "unique": true, "max_length": 80},
+                "display_name": {"type": "string", "max_length": 120},
+                "role": {"type": "enum", "values": ["staff", "assistant", "manager", "admin", "sudo"], "required": true},
+                "active": {"type": "boolean", "default": true}
+            }, "sort_keys": ["username"]},
             "vendor": {"fields": {"name": {"type": "string", "required": true, "unique": true, "max_length": 120}}},
             "stock_item_detail": {"fields": {
                 "item": {"type": "ref", "ref": "stock_item", "required": true},
@@ -399,6 +405,8 @@ fn the_fixture_loads_parents_then_children_and_nothing_is_dropped() {
         ("invoices", 2),
         ("invoice_items", 3),
         ("price_review_queue", 3),
+        ("week_status", 3),
+        ("user_profiles", 3),
     ] {
         let c = &report[table];
         assert_eq!((c.written, c.rejected), (n, 0), "{table}: {c:?}");
@@ -872,4 +880,119 @@ fn a_status_the_entity_does_not_declare_is_refused_by_name() {
     assert_eq!((c.written, c.rejected), (2, 1), "{c:?}");
     assert_eq!(e.count("price_observation"), 2);
     assert_eq!(e.count("migration_errors"), 1);
+}
+
+#[test]
+fn week_locks_land_on_the_period_and_a_week_it_cannot_hold_is_refused() {
+    let Some(url) = url() else { return };
+    let e = Env::with(&url, &inventory_manifest());
+    let mut fx = read_json("tests/migration/fixtures/normal_month.json");
+    let run = e.run("rehearsal");
+    e.s().migration_set_run_status(&run, "running").unwrap();
+    let report = load(&e, &run, &fx["tables"]);
+    assert_eq!(report["week_status"].written, 3);
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    let row = c
+        .query_one(
+            &format!(
+                r#"SELECT week_1_locked, week_2_locked, week_3_locked, week_4_locked FROM "{}".period"#,
+                e.schema
+            ),
+            &[],
+        )
+        .unwrap();
+    let flags: Vec<bool> = (0..4).map(|i| row.get(i)).collect();
+    // Locked and published weeks are locked; an open week is not; an unlisted week stays open.
+    assert_eq!(flags, [true, false, true, false]);
+    let legacy_locked = fx["tables"]["week_status"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| matches!(w["status"].as_str(), Some("locked" | "published")))
+        .count();
+    assert_eq!(flags.iter().filter(|f| **f).count(), legacy_locked);
+    // The change is on the audit trail under the import request id.
+    let n: i64 = c
+        .query_one(
+            &format!(
+                r#"SELECT count(*) FROM "{}".audit_event WHERE entity = 'period'
+                   AND operation = 'update' AND request_id = 'legacy-import'"#,
+                e.schema
+            ),
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 3);
+    // A second load changes nothing.
+    let again = load(&e, &run, &fx["tables"]);
+    assert_eq!(again["week_status"].written, 0);
+    // The period holds weeks 1 to 4; a fifth is refused by name, not dropped.
+    let e2 = Env::with(&url, &inventory_manifest());
+    fx["tables"]["week_status"] = serde_json::json!([
+        {"id": "w5", "month": 10, "year": 2026, "week": 5, "status": "locked", "locked_by": "u1",
+         "locked_at": "2026-11-29T10:00:00Z", "created_at": "2026-11-01T00:00:00Z"}
+    ]);
+    let run2 = e2.run("rehearsal");
+    e2.s().migration_set_run_status(&run2, "running").unwrap();
+    let r2 = load(&e2, &run2, &fx["tables"]);
+    assert_eq!(
+        (r2["week_status"].written, r2["week_status"].rejected),
+        (0, 1)
+    );
+    assert_eq!(e2.count("migration_errors"), 1);
+}
+
+#[test]
+fn staff_load_with_their_roles_and_no_pin_reaches_the_target() {
+    let Some(url) = url() else { return };
+    let e = Env::with(&url, &inventory_manifest());
+    let fx = read_json("tests/migration/fixtures/normal_month.json");
+    let run = e.run("rehearsal");
+    e.s().migration_set_run_status(&run, "running").unwrap();
+    load(&e, &run, &fx["tables"]);
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    let rows = fx["tables"]["user_profiles"].as_array().unwrap();
+    for r in rows {
+        let row = c
+            .query_one(
+                &format!(
+                    r#"SELECT role, active, display_name FROM "{}".staff_member WHERE username = $1"#,
+                    e.schema
+                ),
+                &[&r["username"].as_str().unwrap()],
+            )
+            .unwrap();
+        let (role, active, name): (String, bool, String) = (row.get(0), row.get(1), row.get(2));
+        assert_eq!(role, r["role"].as_str().unwrap());
+        assert_eq!(active, r["active"].as_bool().unwrap());
+        assert_eq!(name, r["display_name"].as_str().unwrap());
+    }
+    // No PIN, in any table of the target schema, in any column.
+    let tables: Vec<String> = c
+        .query(
+            "SELECT table_name::text FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'",
+            &[&e.schema],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert!(tables.len() > 10);
+    for r in rows {
+        let pin = r["pin"].as_str().unwrap();
+        for t in &tables {
+            let n: i64 = c
+                .query_one(
+                    &format!(
+                        r#"SELECT count(*) FROM "{}"."{t}" x WHERE row_to_json(x)::text LIKE $1"#,
+                        e.schema
+                    ),
+                    &[&format!("%{pin}%")],
+                )
+                .unwrap()
+                .get(0);
+            assert_eq!(n, 0, "a PIN reached {t}");
+        }
+    }
 }

@@ -1,6 +1,11 @@
 {
   "description": "Synthetic fixture: one normal month with two weeks of movements. No real MJCC data.",
   "tables": {
+    "user_profiles": [
+      {"id": "u1", "username": "syn.admin", "display_name": "Synthetic Admin", "role": "admin", "pin": "913755", "active": true, "created_at": "2026-01-05T00:00:00Z", "updated_at": "2026-01-05T00:00:00Z"},
+      {"id": "u2", "username": "syn.manager", "display_name": "Synthetic Manager", "role": "manager", "pin": "824166", "active": true, "created_at": "2026-01-06T00:00:00Z", "updated_at": "2026-01-06T00:00:00Z"},
+      {"id": "u3", "username": "syn.cook", "display_name": "Synthetic Cook", "role": "staff", "pin": "735277", "active": false, "created_at": "2026-01-07T00:00:00Z", "updated_at": "2026-01-07T00:00:00Z"}
+    ],
     "inventory_categories": [{"id": "c1", "name": "Dry goods"}, {"id": "c2", "name": "Dairy"}],
     "vendors": [{"id": "v1", "name": "Synthetic Foods"}],
     "inventory_items": [
@@ -25,6 +30,11 @@
       {"id": "q1", "item_id": "i1", "sku": "SYN-100", "description": "Rice", "month": 10, "year": 2026, "week": 1, "invoice_number": "S-1001", "source_file": "s-1001.pdf", "staging_entry_id": "s1", "previous_price": "1.20", "observed_price": "1.25", "applied_price": "1.25", "change_pct": "4.1667", "status": "applied", "reason": "within tolerance", "created_by": "u1", "resolved_by": "u1", "resolved_at": "2026-11-04T10:00:00Z", "created_at": "2026-11-03T10:00:00Z"},
       {"id": "q2", "item_id": "i2", "sku": "SYN-200", "description": "Milk", "month": 10, "year": 2026, "week": 2, "invoice_number": "S-1002", "source_file": "s-1002.pdf", "staging_entry_id": "s2", "previous_price": "2.00", "observed_price": "2.40", "applied_price": null, "change_pct": "20.0000", "status": "pending", "reason": "over tolerance", "created_by": "u1", "resolved_by": null, "resolved_at": null, "created_at": "2026-11-10T10:00:00Z"},
       {"id": "q3", "item_id": "i2", "sku": "SYN-200", "description": "Milk", "month": 10, "year": 2026, "week": 2, "invoice_number": "S-1003", "source_file": "s-1003.pdf", "staging_entry_id": "s3", "previous_price": "2.00", "observed_price": "2.02", "applied_price": null, "change_pct": "1.0000", "status": "dismissed", "reason": "noise", "created_by": "u1", "resolved_by": "u1", "resolved_at": "2026-11-11T10:00:00Z", "created_at": "2026-11-10T11:00:00Z"}
+    ],
+    "week_status": [
+      {"id": "w1", "month": 10, "year": 2026, "week": 1, "status": "locked", "locked_by": "u1", "locked_at": "2026-11-08T10:00:00Z", "created_at": "2026-11-01T00:00:00Z"},
+      {"id": "w2", "month": 10, "year": 2026, "week": 2, "status": "open", "locked_by": null, "locked_at": null, "created_at": "2026-11-01T00:00:00Z"},
+      {"id": "w3", "month": 10, "year": 2026, "week": 3, "status": "published", "locked_by": "u1", "locked_at": "2026-11-22T10:00:00Z", "created_at": "2026-11-01T00:00:00Z"}
     ],
     "invoice_items": [
       {"id": "l1", "invoice_id": "n1", "sku": "SYN-100", "description": "Rice", "quantity_shipped": "10", "unit_price": "5.00", "extended_price": "50.00"},

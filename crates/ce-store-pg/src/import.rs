@@ -40,7 +40,116 @@ pub struct Imported {
     pub created: bool,
 }
 
+/// A legacy row that does not create a record of its own but sets fields on one already
+/// imported (a week's lock state lives on the period here).
+pub struct PatchRecord<'a> {
+    pub run: &'a str,
+    pub source_system: &'a str,
+    pub source_table: &'a str,
+    pub source_id: &'a str,
+    pub entity: &'a str,
+    pub target_id: &'a str,
+    pub patch: Value,
+    pub actor: &'a str,
+    pub at: i64,
+}
+
 impl TypedPgStore {
+    /// Merges `patch` into an imported record, once per source row. A second call for the same
+    /// source row changes nothing.
+    pub fn migration_patch(
+        &self,
+        scope: &TenantScope,
+        rec: &PatchRecord<'_>,
+    ) -> Result<Imported, StoreError> {
+        if !ident_ok(&self.schema) || !ident_ok(rec.entity) {
+            return Err(StoreError::BadData("invalid schema or entity name"));
+        }
+        let tenant = scope.tenant_id();
+        let sch = &self.schema;
+        let mut c = self.lock()?;
+        let mut tx = c.transaction().map_err(db)?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            &[&format!(
+                "{sch}/import/{tenant}/{}/{}/{}",
+                rec.source_system, rec.source_table, rec.source_id
+            )],
+        )
+        .map_err(db)?;
+        let done = tx
+            .query_opt(
+                &format!(
+                    r#"SELECT 1 FROM "{sch}".migration_id_map WHERE tenant_id = $1::text::uuid
+                       AND source_system = $2 AND source_table = $3 AND source_id = $4"#
+                ),
+                &[
+                    &tenant,
+                    &rec.source_system,
+                    &rec.source_table,
+                    &rec.source_id,
+                ],
+            )
+            .map_err(db)?;
+        if done.is_some() {
+            return Ok(Imported {
+                target_id: rec.target_id.to_string(),
+                created: false,
+            });
+        }
+        let before = self.get_on(&mut tx, scope, rec.entity, rec.target_id, true)?;
+        let mut data = before.data.as_object().cloned().unwrap_or_default();
+        for (k, v) in rec.patch.as_object().into_iter().flatten() {
+            data.insert(k.clone(), v.clone());
+        }
+        let after = self.update_on(
+            &mut tx,
+            scope,
+            rec.entity,
+            rec.target_id,
+            before.version,
+            Value::Object(data),
+        )?;
+        tx.execute(
+            &format!(
+                r#"INSERT INTO "{sch}".migration_id_map
+                     (tenant_id, migration_run_id, source_system, source_table, source_id,
+                      target_entity, target_id, source_parent_id)
+                   VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5, $6, $7::text::uuid, $7)"#
+            ),
+            &[
+                &tenant,
+                &rec.run,
+                &rec.source_system,
+                &rec.source_table,
+                &rec.source_id,
+                &rec.entity,
+                &rec.target_id,
+            ],
+        )
+        .map_err(db)?;
+        if self.has_entity("audit_event") {
+            let mut ev = Map::new();
+            ev.insert("entity".into(), json!(rec.entity));
+            ev.insert("record_id".into(), json!(rec.target_id));
+            ev.insert("operation".into(), json!("update"));
+            ev.insert("actor".into(), json!(rec.actor));
+            ev.insert("request_id".into(), json!(IMPORT_REQUEST_ID));
+            ev.insert("at".into(), json!(rec.at));
+            ev.insert("manifest_hash".into(), json!(self.manifest.hash));
+            ev.insert("from_version".into(), json!(before.version));
+            ev.insert("to_version".into(), json!(after.version));
+            ev.insert("before".into(), before.data.clone());
+            ev.insert("after".into(), after.data.clone());
+            self.insert_row_on(&mut tx, scope, "audit_event", Value::Object(ev), None)?;
+        }
+        tx.commit().map_err(db)?;
+        Ok(Imported {
+            target_id: rec.target_id.to_string(),
+            created: true,
+        })
+    }
+
     pub fn migration_import(
         &self,
         scope: &TenantScope,

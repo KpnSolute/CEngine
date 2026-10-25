@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ce_store::{StoreError, TenantScope};
 use serde_json::{json, Map, Value};
 
-use crate::import::ImportRecord;
+use crate::import::{ImportRecord, PatchRecord};
 use crate::typed::TypedPgStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +175,23 @@ fn used_columns(t: &Value) -> BTreeSet<String> {
     }
     for k in ["actor", "at", "state_from"] {
         add(&mut used, &t[k]);
+    }
+    for sp in t["set"].as_array().into_iter().flatten() {
+        add(&mut used, &sp["col"]);
+        if let Some(f) = sp["field"].as_str() {
+            let mut rest = f;
+            while let Some(i) = rest.find('{') {
+                let Some(j) = rest[i..].find('}') else { break };
+                used.insert(
+                    rest[i + 1..i + j]
+                        .split(':')
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                );
+                rest = &rest[i + j + 1..];
+            }
+        }
     }
     for d in t["derive"].as_object().into_iter().flat_map(|o| o.values()) {
         for v in d["find"]["match"]
@@ -349,6 +366,24 @@ impl TypedPgStore {
                     data.insert(target.clone(), v.clone());
                 }
                 let mut bad = None;
+                // `set`: boolean fields named from the row, true when a column has one of the
+                // listed values (`week_{week}_locked` is true for a locked or published week).
+                for sp in t["set"].as_array().into_iter().flatten() {
+                    let name = sp["field"].as_str().and_then(|f| format_template(f, row));
+                    let value = sp["col"].as_str().and_then(|c| row.get(c)).and_then(text);
+                    let allowed = sp["in"].as_array().map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect::<Vec<_>>()
+                    });
+                    match (name, value, allowed) {
+                        (Some(n), Some(v), Some(a)) => {
+                            data.insert(n, json!(a.contains(&v)));
+                        }
+                        _ => bad = Some(("BAD_VALUE", "a flag could not be computed")),
+                    }
+                }
                 for (target, spec) in t["transforms"].as_object().into_iter().flatten() {
                     let found = if let Some(m) = spec.get("map") {
                         // One column's value looked up in a fixed table; an unknown value is refused.
@@ -435,6 +470,46 @@ impl TypedPgStore {
                     .and_then(Value::as_i64)
                     .or_else(|| t["at_const"].as_i64())
                     .unwrap_or(default_at);
+                if t["mode"].as_str() == Some("update") {
+                    // The row names an imported record (`id` in its refs) and sets fields on it.
+                    let Some(target) = data.remove("id").and_then(|v| v.as_str().map(String::from))
+                    else {
+                        reject("MISSING_PARENT", "the record to update was not loaded");
+                        count.rejected += 1;
+                        continue;
+                    };
+                    let actor = t["actor"]
+                        .as_str()
+                        .and_then(|c| row.get(c))
+                        .and_then(text)
+                        .or_else(|| t["actor_const"].as_str().map(String::from))
+                        .unwrap_or_else(|| default_actor.to_string());
+                    let at = t["at"]
+                        .as_str()
+                        .and_then(|c| row.get(c))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(default_at);
+                    let rec = PatchRecord {
+                        run,
+                        source_system: &system,
+                        source_table: source_key,
+                        source_id: &sid,
+                        entity,
+                        target_id: &target,
+                        patch: Value::Object(data),
+                        actor: &actor,
+                        at,
+                    };
+                    match self.migration_patch(scope, &rec) {
+                        Ok(o) if o.created => count.written += 1,
+                        Ok(_) => count.already_mapped += 1,
+                        Err(e) => {
+                            reject(code_of(&e), "the target refused the row");
+                            count.rejected += 1;
+                        }
+                    }
+                    continue;
+                }
                 let state = t["state_from"]
                     .as_str()
                     .and_then(|c| row.get(c))
