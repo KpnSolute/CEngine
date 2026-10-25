@@ -307,6 +307,47 @@
         "locked_at",
         "created_at"
       ]
+    },
+    {
+      "source": "cost_budgets",
+      "entity": "cost_budget",
+      "derive": {
+        "period_id": {
+          "find": {
+            "table": "month_periods",
+            "match": {
+              "month": {
+                "col": "month",
+                "add": 1
+              },
+              "year": "year"
+            },
+            "field": "id"
+          }
+        }
+      },
+      "refs": [
+        {
+          "target": "period",
+          "table": "month_periods",
+          "source": "period_id"
+        }
+      ],
+      "fields": {
+        "gov_allotment": "gov_allotment",
+        "notes": "notes",
+        "w1_planned_pull": "w1_planned_pull",
+        "w2_planned_pull": "w2_planned_pull",
+        "w3_planned_pull": "w3_planned_pull",
+        "w1_planned_renewable": "w1_planned_renewable",
+        "w2_planned_renewable": "w2_planned_renewable",
+        "w3_planned_renewable": "w3_planned_renewable"
+      },
+      "ignore": [
+        "created_by",
+        "created_at",
+        "updated_at"
+      ]
     }
   ]
 }

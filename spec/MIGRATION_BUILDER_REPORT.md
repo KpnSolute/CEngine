@@ -37,6 +37,7 @@ Built and tested (synthetic data only, local Postgres 16, no MJCCv1 connection):
 - Engine recompute: `settle_imported` recomputes derived fields after a load; they are never copied.
 - Reconciliation (`migration_reconciliation.rs`, 12 tests): inventory totals (received, pulled, ending quantity, ending value) equal the legacy formulas to the cent using the `mjcc-legacy-valuation` plugin; a cent off fails; per-invoice goods total and delta equal the legacy figures and only the invoice that adds up is `reconciled`; line totals equal; price history keeps status, decision, prices and the month-0 offset; an undeclared status is refused by name; a second load creates nothing.
 - Week locks (update mode, audited under `legacy-import`; a fifth week is refused by name) and staff (role mapped, PIN never copied; a scan of every target table finds no PIN) in `migration_reconciliation.rs`, now 14 tests.
+- Cost budgets (owner choice 2026-10-25: add weekly fields): six weekly planned pull/renewable fields added to the template's `cost_budget`; allotment, notes and every weekly plan reconcile to the cent, 0-based legacy month shifted to match the period; test `budgets_keep_the_allotment_and_every_weekly_plan_to_the_cent`, file now 15 tests. Synthetic data only.
 - Files (`migration_files.rs`, 6 tests, G7): source hash and size checked, copy read back and hashed, link only after that, missing/empty/mismatch/missing-record/corrupt copy rejected by code with no leftover bytes, duplicates counted, orphan sources listed, re-run changes nothing, `verify_files` finds missing, tampered, cross-tenant and wrongly owned links.
 
 Not built, so the matching rows stay red:
@@ -50,7 +51,7 @@ Not built, so the matching rows stay red:
 
 ## 7. Test counts
 
-`cargo test --workspace -q` with `CE_REQUIRE_DB=1`: 457 passed, 0 failed. `cargo clippy --workspace --all-targets -D warnings`: clean. Extractor: 16 tests OK; fixtures validate against the map (9 tables).
+`cargo test --workspace -q` with `CE_REQUIRE_DB=1`: 458 passed, 0 failed. `cargo clippy --workspace --all-targets -D warnings`: clean. Extractor: 16 tests OK; fixtures validate against the map (9 tables).
 
 ## 8. Gates
 

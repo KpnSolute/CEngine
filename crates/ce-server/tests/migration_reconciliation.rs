@@ -325,6 +325,17 @@ fn inventory_manifest() -> ce_manifest::Manifest {
                 "week_4_locked": {"type": "boolean", "default": false}
             }, "sort_keys": ["label"]},
             "inventory_category": {"fields": {"name": {"type": "string", "required": true, "unique": true, "max_length": 80}}},
+            "cost_budget": {"fields": {
+                "period": {"type": "ref", "ref": "period", "required": true, "unique": true},
+                "gov_allotment": {"type": "decimal", "precision": 12, "scale": 2, "required": true},
+                "notes": {"type": "text"},
+                "w1_planned_pull": {"type": "decimal", "precision": 12, "scale": 2},
+                "w2_planned_pull": {"type": "decimal", "precision": 12, "scale": 2},
+                "w3_planned_pull": {"type": "decimal", "precision": 12, "scale": 2},
+                "w1_planned_renewable": {"type": "decimal", "precision": 12, "scale": 2},
+                "w2_planned_renewable": {"type": "decimal", "precision": 12, "scale": 2},
+                "w3_planned_renewable": {"type": "decimal", "precision": 12, "scale": 2}
+            }},
             "staff_member": {"fields": {
                 "username": {"type": "string", "required": true, "unique": true, "max_length": 80},
                 "display_name": {"type": "string", "max_length": 120},
@@ -407,6 +418,7 @@ fn the_fixture_loads_parents_then_children_and_nothing_is_dropped() {
         ("price_review_queue", 3),
         ("week_status", 3),
         ("user_profiles", 3),
+        ("cost_budgets", 1),
     ] {
         let c = &report[table];
         assert_eq!((c.written, c.rejected), (n, 0), "{table}: {c:?}");
@@ -995,4 +1007,52 @@ fn staff_load_with_their_roles_and_no_pin_reaches_the_target() {
             assert_eq!(n, 0, "a PIN reached {t}");
         }
     }
+}
+
+#[test]
+fn budgets_keep_the_allotment_and_every_weekly_plan_to_the_cent() {
+    let Some(url) = url() else { return };
+    let e = Env::with(&url, &inventory_manifest());
+    let fx = read_json("tests/migration/fixtures/normal_month.json");
+    let run = e.run("rehearsal");
+    e.s().migration_set_run_status(&run, "running").unwrap();
+    load(&e, &run, &fx["tables"]);
+    e.s().migration_set_run_status(&run, "reconciling").unwrap();
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    let b = &fx["tables"]["cost_budgets"][0];
+    for col in [
+        "gov_allotment",
+        "w1_planned_pull",
+        "w2_planned_pull",
+        "w3_planned_pull",
+        "w1_planned_renewable",
+        "w2_planned_renewable",
+        "w3_planned_renewable",
+    ] {
+        let legacy = b[col].as_str().unwrap();
+        let engine: String = c
+            .query_one(
+                &format!(r#"SELECT {col}::text FROM "{}".cost_budget"#, e.schema),
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        let o = e
+            .s()
+            .migration_check(T, &run, col, "cost_budget", "b1", legacy, &engine, None)
+            .unwrap();
+        assert!(o.pass, "{col}: legacy {legacy} engine {engine}");
+    }
+    // The budget sits on the period of its month (legacy months count from 0).
+    let label: String = c
+        .query_one(
+            &format!(
+                r#"SELECT p.label FROM "{s}".cost_budget b JOIN "{s}".period p ON p.id = b.period"#,
+                s = e.schema
+            ),
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(label, "2026-11");
 }
