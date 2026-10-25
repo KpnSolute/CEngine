@@ -117,7 +117,7 @@ jobs:
           python-version: '3.12'
       - run: pip install -r mjcc/tools/requirements-migration.txt
       - name: Fixture ETL
-        run: python mjcc/tools/migrate_v1.py --fixtures tests/migration/fixtures --target "$CE_TEST_DATABASE_URL" --check
+        run: python tools/migrate_v1.py --fixtures tests/migration/fixtures --target "$CE_TEST_DATABASE_URL" --check
         working-directory: mjcc
 
   # ---------------------------------------------------------------------------
