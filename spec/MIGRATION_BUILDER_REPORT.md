@@ -36,18 +36,21 @@ Built and tested (synthetic data only, local Postgres 16, no MJCCv1 connection):
 - Loader (`ce_store_pg::loader`, `import`): plan-driven, parents then children, one transaction per row, legacy id mapped, original timestamp and actor kept, legacy state kept, unmapped source columns refuse the whole load, a missing parent or a refused row is rejected by table, id and code with a payload hash only. Transforms: format, month start/end, lookup, ordinal, value map; derived match columns.
 - Engine recompute: `settle_imported` recomputes derived fields after a load; they are never copied.
 - Reconciliation (`migration_reconciliation.rs`, 12 tests): inventory totals (received, pulled, ending quantity, ending value) equal the legacy formulas to the cent using the `mjcc-legacy-valuation` plugin; a cent off fails; per-invoice goods total and delta equal the legacy figures and only the invoice that adds up is `reconciled`; line totals equal; price history keeps status, decision, prices and the month-0 offset; an undeclared status is refused by name; a second load creates nothing.
+- Week locks (update mode, audited under `legacy-import`; a fifth week is refused by name) and staff (role mapped, PIN never copied; a scan of every target table finds no PIN) in `migration_reconciliation.rs`, now 14 tests.
 - Files (`migration_files.rs`, 6 tests, G7): source hash and size checked, copy read back and hashed, link only after that, missing/empty/mismatch/missing-record/corrupt copy rejected by code with no leftover bytes, duplicates counted, orphan sources listed, re-run changes nothing, `verify_files` finds missing, tampered, cross-tenant and wrongly owned links.
 
 Not built, so the matching rows stay red:
 
 - Real MJCCv1 column conversions beyond the synthetic slice: `monthly_inventory` weekly columns, `week_gross`, menus, HACCP, events, budgets.
-- Week locks (`week_status` to the period lock flags: needs an update-parent step), users and staff (needs staff provisioning and PIN handling), rejected-row reconciliation across the whole run.
+- Rejected-row reconciliation across the whole run; weekly gross, budgets, menus, HACCP, events.
+- `MIGRATION_MAP.md` says `week_status` goes to `period_week`; the template keeps the four lock flags on `period`, so the loader sets them there. The map row needs the owner's wording.
+- Week locks keep who locked and when only as the audit event's request id and the load time; the legacy `locked_by` and `locked_at` are ignored by the plan.
 - Files against a real blob backend: the `main` backend is in memory, so G7 is proven with the trait and `MemoryBlobs` only.
 - The Python extractor still does not load; only the Rust loader does.
 
 ## 7. Test counts
 
-`cargo test --workspace -q` with `CE_REQUIRE_DB=1`: 455 passed, 0 failed. `cargo clippy --workspace --all-targets -D warnings`: clean. Extractor: 16 tests OK; fixtures validate against the map (9 tables).
+`cargo test --workspace -q` with `CE_REQUIRE_DB=1`: 457 passed, 0 failed. `cargo clippy --workspace --all-targets -D warnings`: clean. Extractor: 16 tests OK; fixtures validate against the map (9 tables).
 
 ## 8. Gates
 
@@ -69,7 +72,7 @@ Revert the commits on each branch. Migrations are additive; nothing is dropped. 
 
 ## 12. Next bounded tasks
 
-1. Week locks and users in the loader (update-parent step, staff provisioning).
-2. Weekly gross, budgets and HACCP slices with fixtures.
+1. Weekly gross, budgets and HACCP slices with fixtures.
+2. Owner wording for the `week_status` map row.
 3. Whole-run reconciliation of rejected rows.
 4. Refresh `docs/CONTRACT_PARITY.md`.
