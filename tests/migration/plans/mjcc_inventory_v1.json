@@ -110,7 +110,8 @@
       "fields": {
         "opening_oh": "opening_oh",
         "opening_unit_cost": "opening_unit_cost",
-        "unit_price": "unit_price"
+        "unit_price": "unit_price",
+        "par_level": "par_level"
       },
       "refs": [
         {
@@ -123,7 +124,18 @@
           "source": "period_id",
           "table": "month_periods"
         }
-      ]
+      ],
+      "derive": {
+        "par_level": {
+          "find": {
+            "table": "inventory_items",
+            "match": {
+              "id": "item_id"
+            },
+            "field": "par_level"
+          }
+        }
+      }
     },
     {
       "source": "inventory_transactions",
@@ -345,6 +357,227 @@
       },
       "ignore": [
         "created_by",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "source": "menu_items",
+      "entity": "menu_item",
+      "fields": {
+        "name": "name",
+        "item_key": "item_key",
+        "active": "active"
+      },
+      "ignore": [
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "source": "menu_cycle_days",
+      "entity": "menu_cycle_day",
+      "key": "cycle_day",
+      "fields": {
+        "cycle_day": "cycle_day",
+        "cycle_week": "cycle_week",
+        "day_of_week": "day_of_week",
+        "zone": "zone",
+        "morning_service": "morning_service",
+        "midday_service": "midday_service",
+        "evening_service": "evening_service",
+        "active": "active"
+      }
+    },
+    {
+      "source": "menu_cycle_slots",
+      "entity": "menu_cycle_slot",
+      "key": "record_id",
+      "fields": {
+        "meal_group": "meal_group",
+        "meal_period": "meal_period",
+        "service_order": "service_order",
+        "slot_order": "slot_order",
+        "slot_name": "slot_name",
+        "active": "active",
+        "updated_by": "updated_by"
+      },
+      "refs": [
+        {
+          "target": "cycle_day",
+          "source": "cycle_day",
+          "table": "menu_cycle_days"
+        },
+        {
+          "target": "item",
+          "source": "item_id",
+          "table": "menu_items"
+        }
+      ],
+      "ignore": [
+        "updated_at"
+      ]
+    },
+    {
+      "source": "menu_suggestions",
+      "entity": "menu_suggestion",
+      "fields": {
+        "source": "source",
+        "cycle_day": "cycle_day",
+        "meal_period": "meal_period",
+        "slot_name": "slot_name",
+        "suggested_item": "suggested_item",
+        "notes": "notes",
+        "submitted_by": "submitted_by"
+      },
+      "state_from": "status",
+      "ignore": [
+        "created_at"
+      ]
+    },
+    {
+      "source": "budget_line_items",
+      "entity": "budget_line_item",
+      "fields": {
+        "fy_start_year": "fy_start_year",
+        "task_id": "task_id",
+        "description": "description",
+        "line_type": "line_type",
+        "annual_budget": "annual_budget",
+        "auto_source": "auto_source",
+        "sort_order": "sort_order",
+        "active": "active"
+      },
+      "ignore": [
+        "created_by",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "source": "budget_line_actuals",
+      "entity": "budget_line_actual",
+      "derive": {
+        "period_id": {
+          "find": {
+            "table": "month_periods",
+            "match": {
+              "month": {
+                "col": "month",
+                "add": 1
+              },
+              "year": "year"
+            },
+            "field": "id"
+          }
+        }
+      },
+      "refs": [
+        {
+          "target": "line_item",
+          "source": "line_item_id",
+          "table": "budget_line_items"
+        },
+        {
+          "target": "period",
+          "source": "period_id",
+          "table": "month_periods"
+        }
+      ],
+      "fields": {
+        "actual_amount": "actual_amount"
+      },
+      "ignore": [
+        "updated_by",
+        "updated_at"
+      ]
+    },
+    {
+      "source": "snack_bar_products",
+      "entity": "snack_bar_product",
+      "fields": {
+        "name": "name",
+        "price": "price",
+        "stock_qty": "stock_qty",
+        "active": "active"
+      },
+      "ignore": [
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "source": "snack_bar_entity_rates",
+      "entity": "snack_bar_rate",
+      "key": "entity_type",
+      "fields": {
+        "entity_type": "entity_type",
+        "tax_pct": "tax_pct",
+        "discount_pct": "discount_pct"
+      },
+      "ignore": [
+        "updated_by",
+        "updated_at"
+      ]
+    },
+    {
+      "source": "snack_bar_transactions",
+      "entity": "snack_bar_transaction",
+      "fields": {
+        "entity_name": "entity_name",
+        "business_date": "business_date"
+      },
+      "refs": [
+        {
+          "target": "rate",
+          "source": "entity_type",
+          "table": "snack_bar_entity_rates"
+        }
+      ],
+      "ignore": [
+        "subtotal",
+        "discount_amount",
+        "tax_amount",
+        "total_amount",
+        "recorded_by",
+        "created_at"
+      ]
+    },
+    {
+      "source": "snack_bar_transaction_items",
+      "entity": "snack_bar_transaction_item",
+      "fields": {
+        "product_name": "product_name",
+        "unit_price": "unit_price",
+        "qty": "qty"
+      },
+      "refs": [
+        {
+          "target": "transaction",
+          "source": "transaction_id",
+          "table": "snack_bar_transactions"
+        },
+        {
+          "target": "product",
+          "source": "product_id",
+          "table": "snack_bar_products"
+        }
+      ],
+      "ignore": [
+        "line_total"
+      ]
+    },
+    {
+      "source": "snack_bar_sales",
+      "entity": "snack_bar_sale",
+      "fields": {
+        "business_date": "business_date",
+        "opening_cash": "opening_cash",
+        "register_sales": "register_sales",
+        "closing_cash": "closing_cash"
+      },
+      "ignore": [
+        "recorded_by",
         "created_at",
         "updated_at"
       ]
