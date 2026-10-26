@@ -1155,7 +1155,7 @@ async fn the_rollover_action_carries_quantity_and_cost_in_one_request() {
         let (_, line) = api
             .post(
                 "stock_line",
-                json!({"item": id(&item), "period": w1id, "opening_oh": open, "unit_price": price}),
+                json!({"item": id(&item), "period": w1id, "opening_oh": open, "unit_price": price, "par_level": if sku == "RICE" { 8 } else { 0 }}),
             )
             .await;
         let (s, _) = api
@@ -1208,6 +1208,9 @@ async fn the_rollover_action_carries_quantity_and_cost_in_one_request() {
     assert_eq!(next.len(), 2, "{all}");
     let rice = next.iter().find(|l| l["opening_oh"] == "6.000").unwrap();
     assert_eq!(rice["opening_unit_cost"], "1.428333");
+    // The par the line was counted against rides along, so the reorder list survives the rollover.
+    assert_eq!(rice["par_level"], 8, "{rice}");
+    assert_eq!(rice["below_par"], true, "{rice}");
     let oil = next.iter().find(|l| l["opening_oh"] == "0.000").unwrap();
     assert_eq!(oil["opening_unit_cost"], "0.000000");
     // The supplier then raises the price to 3: the opening stock keeps its carried cost.

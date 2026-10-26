@@ -228,3 +228,73 @@ fn price_decisions_match_the_legacy_observed_price_protocol() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+
+/// The reorder list: the legacy `get_reorders` rule (par > 0 and whole units on hand below par,
+/// short = par - on_hand) against the module's `on_hand`, `below_par` and `shortage` fields.
+#[test]
+fn reorder_flags_match_the_legacy_reorder_rule() {
+    let m = manifest();
+    let vectors: Value = serde_json::from_str(include_str!(
+        "../../../tests/parity/mjcc_reorder_vectors.json"
+    ))
+    .unwrap();
+    let ctx = Context {
+        actor_id: "u1".into(),
+        actor_role: Some("owner".into()),
+        now_unix: 1_700_000_000,
+    };
+    let cases = vectors["cases"].as_array().unwrap();
+    assert!(cases.len() >= 100, "too few vectors: {}", cases.len());
+    let mut bad: Vec<String> = Vec::new();
+    for c in cases {
+        let i = &c["input"];
+        let mut rec: Map<String, Value> = json!({
+            "item": "i", "period": "p",
+            "opening_oh": i["opening_oh"],
+            "unit_price": "1",
+            "opening_unit_cost": "1",
+            "par_level": i["par_level"].as_str().unwrap().parse::<i64>().unwrap(),
+            "received": i["received"],
+            "pulled": i["pulled"],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let name = c["name"].as_str().unwrap();
+        if let Err(e) = evaluate_computed(&m, "stock_line", &mut rec, None, &ctx) {
+            bad.push(format!("{name}: evaluation failed {e:?}"));
+            continue;
+        }
+        let want = &c["legacy"];
+        let whole = |v: &Value| {
+            v.as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v.to_string())
+        };
+        if whole(&rec["on_hand"]) != whole(&want["on_hand"]) {
+            bad.push(format!(
+                "{name}: on_hand {} != {}",
+                rec["on_hand"], want["on_hand"]
+            ));
+        }
+        if rec["below_par"] != want["below_par"] {
+            bad.push(format!(
+                "{name}: below_par {} != {}",
+                rec["below_par"], want["below_par"]
+            ));
+        }
+        if whole(&rec["shortage"]) != whole(&want["short"]) {
+            bad.push(format!(
+                "{name}: shortage {} != {}",
+                rec["shortage"], want["short"]
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {} differ:\n{}",
+        bad.len(),
+        cases.len(),
+        bad.join("\n")
+    );
+}
