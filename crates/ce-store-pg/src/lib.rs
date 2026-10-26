@@ -23,6 +23,7 @@ pub mod migrations;
 mod pool;
 pub mod privileges;
 pub mod provenance;
+pub mod rehearsal;
 mod staff;
 mod tls;
 mod typed;

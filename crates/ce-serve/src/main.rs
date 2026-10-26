@@ -546,9 +546,12 @@ fn run() -> Result<(), String> {
         return plugin_command(&args[1..]);
     }
     let cmd = args.first().cloned().unwrap_or_else(|| "serve".into());
-    if !matches!(cmd.as_str(), "serve" | "install" | "files" | "migrate") {
+    if !matches!(
+        cmd.as_str(),
+        "serve" | "install" | "files" | "migrate" | "migrate-load"
+    ) {
         return Err(format!(
-            "unknown command `{cmd}` (use `install`, `migrate` or `serve`)"
+            "unknown command `{cmd}` (use `install`, `migrate`, `migrate-load` or `serve`)"
         ));
     }
     let url = var("CE_DATABASE_URL")?;
@@ -595,6 +598,9 @@ fn run() -> Result<(), String> {
     }
     if cmd == "migrate" {
         return migrate_command(&args[1..], &url, &manifest, &schema, pool);
+    }
+    if cmd == "migrate-load" {
+        return migrate_load_command(&args[1..], &url, &manifest, &schema, pool, &verifier);
     }
     if cmd == "install" {
         let store = TypedPgStore::install_with(&url, &manifest, &schema, pool.clone())
@@ -745,6 +751,114 @@ fn migrate_command(
         }
         Err(MigrateError::NoHistory) => Err(MigrateError::NoHistory.to_string()),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// `ce-serve migrate-load --plan P --data DIR --checks C [--source-ref NAME]`: plans a run, loads
+/// the legacy tables exported as `DIR/<table>.json` (arrays of rows), lets the engine recompute
+/// derived fields, runs the reconciliation checks, closes the run and prints counts and figures
+/// only. Refuses a schema that looks like production. Nothing here reads the legacy database.
+fn migrate_load_command(
+    flags: &[String],
+    url: &str,
+    manifest: &ce_manifest::Manifest,
+    schema: &str,
+    pool: ce_store_pg::PoolConfig,
+    verifier: &Verifier,
+) -> Result<(), String> {
+    let (mut plan, mut data, mut checks, mut source_ref) = (None, None, None, "export".to_string());
+    let mut it = flags.iter();
+    while let Some(f) = it.next() {
+        let v = it.next().cloned();
+        match (f.as_str(), v) {
+            ("--plan", Some(v)) => plan = Some(v),
+            ("--data", Some(v)) => data = Some(v),
+            ("--checks", Some(v)) => checks = Some(v),
+            ("--source-ref", Some(v)) => source_ref = v,
+            _ => return Err("use --plan FILE --data DIR --checks FILE [--source-ref NAME]".into()),
+        }
+    }
+    let (Some(plan), Some(data), Some(checks)) = (plan, data, checks) else {
+        return Err("use --plan FILE --data DIR --checks FILE [--source-ref NAME]".into());
+    };
+    if schema.contains("prod") {
+        return Err(format!(
+            "schema {schema} looks like production; a load goes to a staging or rehearsal schema"
+        ));
+    }
+    let read = |p: &str| -> Result<serde_json::Value, String> {
+        let b = std::fs::read(p).map_err(|e| format!("cannot read {p}: {e}"))?;
+        serde_json::from_slice(&b).map_err(|e| format!("{p} is not JSON: {e}"))
+    };
+    let plan = read(&plan)?;
+    let checks = read(&checks)?;
+    let mut tables = serde_json::Map::new();
+    for ent in std::fs::read_dir(&data).map_err(|e| format!("cannot read {data}: {e}"))? {
+        let path = ent.map_err(|e| e.to_string())?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            tables.insert(name.to_string(), read(&path.to_string_lossy())?);
+        }
+    }
+    let tenant = var("CE_TENANT")?;
+    let scope = verifier
+        .public_scope(&tenant)
+        .ok_or("CE_TENANT must be a lowercase uuid")?;
+    let installation = var("CE_INSTALLATION")?;
+    let tls = pool.tls.clone();
+    let store = TypedPgStore::open_with(url, manifest, schema, pool)
+        .map_err(|e| format!("cannot open schema {schema}: {e:?}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let actor = std::env::var("CE_MIGRATE_ACTOR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "legacy-import".into());
+    let r = ce_store_pg::rehearsal::run(
+        &store,
+        &scope,
+        schema,
+        &ce_store_pg::rehearsal::Params {
+            url,
+            tls: &tls,
+            tenant_id: &tenant,
+            installation_id: &installation,
+            source_system: plan["source_system"].as_str().unwrap_or("legacy"),
+            source_ref: &source_ref,
+            migration_version: "1",
+            initiated_by: &actor,
+            default_actor: &actor,
+            now_unix: now,
+        },
+        &plan,
+        &tables,
+        &checks,
+        &|| ce_server::settle_imported(&store, manifest, &scope, now).map(|_| ()),
+    )
+    .map_err(|e| format!("migration failed: {e:?}"))?;
+    println!("run {} {}", r.run, r.status);
+    for (table, c) in &r.load {
+        println!(
+            "{table}: written {} already {} rejected {}",
+            c.written, c.already_mapped, c.rejected
+        );
+    }
+    for c in &r.checks {
+        let mark = if c.pass { "pass" } else { "FAIL" };
+        println!(
+            "{mark} {} legacy {} target {} delta {}",
+            c.key, c.legacy, c.target, c.delta
+        );
+    }
+    if r.status == "passed" {
+        Ok(())
+    } else {
+        Err(format!("run {} {}", r.run, r.status))
     }
 }
 

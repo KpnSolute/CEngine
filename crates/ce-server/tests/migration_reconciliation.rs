@@ -1283,3 +1283,81 @@ fn budget_lines_and_their_monthly_actuals_keep_amounts_and_land_on_the_right_per
     };
     assert_eq!((amount.as_str(), label.as_str()), ("412.35", "2026-11"));
 }
+
+fn drive(
+    e: &Env,
+    checks: &serde_json::Value,
+    tables: &serde_json::Value,
+) -> ce_store_pg::rehearsal::Rehearsal {
+    let plan = read_json("tests/migration/plans/mjcc_inventory_v1.json");
+    let m = inventory_manifest();
+    ce_store_pg::rehearsal::run(
+        e.s(),
+        &scope(),
+        &e.schema,
+        &ce_store_pg::rehearsal::Params {
+            url: &e.url,
+            tls: &Tls::Off,
+            tenant_id: T,
+            installation_id: "inst",
+            source_system: "mjcc",
+            source_ref: "synthetic",
+            migration_version: "1",
+            initiated_by: "rehearsal",
+            default_actor: "legacy",
+            now_unix: 1_700_000_000,
+        },
+        &plan,
+        tables.as_object().unwrap(),
+        checks,
+        &|| ce_server::settle_imported(e.s(), &m, &scope(), 1_700_000_000).map(|_| ()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_driver_loads_reconciles_and_passes_a_run_only_when_every_check_is_zero() {
+    let Some(url) = url() else { return };
+    let e = Env::with(&url, &inventory_manifest());
+    let fx = read_json("tests/migration/fixtures/normal_month.json");
+    let checks = read_json("tests/migration/checks/mjcc_checks_v1.json");
+    let r = drive(&e, &checks, &fx["tables"]);
+    for c in &r.checks {
+        assert!(c.pass, "{}: legacy {} target {}", c.key, c.legacy, c.target);
+    }
+    assert_eq!(r.checks.len(), checks.as_array().unwrap().len());
+    assert_eq!(r.status, "passed");
+    // A second drive resolves every row to the same target and the run still reconciles.
+    let again = drive(&e, &checks, &fx["tables"]);
+    assert_eq!(again.status, "passed");
+    assert!(again
+        .load
+        .values()
+        .all(|c| c.written == 0 && c.rejected == 0));
+}
+
+#[test]
+fn the_driver_fails_the_run_on_a_one_cent_difference_and_on_a_rejected_row() {
+    let Some(url) = url() else { return };
+    let checks = read_json("tests/migration/checks/mjcc_checks_v1.json");
+    // A legacy sale total that the engine's own arithmetic cannot reproduce does fail.
+    let e2 = Env::with(&url, &inventory_manifest());
+    let mut fx2 = read_json("tests/migration/fixtures/normal_month.json");
+    fx2["tables"]["snack_bar_transactions"][0]["total_amount"] = serde_json::json!("7.64");
+    let r2 = drive(&e2, &checks, &fx2["tables"]);
+    let failed: Vec<_> = r2
+        .checks
+        .iter()
+        .filter(|c| !c.pass)
+        .map(|c| c.key.as_str())
+        .collect();
+    assert_eq!(failed, vec!["snack_bar_sale_total"]);
+    assert_eq!(r2.status, "failed");
+    // A row whose parent is missing is rejected and keeps the run from passing.
+    let e3 = Env::with(&url, &inventory_manifest());
+    let mut fx3 = read_json("tests/migration/fixtures/normal_month.json");
+    fx3["tables"]["menu_cycle_slots"][0]["item_id"] = serde_json::json!("nope");
+    let r3 = drive(&e3, &checks, &fx3["tables"]);
+    assert_eq!(r3.load["menu_cycle_slots"].rejected, 1);
+    assert_eq!(r3.status, "failed");
+}

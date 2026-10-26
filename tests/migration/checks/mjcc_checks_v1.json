@@ -1,0 +1,131 @@
+[
+  {
+    "key": "vendor_count",
+    "scope_type": "vendor",
+    "scope_id": "all",
+    "legacy": {
+      "table": "vendors",
+      "op": "count"
+    },
+    "target": "SELECT count(*)::text FROM {schema}.vendor"
+  },
+  {
+    "key": "stock_item_count",
+    "scope_type": "stock_item",
+    "scope_id": "all",
+    "legacy": {
+      "table": "inventory_items",
+      "op": "count"
+    },
+    "target": "SELECT count(*)::text FROM {schema}.stock_item"
+  },
+  {
+    "key": "stock_line_count",
+    "scope_type": "stock_line",
+    "scope_id": "all",
+    "legacy": {
+      "table": "monthly_inventory",
+      "op": "count"
+    },
+    "target": "SELECT count(*)::text FROM {schema}.stock_line"
+  },
+  {
+    "key": "menu_item_count",
+    "scope_type": "menu_item",
+    "scope_id": "all",
+    "legacy": {
+      "table": "menu_items",
+      "op": "count"
+    },
+    "target": "SELECT count(*)::text FROM {schema}.menu_item"
+  },
+  {
+    "key": "menu_cycle_slot_count",
+    "scope_type": "menu_cycle_slot",
+    "scope_id": "all",
+    "legacy": {
+      "table": "menu_cycle_slots",
+      "op": "count"
+    },
+    "target": "SELECT count(*)::text FROM {schema}.menu_cycle_slot"
+  },
+  {
+    "key": "menu_suggestion_new_count",
+    "scope_type": "menu_suggestion",
+    "scope_id": "all",
+    "legacy": {
+      "table": "menu_suggestions",
+      "op": "count",
+      "where": {
+        "status": "new"
+      }
+    },
+    "target": "SELECT count(*)::text FROM {schema}.menu_suggestion WHERE status = 'new'"
+  },
+  {
+    "key": "budget_line_annual_total",
+    "scope_type": "budget_line_item",
+    "scope_id": "all",
+    "legacy": {
+      "table": "budget_line_items",
+      "op": "sum",
+      "column": "annual_budget"
+    },
+    "target": "SELECT coalesce(sum(annual_budget),0)::text FROM {schema}.budget_line_item"
+  },
+  {
+    "key": "budget_line_actual_total",
+    "scope_type": "budget_line_actual",
+    "scope_id": "all",
+    "legacy": {
+      "table": "budget_line_actuals",
+      "op": "sum",
+      "column": "actual_amount"
+    },
+    "target": "SELECT coalesce(sum(actual_amount),0)::text FROM {schema}.budget_line_actual"
+  },
+  {
+    "key": "cost_budget_allotment_total",
+    "scope_type": "cost_budget",
+    "scope_id": "all",
+    "legacy": {
+      "table": "cost_budgets",
+      "op": "sum",
+      "column": "gov_allotment"
+    },
+    "target": "SELECT coalesce(sum(gov_allotment),0)::text FROM {schema}.cost_budget"
+  },
+  {
+    "key": "snack_bar_sale_total",
+    "scope_type": "snack_bar_transaction",
+    "scope_id": "all",
+    "legacy": {
+      "table": "snack_bar_transactions",
+      "op": "sum",
+      "column": "total_amount"
+    },
+    "target": "SELECT coalesce(sum(total_amount),0)::text FROM {schema}.snack_bar_transaction"
+  },
+  {
+    "key": "snack_bar_item_total",
+    "scope_type": "snack_bar_transaction_item",
+    "scope_id": "all",
+    "legacy": {
+      "table": "snack_bar_transaction_items",
+      "op": "sum",
+      "column": "line_total"
+    },
+    "target": "SELECT coalesce(sum(line_total),0)::text FROM {schema}.snack_bar_transaction_item"
+  },
+  {
+    "key": "snack_bar_register_total",
+    "scope_type": "snack_bar_sale",
+    "scope_id": "all",
+    "legacy": {
+      "table": "snack_bar_sales",
+      "op": "sum",
+      "column": "register_sales"
+    },
+    "target": "SELECT coalesce(sum(register_sales),0)::text FROM {schema}.snack_bar_sale"
+  }
+]
