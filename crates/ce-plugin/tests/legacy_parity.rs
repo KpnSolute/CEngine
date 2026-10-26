@@ -38,10 +38,18 @@ fn shell() -> Value {
 /// The composed manifest with the two movement sums turned into plain inputs, so a line can be
 /// evaluated without a store.
 fn manifest() -> ce_manifest::Manifest {
+    build(true)
+}
+
+fn build(with_policy: bool) -> ce_manifest::Manifest {
     let text = include_str!("fixtures/mjcc-legacy-valuation/plugin.toml");
     let plugin = parse(text, &builtin_registry(), &ENGINE).unwrap_or_else(|e| panic!("{e:?}"));
-    let composed = compose(&shell(), "business.inventory", Some((&plugin, DIGEST)))
-        .unwrap_or_else(|e| panic!("{e:?}"));
+    let composed = compose(
+        &shell(),
+        "business.inventory",
+        with_policy.then_some((&plugin, DIGEST)),
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"));
     let mut m = composed.manifest;
     for f in ["received", "pulled"] {
         m["entities"]["stock_line"]["fields"][f]
@@ -271,7 +279,7 @@ fn reorder_flags_match_the_legacy_reorder_rule() {
                 .map(str::to_string)
                 .unwrap_or_else(|| v.to_string())
         };
-        if whole(&rec["on_hand"]) != whole(&want["on_hand"]) {
+        if dec(&whole(&rec["on_hand"])) != dec(&whole(&want["on_hand"])) {
             bad.push(format!(
                 "{name}: on_hand {} != {}",
                 rec["on_hand"], want["on_hand"]
@@ -283,7 +291,7 @@ fn reorder_flags_match_the_legacy_reorder_rule() {
                 rec["below_par"], want["below_par"]
             ));
         }
-        if whole(&rec["shortage"]) != whole(&want["short"]) {
+        if dec(&whole(&rec["shortage"])) != dec(&whole(&want["short"])) {
             bad.push(format!(
                 "{name}: shortage {} != {}",
                 rec["shortage"], want["short"]
@@ -297,4 +305,30 @@ fn reorder_flags_match_the_legacy_reorder_rule() {
         cases.len(),
         bad.join("\n")
     );
+}
+
+/// With no plugin the module counts fractional quantity as on hand: the whole-unit rule is the MJCC
+/// policy's, not the engine's.
+#[test]
+fn the_module_default_counts_fractions_and_the_mjcc_policy_counts_whole_units() {
+    let ctx = Context {
+        actor_id: "u1".into(),
+        actor_role: Some("owner".into()),
+        now_unix: 1_700_000_000,
+    };
+    let rec = || -> Map<String, Value> {
+        json!({"item": "i", "period": "p", "opening_oh": "2.5", "unit_price": "1",
+               "opening_unit_cost": "1", "par_level": 3, "received": "0", "pulled": "0"})
+        .as_object()
+        .unwrap()
+        .clone()
+    };
+    let mut r = rec();
+    evaluate_computed(&build(false), "stock_line", &mut r, None, &ctx).unwrap();
+    assert_eq!(r["on_hand"], json!("2.500"));
+    assert_eq!(r["shortage"], json!("0.500"));
+    let mut r = rec();
+    evaluate_computed(&manifest(), "stock_line", &mut r, None, &ctx).unwrap();
+    assert_eq!(r["on_hand"], json!("2.000"));
+    assert_eq!(r["shortage"], json!("1.000"));
 }

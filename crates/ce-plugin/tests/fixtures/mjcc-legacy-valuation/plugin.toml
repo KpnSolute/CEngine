@@ -23,3 +23,17 @@ rule = "when(opening_oh > 0, round(opening_oh * when(opening_unit_cost > 0, open
 [[policy]]
 slot = "ending_value"
 rule = "when(ending_qty <= 0, 0, round(max(0, opening_value + received_value - pulled_value), 2))"
+
+# Reorder list (legacy `GET /api/inventory/reorders`): units on hand are whole units, a line is low
+# when it has a par above zero and fewer whole units than the par, and the shortage is par - on hand.
+[[policy]]
+slot = "on_hand"
+rule = "floor(max(0, ending_qty))"
+
+[[policy]]
+slot = "below_par"
+rule = "par_level > 0 and on_hand < par_level"
+
+[[policy]]
+slot = "shortage"
+rule = "when(par_level > 0 and on_hand < par_level, par_level - on_hand, 0)"
