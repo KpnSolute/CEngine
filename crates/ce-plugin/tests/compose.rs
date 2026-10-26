@@ -54,14 +54,17 @@ fn the_registry_lists_the_inventory_module_and_its_slots() {
     assert_eq!(
         slots,
         [
+            "below_par",
             "ending_qty",
             "ending_value",
+            "on_hand",
             "opening_value",
             "over_pull",
             "price",
             "price_decision",
             "pulled_value",
-            "received_value"
+            "received_value",
+            "shortage"
         ]
     );
 }

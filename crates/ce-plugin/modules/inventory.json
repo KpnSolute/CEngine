@@ -36,6 +36,18 @@
       "default": "when(observed_price <= 0, 'skip', when(previous_price <= 0, 'apply', when(abs(observed_price - previous_price) < 0.005, 'same', when(abs(observed_price - previous_price) > 0.25 * previous_price, 'hold', 'apply'))))",
       "about": "What a newly observed invoice price does to a line: skip (no usable price), apply (no current price, or a move within 25%), same (within half a cent of the current price) or hold (a bigger move waits for a manager)."
     },
+    "on_hand": {
+      "default": "max(0, ending_qty)",
+      "about": "Quantity counted as on hand when checking the reorder level; never below zero. A policy may count whole units only."
+    },
+    "below_par": {
+      "default": "par_level > 0 and on_hand < par_level",
+      "about": "True when the line is under its reorder level (par_level). A line with no level (0) is never listed."
+    },
+    "shortage": {
+      "default": "when(par_level > 0 and on_hand < par_level, par_level - on_hand, 0)",
+      "about": "How far the line is under its reorder level; 0 when it is not under it."
+    },
     "over_pull": {
       "default": "opening_oh + received - pulled >= 0",
       "about": "Invariant on a line: true when the line may be saved. Use true to allow negative stock."
@@ -72,9 +84,9 @@
           "received_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "received_value"}},
           "pulled_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "pulled_value"}},
           "ending_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "ending_value"}},
-          "on_hand": {"type": "decimal", "precision": 14, "scale": 0, "computed": "floor(max(0, ending_qty))"},
-          "below_par": {"type": "boolean", "computed": "par_level > 0 and on_hand < par_level"},
-          "shortage": {"type": "decimal", "precision": 14, "scale": 0, "computed": "when(par_level > 0 and on_hand < par_level, par_level - on_hand, 0)"}
+          "on_hand": {"type": "decimal", "precision": 14, "scale": 3, "computed": {"$slot": "on_hand"}},
+          "below_par": {"type": "boolean", "computed": {"$slot": "below_par"}},
+          "shortage": {"type": "decimal", "precision": 14, "scale": 3, "computed": {"$slot": "shortage"}}
         },
         "invariants": [
           {"name": "opening_not_negative", "expr": "opening_oh >= 0", "message_code": "stock.negative_opening"},
