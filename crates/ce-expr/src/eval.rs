@@ -22,6 +22,84 @@ fn ty(msg: &str) -> EvalError {
     EvalError::Type(msg.to_string())
 }
 
+/// `YYYY-MM-DD`, optionally followed by `T` or a space and a time (`HH:MM`, `HH:MM:SS`, optional
+/// fraction, optional `Z` or `+HH[:MM]` offset). The calendar date and the time must both be real.
+fn parse_iso_date(s: &str) -> Option<(i64, i64, i64)> {
+    let b = s.as_bytes();
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let x = b.get(r)?;
+        if x.is_empty() || !x.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        Some(x.iter().fold(0i64, |a, d| a * 10 + i64::from(d - b'0')))
+    };
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if d < 1 || d > days {
+        return None;
+    }
+    if b.len() == 10 {
+        return Some((y, m, d));
+    }
+    if b[10] != b'T' && b[10] != b' ' {
+        return None;
+    }
+    let t = &b[11..];
+    let two = |i: usize| -> Option<i64> {
+        let x = t.get(i..i + 2)?;
+        if x.iter().all(u8::is_ascii_digit) {
+            Some(i64::from(x[0] - b'0') * 10 + i64::from(x[1] - b'0'))
+        } else {
+            None
+        }
+    };
+    if t.len() < 5 || t[2] != b':' || two(0)? > 23 || two(3)? > 59 {
+        return None;
+    }
+    let mut i = 5;
+    if t.get(i) == Some(&b':') {
+        if two(i + 1)? > 60 {
+            return None;
+        }
+        i += 3;
+        if t.get(i) == Some(&b'.') {
+            let frac = t[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+            if frac == 0 {
+                return None;
+            }
+            i += 1 + frac;
+        }
+    }
+    match t.get(i) {
+        None => {}
+        Some(b'Z') if i + 1 == t.len() => {}
+        Some(b'+') | Some(b'-') => {
+            if two(i + 1)? > 23 {
+                return None;
+            }
+            let rest = &t[i + 3..];
+            let ok = rest.is_empty()
+                || (rest.len() == 3 && rest[0] == b':' && two(i + 4).is_some_and(|m| m <= 59))
+                || (rest.len() == 2 && two(i + 3).is_some_and(|m| m <= 59));
+            if !ok {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    Some((y, m, d))
+}
+
 /// Round half-up, away from zero on ties (spec).
 fn round_to(d: &BigDecimal, n: i64) -> BigDecimal {
     d.with_scale_round(n, RoundingMode::HalfUp)
@@ -386,6 +464,21 @@ fn call(name: &str, raw: &[Expr], env: &Env, r: &dyn Resolver) -> R {
                     _ => Value::Str(s.to_uppercase()),
                 }),
                 _ => Err(ty("expected a string")),
+            }
+        }
+        "year" | "month" | "day" => {
+            arity(name, &args, 1)?;
+            match &args[0] {
+                Value::Null => Ok(Value::Null),
+                Value::Str(s) => match parse_iso_date(s) {
+                    Some((y, m, d)) => Ok(Value::Int(match name {
+                        "year" => y,
+                        "month" => m,
+                        _ => d,
+                    })),
+                    None => Err(ty("expected an ISO date (YYYY-MM-DD)")),
+                },
+                _ => Err(ty("expected a date")),
             }
         }
         "trim" => {
