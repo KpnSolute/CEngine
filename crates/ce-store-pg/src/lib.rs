@@ -17,7 +17,12 @@
 //! from user input.
 
 mod blobs;
+pub mod import;
+pub mod loader;
+pub mod migrations;
 mod pool;
+pub mod privileges;
+pub mod provenance;
 mod staff;
 mod tls;
 mod typed;
@@ -27,7 +32,9 @@ pub use tls::{connect, Tls};
 pub use typed::{PoolConfig, TypedPgStore};
 
 use ce_store::{Record, Store, StoreError, TenantScope};
-use postgres::{Client, NoTls};
+pub use postgres::types::ToSql;
+pub use postgres::Client;
+use postgres::NoTls;
 use serde_json::{json, Value};
 use std::sync::Mutex;
 

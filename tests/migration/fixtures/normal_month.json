@@ -1,0 +1,48 @@
+{
+  "description": "Synthetic fixture: one normal month with two weeks of movements. No real MJCC data.",
+  "tables": {
+    "user_profiles": [
+      {"id": "u1", "username": "syn.admin", "display_name": "Synthetic Admin", "role": "admin", "pin": "913755", "active": true, "created_at": "2026-01-05T00:00:00Z", "updated_at": "2026-01-05T00:00:00Z"},
+      {"id": "u2", "username": "syn.manager", "display_name": "Synthetic Manager", "role": "manager", "pin": "824166", "active": true, "created_at": "2026-01-06T00:00:00Z", "updated_at": "2026-01-06T00:00:00Z"},
+      {"id": "u3", "username": "syn.cook", "display_name": "Synthetic Cook", "role": "staff", "pin": "735277", "active": false, "created_at": "2026-01-07T00:00:00Z", "updated_at": "2026-01-07T00:00:00Z"}
+    ],
+    "inventory_categories": [{"id": "c1", "name": "Dry goods"}, {"id": "c2", "name": "Dairy"}],
+    "vendors": [{"id": "v1", "name": "Synthetic Foods"}],
+    "inventory_items": [
+      {"id": "i1", "sku": "SYN-100", "description": "Rice", "category_id": "c1", "unit_price": "1.25", "par_level": 10},
+      {"id": "i2", "sku": "SYN-200", "description": "Milk", "category_id": "c2", "unit_price": "2.10", "par_level": 6}
+    ],
+    "month_periods": [{"id": "p1", "month": 11, "year": 2026}],
+    "monthly_inventory": [
+      {"id": "m1", "item_id": "i1", "period_id": "p1", "opening_oh": "12", "opening_unit_cost": "1.20", "unit_price": "1.25"},
+      {"id": "m2", "item_id": "i2", "period_id": "p1", "opening_oh": "4", "opening_unit_cost": "2.00", "unit_price": "2.10"}
+    ],
+    "inventory_transactions": [
+      {"id": "t1", "item_id": "i1", "period_id": "p1", "week": 1, "received": "5", "pulled": "0"},
+      {"id": "t2", "item_id": "i1", "period_id": "p1", "week": 1, "received": "0", "pulled": "3"},
+      {"id": "t3", "item_id": "i2", "period_id": "p1", "week": 2, "received": "0", "pulled": "2"}
+    ],
+    "invoices": [
+      {"id": "n1", "vendor_id": "v1", "invoice_number": "S-1001", "invoice_date": "2026-11-03", "subtotal": "100.00", "discount": "2.00", "tax": "1.50", "fuel_surcharge": "3.00", "total": "102.50"},
+      {"id": "n2", "vendor_id": "v1", "invoice_number": "S-1002", "invoice_date": "2026-11-10", "subtotal": "40.50", "discount": "0.00", "tax": "0.00", "fuel_surcharge": "0.00", "total": "41.00"}
+    ],
+    "price_review_queue": [
+      {"id": "q1", "item_id": "i1", "sku": "SYN-100", "description": "Rice", "month": 10, "year": 2026, "week": 1, "invoice_number": "S-1001", "source_file": "s-1001.pdf", "staging_entry_id": "s1", "previous_price": "1.20", "observed_price": "1.25", "applied_price": "1.25", "change_pct": "4.1667", "status": "applied", "reason": "within tolerance", "created_by": "u1", "resolved_by": "u1", "resolved_at": "2026-11-04T10:00:00Z", "created_at": "2026-11-03T10:00:00Z"},
+      {"id": "q2", "item_id": "i2", "sku": "SYN-200", "description": "Milk", "month": 10, "year": 2026, "week": 2, "invoice_number": "S-1002", "source_file": "s-1002.pdf", "staging_entry_id": "s2", "previous_price": "2.00", "observed_price": "2.40", "applied_price": null, "change_pct": "20.0000", "status": "pending", "reason": "over tolerance", "created_by": "u1", "resolved_by": null, "resolved_at": null, "created_at": "2026-11-10T10:00:00Z"},
+      {"id": "q3", "item_id": "i2", "sku": "SYN-200", "description": "Milk", "month": 10, "year": 2026, "week": 2, "invoice_number": "S-1003", "source_file": "s-1003.pdf", "staging_entry_id": "s3", "previous_price": "2.00", "observed_price": "2.02", "applied_price": null, "change_pct": "1.0000", "status": "dismissed", "reason": "noise", "created_by": "u1", "resolved_by": "u1", "resolved_at": "2026-11-11T10:00:00Z", "created_at": "2026-11-10T11:00:00Z"}
+    ],
+    "week_status": [
+      {"id": "w1", "month": 10, "year": 2026, "week": 1, "status": "locked", "locked_by": "u1", "locked_at": "2026-11-08T10:00:00Z", "created_at": "2026-11-01T00:00:00Z"},
+      {"id": "w2", "month": 10, "year": 2026, "week": 2, "status": "open", "locked_by": null, "locked_at": null, "created_at": "2026-11-01T00:00:00Z"},
+      {"id": "w3", "month": 10, "year": 2026, "week": 3, "status": "published", "locked_by": "u1", "locked_at": "2026-11-22T10:00:00Z", "created_at": "2026-11-01T00:00:00Z"}
+    ],
+    "cost_budgets": [
+      {"id": "b1", "month": 10, "year": 2026, "gov_allotment": "32000.00", "notes": "synthetic", "created_by": "u1", "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z", "w1_planned_pull": "9000.50", "w2_planned_pull": "8500.25", "w3_planned_pull": "9100.00", "w1_planned_renewable": "1000.00", "w2_planned_renewable": "950.75", "w3_planned_renewable": "1020.10"}
+    ],
+    "invoice_items": [
+      {"id": "l1", "invoice_id": "n1", "sku": "SYN-100", "description": "Rice", "quantity_shipped": "10", "unit_price": "5.00", "extended_price": "50.00"},
+      {"id": "l2", "invoice_id": "n1", "sku": "SYN-200", "description": "Milk", "quantity_shipped": "4", "unit_price": "12.50", "extended_price": "50.00"},
+      {"id": "l3", "invoice_id": "n2", "sku": "SYN-100", "description": "Rice", "quantity_shipped": "3", "unit_price": "13.50", "extended_price": "40.50"}
+    ]
+  }
+}
