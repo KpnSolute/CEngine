@@ -75,6 +75,20 @@ fn errors_not_panics() {
 }
 
 #[test]
+fn date_parts_validate_the_whole_date_and_time() {
+    let env = Env::new();
+    let ok = |e: &str| run(e, &env).map(|v| v.canonical());
+    assert_eq!(ok("day('2028-02-29')"), Ok(Some("29".into())));
+    assert_eq!(ok("year('2026-11-01T08:00:00Z')"), Ok(Some("2026".into())));
+    assert_eq!(ok("month('2026-10-26 08:00')"), Ok(Some("10".into())));
+    assert!(run("day('2026-02-31')", &env).is_err());
+    assert!(run("day('2027-02-29')", &env).is_err());
+    assert!(run("month('2026-13-01')", &env).is_err());
+    assert!(run("year('2026-10-26Tgarbage')", &env).is_err());
+    assert!(run("year('2026-10-26T25:00:00Z')", &env).is_err());
+}
+
+#[test]
 fn trim_floor_and_ceil() {
     use ce_expr::{run, Env, Value};
     let env = Env::new();

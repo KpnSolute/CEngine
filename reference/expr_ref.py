@@ -1,5 +1,6 @@
 """Tiny reference evaluator for the CEngine expression language draft.
 Used only to prove the conformance vectors are self-consistent. Not the engine."""
+import datetime
 import re
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 getcontext().prec = 60
@@ -101,6 +102,8 @@ class P:
             return v
         raise ValueError('unexpected %r' % (x,))
 
+_DATE = re.compile(r'(\d{4})-(\d{2})-(\d{2})(?:[T ](?:[01]\d|2[0-3]):[0-5]\d(?::(?:[0-5]\d|60)(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3])(?::?[0-5]\d)?)?)?')
+
 def call(f, a):
     if f == 'round': return None if a[0] is None else q(Decimal(a[0]), a[1])
     if f == 'coalesce': return next((v for v in a if v is not None), None)
@@ -112,6 +115,14 @@ def call(f, a):
     if f == 'lower': return a[0].lower()
     if f == 'upper': return a[0].upper()
     if f == 'is_null': return a[0] is None
+    if f in ('year', 'month', 'day'):
+        if a[0] is None: return None
+        m = _DATE.fullmatch(a[0])
+        if not m: raise ValueError('expected an ISO date')
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try: datetime.date(y, mo, d)
+        except ValueError: raise ValueError('expected an ISO date')
+        return {'year': y, 'month': mo, 'day': d}[f]
     if f == 'concat': return ''.join(a)
     if f == 'starts_with': return a[0].startswith(a[1])
     if f == 'contains': return a[1] in a[0]
