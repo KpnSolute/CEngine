@@ -54,14 +54,17 @@ fn the_registry_lists_the_inventory_module_and_its_slots() {
     assert_eq!(
         slots,
         [
+            "below_par",
             "ending_qty",
             "ending_value",
+            "on_hand",
             "opening_value",
             "over_pull",
             "price",
             "price_decision",
             "pulled_value",
-            "received_value"
+            "received_value",
+            "shortage"
         ]
     );
 }
@@ -224,4 +227,101 @@ fn a_long_but_legal_plugin_version_still_composes() {
     let mut p = plugin("");
     p.version = semver::Version::parse(&format!("1.0.0-{}", "a".repeat(120))).unwrap();
     assert!(compose(&shell(), "business.inventory", Some((&p, DIGEST))).is_ok());
+}
+
+fn extending(entity: &str, field: &str, def: &str) -> String {
+    format!(
+        r#"[[extend]]
+entity = "{entity}"
+field = "{field}"
+definition = {def}
+"#
+    )
+}
+
+#[test]
+fn a_plugin_can_add_a_computed_field_to_a_module_entity() {
+    let p = plugin(&extending(
+        "stock_line",
+        "short_value",
+        r#"{ type = "decimal", precision = 16, scale = 2, computed = "when(ending_qty < 0, 0 - ending_qty * price, 0)" }"#,
+    ));
+    let with = compose(&shell(), "business.inventory", Some((&p, DIGEST))).unwrap();
+    let without = compose(&shell(), "business.inventory", Some((&plugin(""), DIGEST))).unwrap();
+    assert_ne!(with.hash, without.hash);
+    let f = &with.manifest["entities"]["stock_line"]["fields"]["short_value"];
+    assert_eq!(f["type"], "decimal");
+    assert!(without.manifest["entities"]["stock_line"]["fields"]["short_value"].is_null());
+}
+
+#[test]
+fn an_added_field_cannot_replace_one_the_module_has() {
+    let p = plugin(&extending(
+        "stock_line",
+        "ending_qty",
+        r#"{ type = "string" }"#,
+    ));
+    assert_eq!(
+        compose(&shell(), "business.inventory", Some((&p, DIGEST))).unwrap_err(),
+        ComposeError::Clash("stock_line.ending_qty".into())
+    );
+}
+
+#[test]
+fn an_added_field_must_go_on_an_entity_the_module_added() {
+    let p = plugin(&extending("period", "note", r#"{ type = "string" }"#));
+    assert_eq!(
+        compose(&shell(), "business.inventory", Some((&p, DIGEST))).unwrap_err(),
+        ComposeError::MissingEntity("period".into())
+    );
+}
+
+#[test]
+fn an_added_expression_is_checked_when_composed() {
+    let p = plugin(&extending(
+        "stock_line",
+        "bad",
+        r#"{ type = "decimal", precision = 16, scale = 2, computed = "nope + 1" }"#,
+    ));
+    assert!(matches!(
+        compose(&shell(), "business.inventory", Some((&p, DIGEST))),
+        Err(ComposeError::Invalid(_))
+    ));
+}
+
+#[test]
+fn bad_added_field_names_and_duplicates_are_refused_when_parsed() {
+    let text = |extra: &str| {
+        format!(
+            r#"schema_version = 1
+[plugin]
+id = "kitchen-rules"
+version = "0.1.0"
+[compatibility]
+engine = ">=0.1.0"
+module = "business.inventory"
+module_api = 1
+[execution]
+kind = "policy-pack"
+{extra}"#
+        )
+    };
+    let bad = parse(
+        &text(&extending(
+            "stock_line",
+            "Bad-Name",
+            r#"{ type = "string" }"#,
+        )),
+        &builtin_registry(),
+        &ENGINE,
+    )
+    .unwrap_err();
+    assert!(bad.iter().any(|v| v.code == "bad_field_name"));
+    let twice = format!(
+        "{}{}",
+        extending("stock_line", "x", r#"{ type = "string" }"#),
+        extending("stock_line", "x", r#"{ type = "string" }"#)
+    );
+    let dup = parse(&text(&twice), &builtin_registry(), &ENGINE).unwrap_err();
+    assert!(dup.iter().any(|v| v.code == "duplicate_field"));
 }

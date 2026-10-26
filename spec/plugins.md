@@ -34,7 +34,7 @@ Module ids, API majors, slot names and shapes, and the capability vocabulary liv
 A customer-editable lockfile is never proof of approval: the pin comes from the trusted installation record, not from the repository.
 
 ## Modules and composition
-A module is a manifest fragment with named policy slots (`crates/ce-plugin/modules/*.json`). `business.inventory` (API 1) adds `stock_item`, `stock_line` and `stock_movement` (plus the price-observation and invoice entities below) over the `period` tool, with these slots: `price`, `ending_qty`, `opening_value`, `received_value`, `pulled_value`, `ending_value` (computed-field expressions) and `over_pull` (the line invariant; `true` allows negative stock). The line's price is the one stamped on it when it was created; a line never reads the item's current price, so a later change to the item cannot move an existing line. Every slot has a module default, so a template with no plugin still gets a working module.
+A module is a manifest fragment with named policy slots (`crates/ce-plugin/modules/*.json`). `business.inventory` (API 1) adds `stock_item`, `stock_line` and `stock_movement` (plus the price-observation and invoice entities below) over the `period` tool, with these slots: `price`, `ending_qty`, `opening_value`, `received_value`, `pulled_value`, `ending_value`, `on_hand`, `below_par`, `shortage` (computed-field expressions) and `over_pull` (the line invariant; `true` allows negative stock). The line's price is the one stamped on it when it was created; a line never reads the item's current price, so a later change to the item cannot move an existing line. Every slot has a module default, so a template with no plugin still gets a working module.
 
 `ce_plugin::compose(template, module, plugin)` puts the module into a template, replaces each slot with the plugin's rule when it filled one, and validates the result with `ce-manifest`. A rule that does not type-check is refused at composition (install time), never at request time. It refuses an unknown module, a plugin written for another module or API major, a template missing a required entity (`period`), and an entity name the template already uses. The template's roles are never touched. The returned manifest has the usual canonical hash.
 
@@ -64,7 +64,7 @@ To run a template with a plugin, set `CE_TEMPLATE` (a template JSON, not a finis
 Tests: `crates/ce-plugin/tests/install.rs` (record, resolve, failure modes) and `crates/ce-serve/tests/plugin_cli.rs` (the binary, including `install` against Postgres).
 
 ## Carried opening cost and legacy parity
-`stock_line` also has a writable `par_level` (integer, default 0: the par the line was counted against; a client copies it from the item when it creates the line, as it does the price) and three computed fields for the reorder list: `on_hand` (whole units, `floor(max(0, ending_qty))`), `below_par` (`par_level > 0 and on_hand < par_level`) and `shortage` (`par_level - on_hand` when below par, else 0). They are not slots: the legacy MJCC rule (`GET /api/inventory/reorders`) is the only rule so far, and `tests/parity/mjcc_reorder_vectors.json` (generator next to it) pins it. A report that filters `below_par` and groups by `item` is the reorder list. Because `par_level` is stamped on the line, changing an item's `par_level` does not move lines already created.
+`stock_line` also has a writable `par_level` (integer, default 0: the reorder level the line was counted against; a client copies it from the item when it creates the line, as it does the price) and three computed fields for the reorder list, each a policy slot: `on_hand` (default `max(0, ending_qty)`, fractions kept), `below_par` (default `par_level > 0 and on_hand < par_level`) and `shortage` (default `par_level - on_hand` when below par, else 0). The engine ships only these neutral defaults. How a company counts stock on hand is its own policy: the MJCC policy pack counts whole units (`floor(max(0, ending_qty))`) and `tests/parity/mjcc_reorder_vectors.json` (generator next to it) pins that legacy rule against the fixture pack. A report that filters `below_par` and groups by `item` is the reorder list. Because `par_level` is stamped on the line, changing an item's `par_level` does not move lines already created.
 
 `stock_line` has an `opening_unit_cost` field (default 0): the unit cost the opening quantity was carried in at. Module defaults ignore it (opening is valued at the line price), so existing installations are unchanged. A rollover client sets it to the closing cost per unit (closing value divided by closing quantity, six decimal places), so a later price change in the new period does not revalue the opening stock; the exact derivation is in "Over-pull rule and cost carried at rollover". A plugin that wants the carried cost fills the `opening_value` slot with a rule that reads it.
 
@@ -121,6 +121,19 @@ ref = "limit"
 - Because the entities are part of the composed manifest, they change its hash and are pinned with the plugin digest.
 
 Not in this increment: plugin-defined routes and actions, connector settings, what happens to a plugin's tables when it is disabled or removed (`ce-migrate` emits no `DROP` today, so data is kept, but this is not yet a tested guarantee), and a migration step for upgrading a plugin's entities across versions.
+
+## Added fields on module entities
+
+A policy pack may add fields to the entities its module brings (for example `stock_line`), so a company's own figures sit on the same record as the module's:
+
+```toml
+[[extend]]
+entity = "stock_line"
+field = "short_value"
+definition = { type = "decimal", precision = 16, scale = 2, computed = "when(ending_qty < 0, 0 - ending_qty * price, 0)" }
+```
+
+`definition` is a manifest field definition, so a computed field may read the module's fields and may use `ref(...)` and the aggregates. Rules: the entity must be one the module added (not the template's), the field name is lowercase letters, digits and single underscores, a field the module or template already has is a `Clash` (a plugin adds, never replaces), a name may not be declared twice, at most 32 per plugin, and the expression or type is checked when the plugin is composed like any other. The names are plain (not prefixed), so reports and the API read them like the module's own fields. The pinned digest covers them. This keeps the engine free of company rules: the module stays generic and the company's figures are the plugin's.
 
 ## Event subscriptions
 

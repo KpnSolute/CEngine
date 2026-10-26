@@ -10,6 +10,8 @@ pub const MAX_BYTES: usize = 64 * 1024;
 pub const MAX_POLICIES: usize = 64;
 /// Most entities one plugin may add.
 pub const MAX_ENTITIES: usize = 16;
+/// Most fields one plugin may add to the module's entities.
+pub const MAX_EXTENSIONS: usize = 32;
 const MAX_ENTITY_LOCAL: usize = 30;
 /// Most event subscriptions one plugin may declare.
 pub const MAX_SUBSCRIPTIONS: usize = 16;
@@ -31,11 +33,21 @@ struct Raw {
     #[serde(default)]
     entity: Vec<RawEntity>,
     #[serde(default)]
+    extend: Vec<RawExtend>,
+    #[serde(default)]
     subscribe: Vec<RawSub>,
     #[serde(default)]
     deliver: Vec<RawDeliver>,
     #[serde(default)]
     tests: Option<RawTests>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawExtend {
+    entity: String,
+    field: String,
+    definition: toml::Table,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +141,17 @@ pub struct Policy {
     pub params: Map<String, Value>,
 }
 
+/// A field a plugin adds to one of the module's own entities (for example a computed figure on
+/// the inventory line). `definition` is a manifest field definition; `ce-manifest` validates it,
+/// expression included, when the plugin is composed. A plugin may add fields but never change or
+/// replace one the module or the template already has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginField {
+    pub entity: String,
+    pub field: String,
+    pub definition: Value,
+}
+
 /// An entity a plugin adds. `name` is the plugin's own name for it; composition installs it as
 /// `<plugin id with hyphens as underscores>__<name>` and rewrites references between the
 /// plugin's own entities to match. `definition` is a manifest entity definition (fields, state,
@@ -173,6 +196,8 @@ pub struct Plugin {
     pub policies: Vec<Policy>,
     /// Entities (tables) the plugin adds beside the module's own.
     pub entities: Vec<PluginEntity>,
+    /// Fields the plugin adds to the module's entities.
+    pub extensions: Vec<PluginField>,
     /// Reactions to engine events, creating records in the plugin's own entities.
     pub subscriptions: Vec<PluginSubscription>,
     /// Queued records the host delivers through a connector.
@@ -295,6 +320,7 @@ pub fn parse(text: &str, registry: &Registry, engine: &Version) -> Result<Plugin
     capability_check(&mut bad, module, &raw.capabilities);
     let policies = policy_check(&mut bad, module, &raw.policy);
     let entities = entity_check(&mut bad, &raw.plugin.id, &raw.entity);
+    let extensions = extend_check(&mut bad, &raw.extend);
     let subscriptions = subscription_check(&mut bad, &entities, &raw.subscribe);
     let deliveries = delivery_check(&mut bad, &entities, &raw.deliver);
     let fixtures = raw
@@ -327,6 +353,7 @@ pub fn parse(text: &str, registry: &Registry, engine: &Version) -> Result<Plugin
             },
             policies,
             entities,
+            extensions,
             subscriptions,
             deliveries,
             fixtures,
@@ -436,6 +463,56 @@ fn entity_check(bad: &mut Vec<Violation>, plugin_id: &str, raw: &[RawEntity]) ->
             }),
             None => bad.push(v(
                 "bad_entity",
+                format!("{at}.definition"),
+                "use strings, integers, booleans, arrays or tables; write decimals as strings",
+            )),
+        }
+    }
+    out
+}
+
+fn extend_check(bad: &mut Vec<Violation>, raw: &[RawExtend]) -> Vec<PluginField> {
+    if raw.len() > MAX_EXTENSIONS {
+        bad.push(v(
+            "too_many",
+            "extend",
+            format!("at most {MAX_EXTENSIONS} added fields"),
+        ));
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (i, e) in raw.iter().enumerate() {
+        let at = format!("extend[{i}]");
+        if !local_name(&e.entity) {
+            bad.push(v(
+                "bad_entity_name",
+                format!("{at}.entity"),
+                "name one of the module's entities",
+            ));
+        }
+        if !local_name(&e.field) {
+            bad.push(v(
+                "bad_field_name",
+                format!("{at}.field"),
+                "lowercase letters, digits and single underscores, starting with a letter",
+            ));
+        }
+        if !seen.insert((e.entity.as_str(), e.field.as_str())) {
+            bad.push(v(
+                "duplicate_field",
+                format!("{at}.field"),
+                format!("field \"{}.{}\" declared twice", e.entity, e.field),
+            ));
+        }
+        match json(&toml::Value::Table(e.definition.clone())) {
+            Some(definition) => out.push(PluginField {
+                entity: e.entity.clone(),
+                field: e.field.clone(),
+                definition,
+            }),
+            None => bad.push(v(
+                "bad_field",
                 format!("{at}.definition"),
                 "use strings, integers, booleans, arrays or tables; write decimals as strings",
             )),
