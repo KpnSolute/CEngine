@@ -193,7 +193,8 @@
               "period": "input.to",
               "opening_oh": "ending_qty",
               "opening_unit_cost": "when(ending_qty > 0, round(ending_value / ending_qty, 6), 0)",
-              "unit_price": "unit_price"
+              "unit_price": "unit_price",
+              "par_level": "par_level"
             }
           }}
         ]
