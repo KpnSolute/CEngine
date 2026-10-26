@@ -122,6 +122,19 @@ ref = "limit"
 
 Not in this increment: plugin-defined routes and actions, connector settings, what happens to a plugin's tables when it is disabled or removed (`ce-migrate` emits no `DROP` today, so data is kept, but this is not yet a tested guarantee), and a migration step for upgrading a plugin's entities across versions.
 
+## Added fields on module entities
+
+A policy pack may add fields to the entities its module brings (for example `stock_line`), so a company's own figures sit on the same record as the module's:
+
+```toml
+[[extend]]
+entity = "stock_line"
+field = "short_value"
+definition = { type = "decimal", precision = 16, scale = 2, computed = "when(ending_qty < 0, 0 - ending_qty * price, 0)" }
+```
+
+`definition` is a manifest field definition, so a computed field may read the module's fields and may use `ref(...)` and the aggregates. Rules: the entity must be one the module added (not the template's), the field name is lowercase letters, digits and single underscores, a field the module or template already has is a `Clash` (a plugin adds, never replaces), a name may not be declared twice, at most 32 per plugin, and the expression or type is checked when the plugin is composed like any other. The names are plain (not prefixed), so reports and the API read them like the module's own fields. The pinned digest covers them. This keeps the engine free of company rules: the module stays generic and the company's figures are the plugin's.
+
 ## Event subscriptions
 
 A plugin can react to an engine event by creating a record in one of its own entities. This is how a plugin hooks into the engine without code: for example, an archive plugin queues a job each time a changeset is merged.
