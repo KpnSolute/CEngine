@@ -63,6 +63,7 @@
           "opening_oh": {"type": "decimal", "precision": 14, "scale": 3, "default": 0},
           "unit_price": {"type": "decimal", "precision": 12, "scale": 6, "default": 0},
           "opening_unit_cost": {"type": "decimal", "precision": 12, "scale": 6, "default": 0},
+          "par_level": {"type": "integer", "default": 0},
           "price": {"type": "decimal", "precision": 12, "scale": 6, "computed": {"$slot": "price"}},
           "received": {"type": "decimal", "precision": 14, "scale": 3, "computed": "sum(children(stock_movement, line).received)"},
           "pulled": {"type": "decimal", "precision": 14, "scale": 3, "computed": "sum(children(stock_movement, line).pulled)"},
@@ -70,7 +71,10 @@
           "opening_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "opening_value"}},
           "received_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "received_value"}},
           "pulled_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "pulled_value"}},
-          "ending_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "ending_value"}}
+          "ending_value": {"type": "decimal", "precision": 16, "scale": 2, "computed": {"$slot": "ending_value"}},
+          "on_hand": {"type": "decimal", "precision": 14, "scale": 0, "computed": "floor(max(0, ending_qty))"},
+          "below_par": {"type": "boolean", "computed": "par_level > 0 and on_hand < par_level"},
+          "shortage": {"type": "decimal", "precision": 14, "scale": 0, "computed": "when(par_level > 0 and on_hand < par_level, par_level - on_hand, 0)"}
         },
         "invariants": [
           {"name": "opening_not_negative", "expr": "opening_oh >= 0", "message_code": "stock.negative_opening"},
