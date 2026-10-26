@@ -147,6 +147,7 @@ pub fn compose(
     }
 
     if let Some(p) = plugin {
+        add_plugin_fields(entities, &fragment, p)?;
         add_plugin_entities(entities, p)?;
         if !p.deliveries.is_empty() && !entities.contains_key("outbox_event") {
             // Deliveries run with the event relay, which needs the template's `events` tool.
@@ -229,6 +230,30 @@ pub fn compose(
                 .collect(),
         )),
     }
+}
+
+/// Add the plugin's extra fields to the module's own entities. A field goes only on an entity the
+/// module added, and never over a field that is already there.
+fn add_plugin_fields(
+    entities: &mut Map<String, Value>,
+    fragment: &Value,
+    plugin: &Plugin,
+) -> Result<(), ComposeError> {
+    for x in &plugin.extensions {
+        if fragment["entities"].get(&x.entity).is_none() {
+            return Err(ComposeError::MissingEntity(x.entity.clone()));
+        }
+        let fields = entities
+            .get_mut(&x.entity)
+            .and_then(|e| e.get_mut("fields"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| ComposeError::MissingEntity(x.entity.clone()))?;
+        if fields.contains_key(&x.field) {
+            return Err(ComposeError::Clash(format!("{}.{}", x.entity, x.field)));
+        }
+        fields.insert(x.field.clone(), x.definition.clone());
+    }
+    Ok(())
 }
 
 /// Install the plugin's own entities as `<prefix>__<name>`. A `ref` to another of the plugin's
