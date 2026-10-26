@@ -110,7 +110,8 @@
       "fields": {
         "opening_oh": "opening_oh",
         "opening_unit_cost": "opening_unit_cost",
-        "unit_price": "unit_price"
+        "unit_price": "unit_price",
+        "par_level": "par_level"
       },
       "refs": [
         {
@@ -123,7 +124,18 @@
           "source": "period_id",
           "table": "month_periods"
         }
-      ]
+      ],
+      "derive": {
+        "par_level": {
+          "find": {
+            "table": "inventory_items",
+            "match": {
+              "id": "item_id"
+            },
+            "field": "par_level"
+          }
+        }
+      }
     },
     {
       "source": "inventory_transactions",

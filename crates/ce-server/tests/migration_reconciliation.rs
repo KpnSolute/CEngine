@@ -1056,3 +1056,30 @@ fn budgets_keep_the_allotment_and_every_weekly_plan_to_the_cent() {
         .get(0);
     assert_eq!(label, "2026-11");
 }
+
+#[test]
+fn each_stock_line_carries_the_par_level_its_item_had() {
+    let Some(url) = url() else { return };
+    let e = Env::with(&url, &inventory_manifest());
+    let fx = read_json("tests/migration/fixtures/normal_month.json");
+    let run = e.run("rehearsal");
+    e.s().migration_set_run_status(&run, "running").unwrap();
+    load(&e, &run, &fx["tables"]);
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    let rows = c
+        .query(
+            &format!(
+                r#"SELECT i.sku, l.par_level::text, i.par_level::text
+                   FROM "{s}".stock_line l JOIN "{s}".stock_item i ON i.id = l.item"#,
+                s = e.schema
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for r in rows {
+        let (sku, line, item): (String, String, String) = (r.get(0), r.get(1), r.get(2));
+        assert!(!item.is_empty(), "{sku}: item has no par level");
+        assert_eq!(line, item, "{sku}: line par {line} item par {item}");
+    }
+}
