@@ -2,47 +2,555 @@
   "description": "Synthetic fixture: one normal month with two weeks of movements. No real MJCC data.",
   "tables": {
     "user_profiles": [
-      {"id": "u1", "username": "syn.admin", "display_name": "Synthetic Admin", "role": "admin", "pin": "913755", "active": true, "created_at": "2026-01-05T00:00:00Z", "updated_at": "2026-01-05T00:00:00Z"},
-      {"id": "u2", "username": "syn.manager", "display_name": "Synthetic Manager", "role": "manager", "pin": "824166", "active": true, "created_at": "2026-01-06T00:00:00Z", "updated_at": "2026-01-06T00:00:00Z"},
-      {"id": "u3", "username": "syn.cook", "display_name": "Synthetic Cook", "role": "staff", "pin": "735277", "active": false, "created_at": "2026-01-07T00:00:00Z", "updated_at": "2026-01-07T00:00:00Z"}
+      {
+        "id": "u1",
+        "username": "syn.admin",
+        "display_name": "Synthetic Admin",
+        "role": "admin",
+        "pin": "913755",
+        "active": true,
+        "created_at": "2026-01-05T00:00:00Z",
+        "updated_at": "2026-01-05T00:00:00Z"
+      },
+      {
+        "id": "u2",
+        "username": "syn.manager",
+        "display_name": "Synthetic Manager",
+        "role": "manager",
+        "pin": "824166",
+        "active": true,
+        "created_at": "2026-01-06T00:00:00Z",
+        "updated_at": "2026-01-06T00:00:00Z"
+      },
+      {
+        "id": "u3",
+        "username": "syn.cook",
+        "display_name": "Synthetic Cook",
+        "role": "staff",
+        "pin": "735277",
+        "active": false,
+        "created_at": "2026-01-07T00:00:00Z",
+        "updated_at": "2026-01-07T00:00:00Z"
+      }
     ],
-    "inventory_categories": [{"id": "c1", "name": "Dry goods"}, {"id": "c2", "name": "Dairy"}],
-    "vendors": [{"id": "v1", "name": "Synthetic Foods"}],
+    "inventory_categories": [
+      {
+        "id": "c1",
+        "name": "Dry goods"
+      },
+      {
+        "id": "c2",
+        "name": "Dairy"
+      }
+    ],
+    "vendors": [
+      {
+        "id": "v1",
+        "name": "Synthetic Foods"
+      }
+    ],
     "inventory_items": [
-      {"id": "i1", "sku": "SYN-100", "description": "Rice", "category_id": "c1", "unit_price": "1.25", "par_level": 10},
-      {"id": "i2", "sku": "SYN-200", "description": "Milk", "category_id": "c2", "unit_price": "2.10", "par_level": 6}
+      {
+        "id": "i1",
+        "sku": "SYN-100",
+        "description": "Rice",
+        "category_id": "c1",
+        "unit_price": "1.25",
+        "par_level": 10
+      },
+      {
+        "id": "i2",
+        "sku": "SYN-200",
+        "description": "Milk",
+        "category_id": "c2",
+        "unit_price": "2.10",
+        "par_level": 6
+      }
     ],
-    "month_periods": [{"id": "p1", "month": 11, "year": 2026}],
+    "month_periods": [
+      {
+        "id": "p1",
+        "month": 11,
+        "year": 2026
+      }
+    ],
     "monthly_inventory": [
-      {"id": "m1", "item_id": "i1", "period_id": "p1", "opening_oh": "12", "opening_unit_cost": "1.20", "unit_price": "1.25"},
-      {"id": "m2", "item_id": "i2", "period_id": "p1", "opening_oh": "4", "opening_unit_cost": "2.00", "unit_price": "2.10"}
+      {
+        "id": "m1",
+        "item_id": "i1",
+        "period_id": "p1",
+        "opening_oh": "12",
+        "opening_unit_cost": "1.20",
+        "unit_price": "1.25"
+      },
+      {
+        "id": "m2",
+        "item_id": "i2",
+        "period_id": "p1",
+        "opening_oh": "4",
+        "opening_unit_cost": "2.00",
+        "unit_price": "2.10"
+      }
     ],
     "inventory_transactions": [
-      {"id": "t1", "item_id": "i1", "period_id": "p1", "week": 1, "received": "5", "pulled": "0"},
-      {"id": "t2", "item_id": "i1", "period_id": "p1", "week": 1, "received": "0", "pulled": "3"},
-      {"id": "t3", "item_id": "i2", "period_id": "p1", "week": 2, "received": "0", "pulled": "2"}
+      {
+        "id": "t1",
+        "item_id": "i1",
+        "period_id": "p1",
+        "week": 1,
+        "received": "5",
+        "pulled": "0"
+      },
+      {
+        "id": "t2",
+        "item_id": "i1",
+        "period_id": "p1",
+        "week": 1,
+        "received": "0",
+        "pulled": "3"
+      },
+      {
+        "id": "t3",
+        "item_id": "i2",
+        "period_id": "p1",
+        "week": 2,
+        "received": "0",
+        "pulled": "2"
+      }
     ],
     "invoices": [
-      {"id": "n1", "vendor_id": "v1", "invoice_number": "S-1001", "invoice_date": "2026-11-03", "subtotal": "100.00", "discount": "2.00", "tax": "1.50", "fuel_surcharge": "3.00", "total": "102.50"},
-      {"id": "n2", "vendor_id": "v1", "invoice_number": "S-1002", "invoice_date": "2026-11-10", "subtotal": "40.50", "discount": "0.00", "tax": "0.00", "fuel_surcharge": "0.00", "total": "41.00"}
+      {
+        "id": "n1",
+        "vendor_id": "v1",
+        "invoice_number": "S-1001",
+        "invoice_date": "2026-11-03",
+        "subtotal": "100.00",
+        "discount": "2.00",
+        "tax": "1.50",
+        "fuel_surcharge": "3.00",
+        "total": "102.50"
+      },
+      {
+        "id": "n2",
+        "vendor_id": "v1",
+        "invoice_number": "S-1002",
+        "invoice_date": "2026-11-10",
+        "subtotal": "40.50",
+        "discount": "0.00",
+        "tax": "0.00",
+        "fuel_surcharge": "0.00",
+        "total": "41.00"
+      }
     ],
     "price_review_queue": [
-      {"id": "q1", "item_id": "i1", "sku": "SYN-100", "description": "Rice", "month": 10, "year": 2026, "week": 1, "invoice_number": "S-1001", "source_file": "s-1001.pdf", "staging_entry_id": "s1", "previous_price": "1.20", "observed_price": "1.25", "applied_price": "1.25", "change_pct": "4.1667", "status": "applied", "reason": "within tolerance", "created_by": "u1", "resolved_by": "u1", "resolved_at": "2026-11-04T10:00:00Z", "created_at": "2026-11-03T10:00:00Z"},
-      {"id": "q2", "item_id": "i2", "sku": "SYN-200", "description": "Milk", "month": 10, "year": 2026, "week": 2, "invoice_number": "S-1002", "source_file": "s-1002.pdf", "staging_entry_id": "s2", "previous_price": "2.00", "observed_price": "2.40", "applied_price": null, "change_pct": "20.0000", "status": "pending", "reason": "over tolerance", "created_by": "u1", "resolved_by": null, "resolved_at": null, "created_at": "2026-11-10T10:00:00Z"},
-      {"id": "q3", "item_id": "i2", "sku": "SYN-200", "description": "Milk", "month": 10, "year": 2026, "week": 2, "invoice_number": "S-1003", "source_file": "s-1003.pdf", "staging_entry_id": "s3", "previous_price": "2.00", "observed_price": "2.02", "applied_price": null, "change_pct": "1.0000", "status": "dismissed", "reason": "noise", "created_by": "u1", "resolved_by": "u1", "resolved_at": "2026-11-11T10:00:00Z", "created_at": "2026-11-10T11:00:00Z"}
+      {
+        "id": "q1",
+        "item_id": "i1",
+        "sku": "SYN-100",
+        "description": "Rice",
+        "month": 10,
+        "year": 2026,
+        "week": 1,
+        "invoice_number": "S-1001",
+        "source_file": "s-1001.pdf",
+        "staging_entry_id": "s1",
+        "previous_price": "1.20",
+        "observed_price": "1.25",
+        "applied_price": "1.25",
+        "change_pct": "4.1667",
+        "status": "applied",
+        "reason": "within tolerance",
+        "created_by": "u1",
+        "resolved_by": "u1",
+        "resolved_at": "2026-11-04T10:00:00Z",
+        "created_at": "2026-11-03T10:00:00Z"
+      },
+      {
+        "id": "q2",
+        "item_id": "i2",
+        "sku": "SYN-200",
+        "description": "Milk",
+        "month": 10,
+        "year": 2026,
+        "week": 2,
+        "invoice_number": "S-1002",
+        "source_file": "s-1002.pdf",
+        "staging_entry_id": "s2",
+        "previous_price": "2.00",
+        "observed_price": "2.40",
+        "applied_price": null,
+        "change_pct": "20.0000",
+        "status": "pending",
+        "reason": "over tolerance",
+        "created_by": "u1",
+        "resolved_by": null,
+        "resolved_at": null,
+        "created_at": "2026-11-10T10:00:00Z"
+      },
+      {
+        "id": "q3",
+        "item_id": "i2",
+        "sku": "SYN-200",
+        "description": "Milk",
+        "month": 10,
+        "year": 2026,
+        "week": 2,
+        "invoice_number": "S-1003",
+        "source_file": "s-1003.pdf",
+        "staging_entry_id": "s3",
+        "previous_price": "2.00",
+        "observed_price": "2.02",
+        "applied_price": null,
+        "change_pct": "1.0000",
+        "status": "dismissed",
+        "reason": "noise",
+        "created_by": "u1",
+        "resolved_by": "u1",
+        "resolved_at": "2026-11-11T10:00:00Z",
+        "created_at": "2026-11-10T11:00:00Z"
+      }
     ],
     "week_status": [
-      {"id": "w1", "month": 10, "year": 2026, "week": 1, "status": "locked", "locked_by": "u1", "locked_at": "2026-11-08T10:00:00Z", "created_at": "2026-11-01T00:00:00Z"},
-      {"id": "w2", "month": 10, "year": 2026, "week": 2, "status": "open", "locked_by": null, "locked_at": null, "created_at": "2026-11-01T00:00:00Z"},
-      {"id": "w3", "month": 10, "year": 2026, "week": 3, "status": "published", "locked_by": "u1", "locked_at": "2026-11-22T10:00:00Z", "created_at": "2026-11-01T00:00:00Z"}
+      {
+        "id": "w1",
+        "month": 10,
+        "year": 2026,
+        "week": 1,
+        "status": "locked",
+        "locked_by": "u1",
+        "locked_at": "2026-11-08T10:00:00Z",
+        "created_at": "2026-11-01T00:00:00Z"
+      },
+      {
+        "id": "w2",
+        "month": 10,
+        "year": 2026,
+        "week": 2,
+        "status": "open",
+        "locked_by": null,
+        "locked_at": null,
+        "created_at": "2026-11-01T00:00:00Z"
+      },
+      {
+        "id": "w3",
+        "month": 10,
+        "year": 2026,
+        "week": 3,
+        "status": "published",
+        "locked_by": "u1",
+        "locked_at": "2026-11-22T10:00:00Z",
+        "created_at": "2026-11-01T00:00:00Z"
+      }
     ],
     "cost_budgets": [
-      {"id": "b1", "month": 10, "year": 2026, "gov_allotment": "32000.00", "notes": "synthetic", "created_by": "u1", "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z", "w1_planned_pull": "9000.50", "w2_planned_pull": "8500.25", "w3_planned_pull": "9100.00", "w1_planned_renewable": "1000.00", "w2_planned_renewable": "950.75", "w3_planned_renewable": "1020.10"}
+      {
+        "id": "b1",
+        "month": 10,
+        "year": 2026,
+        "gov_allotment": "32000.00",
+        "notes": "synthetic",
+        "created_by": "u1",
+        "created_at": "2026-11-01T00:00:00Z",
+        "updated_at": "2026-11-01T00:00:00Z",
+        "w1_planned_pull": "9000.50",
+        "w2_planned_pull": "8500.25",
+        "w3_planned_pull": "9100.00",
+        "w1_planned_renewable": "1000.00",
+        "w2_planned_renewable": "950.75",
+        "w3_planned_renewable": "1020.10"
+      }
     ],
     "invoice_items": [
-      {"id": "l1", "invoice_id": "n1", "sku": "SYN-100", "description": "Rice", "quantity_shipped": "10", "unit_price": "5.00", "extended_price": "50.00"},
-      {"id": "l2", "invoice_id": "n1", "sku": "SYN-200", "description": "Milk", "quantity_shipped": "4", "unit_price": "12.50", "extended_price": "50.00"},
-      {"id": "l3", "invoice_id": "n2", "sku": "SYN-100", "description": "Rice", "quantity_shipped": "3", "unit_price": "13.50", "extended_price": "40.50"}
+      {
+        "id": "l1",
+        "invoice_id": "n1",
+        "sku": "SYN-100",
+        "description": "Rice",
+        "quantity_shipped": "10",
+        "unit_price": "5.00",
+        "extended_price": "50.00"
+      },
+      {
+        "id": "l2",
+        "invoice_id": "n1",
+        "sku": "SYN-200",
+        "description": "Milk",
+        "quantity_shipped": "4",
+        "unit_price": "12.50",
+        "extended_price": "50.00"
+      },
+      {
+        "id": "l3",
+        "invoice_id": "n2",
+        "sku": "SYN-100",
+        "description": "Rice",
+        "quantity_shipped": "3",
+        "unit_price": "13.50",
+        "extended_price": "40.50"
+      }
+    ],
+    "menu_items": [
+      {
+        "id": "m1",
+        "name": "Synthetic Stew",
+        "item_key": "synthetic-stew",
+        "active": true,
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z"
+      },
+      {
+        "id": "m2",
+        "name": "Synthetic Salad",
+        "item_key": "synthetic-salad",
+        "active": true,
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z"
+      }
+    ],
+    "menu_cycle_days": [
+      {
+        "cycle_day": 1,
+        "cycle_week": 1,
+        "day_of_week": "Monday",
+        "zone": 1,
+        "morning_service": "Breakfast",
+        "midday_service": "Lunch",
+        "evening_service": "Dinner",
+        "active": true
+      },
+      {
+        "cycle_day": 2,
+        "cycle_week": 1,
+        "day_of_week": "Tuesday",
+        "zone": 1,
+        "morning_service": "Breakfast",
+        "midday_service": "Lunch",
+        "evening_service": null,
+        "active": true
+      }
+    ],
+    "menu_cycle_slots": [
+      {
+        "record_id": "s1",
+        "cycle_day": 1,
+        "meal_group": "Main",
+        "meal_period": "Lunch",
+        "service_order": 2,
+        "slot_order": 1,
+        "slot_name": "Entree",
+        "item_id": "m1",
+        "active": true,
+        "updated_at": "2026-07-01T00:00:00Z",
+        "updated_by": null
+      },
+      {
+        "record_id": "s2",
+        "cycle_day": 1,
+        "meal_group": "Side",
+        "meal_period": "Lunch",
+        "service_order": 2,
+        "slot_order": 2,
+        "slot_name": "Salad",
+        "item_id": "m2",
+        "active": true,
+        "updated_at": "2026-07-01T00:00:00Z",
+        "updated_by": null
+      },
+      {
+        "record_id": "s3",
+        "cycle_day": 2,
+        "meal_group": "Main",
+        "meal_period": "Lunch",
+        "service_order": 2,
+        "slot_order": 1,
+        "slot_name": "Entree",
+        "item_id": "m1",
+        "active": false,
+        "updated_at": "2026-07-01T00:00:00Z",
+        "updated_by": null
+      }
+    ],
+    "menu_suggestions": [
+      {
+        "id": "g1",
+        "source": "lunchvoice",
+        "cycle_day": 1,
+        "meal_period": "Lunch",
+        "slot_name": "Entree",
+        "suggested_item": "Synthetic Chili",
+        "notes": "more please",
+        "submitted_by": "synthetic",
+        "status": "new",
+        "created_at": "2026-07-02T00:00:00Z"
+      },
+      {
+        "id": "g2",
+        "source": "lunchvoice",
+        "cycle_day": 2,
+        "meal_period": "Lunch",
+        "slot_name": "Entree",
+        "suggested_item": "Synthetic Soup",
+        "notes": null,
+        "submitted_by": null,
+        "status": "adopted",
+        "created_at": "2026-07-03T00:00:00Z"
+      },
+      {
+        "id": "g3",
+        "source": "lunchvoice",
+        "cycle_day": null,
+        "meal_period": null,
+        "slot_name": null,
+        "suggested_item": "Synthetic Pie",
+        "notes": null,
+        "submitted_by": null,
+        "status": "dismissed",
+        "created_at": "2026-07-04T00:00:00Z"
+      }
+    ],
+    "budget_line_items": [
+      {
+        "id": "l1",
+        "fy_start_year": 2026,
+        "task_id": "T-1",
+        "description": "Synthetic pulled food",
+        "line_type": "cost",
+        "annual_budget": "120000.00",
+        "auto_source": "pulled",
+        "sort_order": 1,
+        "active": true,
+        "created_by": null,
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z"
+      },
+      {
+        "id": "l2",
+        "fy_start_year": 2026,
+        "task_id": null,
+        "description": "Synthetic manual cost",
+        "line_type": "cost",
+        "annual_budget": "5000.50",
+        "auto_source": null,
+        "sort_order": 2,
+        "active": true,
+        "created_by": null,
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z"
+      }
+    ],
+    "budget_line_actuals": [
+      {
+        "id": "a1",
+        "line_item_id": "l2",
+        "month": 10,
+        "year": 2026,
+        "actual_amount": "412.35",
+        "updated_by": null,
+        "updated_at": "2026-11-30T00:00:00Z"
+      }
+    ],
+    "snack_bar_products": [
+      {
+        "id": "p1",
+        "name": "Synthetic Chips",
+        "price": "1.25",
+        "stock_qty": 40,
+        "active": true,
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z"
+      },
+      {
+        "id": "p2",
+        "name": "Synthetic Soda",
+        "price": "2.10",
+        "stock_qty": 24,
+        "active": true,
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z"
+      }
+    ],
+    "snack_bar_entity_rates": [
+      {
+        "entity_type": "student",
+        "tax_pct": "7.00",
+        "discount_pct": "10.00",
+        "updated_by": null,
+        "updated_at": "2026-07-01T00:00:00Z"
+      },
+      {
+        "entity_type": "staff",
+        "tax_pct": "7.00",
+        "discount_pct": "0.00",
+        "updated_by": null,
+        "updated_at": "2026-07-01T00:00:00Z"
+      }
+    ],
+    "snack_bar_transactions": [
+      {
+        "id": "t1",
+        "entity_type": "student",
+        "entity_name": "Synthetic Student",
+        "subtotal": "7.95",
+        "discount_amount": "0.80",
+        "tax_amount": "0.50",
+        "total_amount": "7.65",
+        "business_date": "2026-11-03",
+        "recorded_by": null,
+        "created_at": "2026-11-03T12:00:00Z"
+      },
+      {
+        "id": "t2",
+        "entity_type": "staff",
+        "entity_name": "Synthetic Staff",
+        "subtotal": "2.10",
+        "discount_amount": "0.00",
+        "tax_amount": "0.15",
+        "total_amount": "2.25",
+        "business_date": "2026-11-03",
+        "recorded_by": null,
+        "created_at": "2026-11-03T13:00:00Z"
+      }
+    ],
+    "snack_bar_transaction_items": [
+      {
+        "id": "i1",
+        "transaction_id": "t1",
+        "product_id": "p1",
+        "product_name": "Synthetic Chips",
+        "unit_price": "1.25",
+        "qty": 3,
+        "line_total": "3.75"
+      },
+      {
+        "id": "i2",
+        "transaction_id": "t1",
+        "product_id": "p2",
+        "product_name": "Synthetic Soda",
+        "unit_price": "2.10",
+        "qty": 2,
+        "line_total": "4.20"
+      },
+      {
+        "id": "i3",
+        "transaction_id": "t2",
+        "product_id": "p2",
+        "product_name": "Synthetic Soda",
+        "unit_price": "2.10",
+        "qty": 1,
+        "line_total": "2.10"
+      }
+    ],
+    "snack_bar_sales": [
+      {
+        "id": "d1",
+        "business_date": "2026-11-03",
+        "opening_cash": "50.00",
+        "register_sales": "9.90",
+        "closing_cash": "59.90",
+        "recorded_by": null,
+        "created_at": "2026-11-03T20:00:00Z",
+        "updated_at": "2026-11-03T20:00:00Z"
+      }
     ]
   }
 }

@@ -336,6 +336,17 @@ fn inventory_manifest() -> ce_manifest::Manifest {
                 "w2_planned_renewable": {"type": "decimal", "precision": 12, "scale": 2},
                 "w3_planned_renewable": {"type": "decimal", "precision": 12, "scale": 2}
             }},
+            "budget_line_item": {"fields": {"active": {"default": true, "type": "boolean"}, "annual_budget": {"default": 0, "precision": 12, "scale": 2, "type": "decimal"}, "auto_source": {"type": "enum", "values": ["pulled", "received", "renewable", "snack_bar_revenue"]}, "description": {"max_length": 240, "required": true, "type": "string"}, "fy_start_year": {"indexed": true, "required": true, "type": "integer"}, "line_type": {"default": "cost", "indexed": true, "type": "enum", "values": ["cost", "revenue"]}, "sort_order": {"default": 0, "indexed": true, "type": "integer"}, "task_id": {"max_length": 60, "type": "string"}}, "sort_keys": ["sort_order"]},
+            "budget_line_actual": {"fields": {"actual_amount": {"default": 0, "precision": 12, "scale": 2, "type": "decimal"}, "actual_key": {"computed": "concat(line_item, '|', period)", "indexed": true, "max_length": 100, "type": "string", "unique": true}, "line_item": {"indexed": true, "ref": "budget_line_item", "required": true, "type": "ref"}, "period": {"indexed": true, "ref": "period", "required": true, "type": "ref"}, "updated_by": {"max_length": 120, "type": "string"}}, "locked_when": "ref(period).status == 'closed'"},
+            "menu_item": {"fields": {"active": {"default": true, "type": "boolean"}, "item_key": {"indexed": true, "max_length": 120, "required": true, "type": "string", "unique": true}, "name": {"indexed": true, "max_length": 160, "required": true, "searchable": true, "type": "string"}}, "sort_keys": ["name"]},
+            "menu_cycle_day": {"fields": {"active": {"default": true, "type": "boolean"}, "cycle_day": {"indexed": true, "required": true, "type": "integer", "unique": true}, "cycle_week": {"indexed": true, "required": true, "type": "integer"}, "day_of_week": {"required": true, "type": "enum", "values": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]}, "evening_service": {"max_length": 120, "type": "string"}, "midday_service": {"max_length": 120, "type": "string"}, "morning_service": {"max_length": 120, "type": "string"}, "zone": {"default": 1, "type": "integer"}}, "invariants": [{"expr": "cycle_day >= 1 and cycle_day <= 28", "message_code": "menu.cycle_day_range", "name": "cycle_day_range"}], "sort_keys": ["cycle_day"]},
+            "menu_cycle_slot": {"fields": {"active": {"default": true, "type": "boolean"}, "cycle_day": {"indexed": true, "ref": "menu_cycle_day", "required": true, "type": "ref"}, "item": {"indexed": true, "ref": "menu_item", "required": true, "type": "ref"}, "meal_group": {"max_length": 60, "required": true, "type": "string"}, "meal_period": {"indexed": true, "max_length": 60, "required": true, "type": "string"}, "service_order": {"default": 1, "indexed": true, "type": "integer"}, "slot_name": {"max_length": 120, "required": true, "type": "string"}, "slot_order": {"default": 1, "indexed": true, "type": "integer"}, "updated_by": {"max_length": 120, "type": "string"}}, "sort_keys": ["service_order", "slot_order"]},
+            "menu_suggestion": {"fields": {"cycle_day": {"type": "integer"}, "meal_period": {"max_length": 60, "type": "string"}, "notes": {"type": "text"}, "slot_name": {"max_length": 120, "type": "string"}, "source": {"default": "lunchvoice", "max_length": 60, "type": "string"}, "status": {"indexed": true, "type": "enum", "values": ["new", "reviewed", "adopted", "dismissed"]}, "submitted_by": {"max_length": 120, "pii": true, "type": "string"}, "suggested_item": {"max_length": 200, "required": true, "type": "string"}}, "sort_keys": ["status"], "state": {"field": "status", "initial": "new", "states": {"adopted": {"code": 600}, "dismissed": {"code": 610}, "new": {"code": 100, "to": ["reviewed", "dismissed"]}, "reviewed": {"code": 200, "to": ["adopted", "dismissed"]}}}},
+            "snack_bar_product": {"fields": {"active": {"default": true, "type": "boolean"}, "name": {"indexed": true, "max_length": 120, "required": true, "type": "string"}, "price": {"default": 0, "precision": 10, "scale": 2, "type": "decimal"}, "stock_qty": {"default": 0, "type": "integer"}}, "invariants": [{"expr": "stock_qty >= 0", "message_code": "snack.negative_stock", "name": "stock_not_negative"}], "sort_keys": ["name"]},
+            "snack_bar_rate": {"fields": {"discount_pct": {"default": 0, "precision": 5, "scale": 2, "type": "decimal"}, "entity_type": {"required": true, "type": "enum", "unique": true, "values": ["student", "staff"]}, "tax_pct": {"default": 0, "precision": 5, "scale": 2, "type": "decimal"}}, "invariants": [{"expr": "tax_pct >= 0 and tax_pct <= 100 and discount_pct >= 0 and discount_pct <= 100", "message_code": "snack.rate_range", "name": "pct_range"}]},
+            "snack_bar_sale": {"fields": {"business_date": {"indexed": true, "required": true, "type": "date", "unique": true}, "closing_cash": {"default": 0, "precision": 12, "scale": 2, "type": "decimal"}, "opening_cash": {"default": 0, "precision": 12, "scale": 2, "type": "decimal"}, "recorded_by": {"max_length": 120, "type": "string"}, "register_sales": {"default": 0, "precision": 12, "scale": 2, "type": "decimal"}}, "sort_keys": ["business_date"]},
+            "snack_bar_transaction": {"fields": {"business_date": {"indexed": true, "required": true, "type": "date"}, "discount_amount": {"computed": "round(subtotal * discount_pct / 100, 2)", "precision": 12, "scale": 2, "type": "decimal"}, "discount_pct": {"computed": "ref(rate).discount_pct", "precision": 5, "scale": 2, "type": "decimal"}, "entity_name": {"max_length": 160, "pii": true, "required": true, "type": "string"}, "entity_type": {"computed": "ref(rate).entity_type", "type": "enum", "values": ["student", "staff"]}, "rate": {"indexed": true, "ref": "snack_bar_rate", "required": true, "type": "ref"}, "recorded_by": {"max_length": 120, "type": "string"}, "subtotal": {"computed": "sum(children(snack_bar_transaction_item, transaction).line_total)", "precision": 12, "scale": 2, "type": "decimal"}, "tax_amount": {"computed": "round((subtotal - discount_amount) * tax_pct / 100, 2)", "precision": 12, "scale": 2, "type": "decimal"}, "tax_pct": {"computed": "ref(rate).tax_pct", "precision": 5, "scale": 2, "type": "decimal"}, "total_amount": {"computed": "round(subtotal - discount_amount + tax_amount, 2)", "precision": 12, "scale": 2, "type": "decimal"}}, "sort_keys": ["business_date"]},
+            "snack_bar_transaction_item": {"fields": {"line_total": {"computed": "round(unit_price * qty, 2)", "precision": 12, "scale": 2, "type": "decimal"}, "product": {"indexed": true, "ref": "snack_bar_product", "type": "ref"}, "product_name": {"max_length": 120, "required": true, "type": "string"}, "qty": {"required": true, "type": "integer"}, "transaction": {"indexed": true, "ref": "snack_bar_transaction", "required": true, "type": "ref"}, "unit_price": {"precision": 12, "required": true, "scale": 2, "type": "decimal"}}, "invariants": [{"expr": "qty > 0", "message_code": "snack.qty", "name": "positive_qty"}]},
             "staff_member": {"fields": {
                 "username": {"type": "string", "required": true, "unique": true, "max_length": 80},
                 "display_name": {"type": "string", "max_length": 120},
@@ -419,6 +430,17 @@ fn the_fixture_loads_parents_then_children_and_nothing_is_dropped() {
         ("week_status", 3),
         ("user_profiles", 3),
         ("cost_budgets", 1),
+        ("menu_items", 2),
+        ("menu_cycle_days", 2),
+        ("menu_cycle_slots", 3),
+        ("menu_suggestions", 3),
+        ("budget_line_items", 2),
+        ("budget_line_actuals", 1),
+        ("snack_bar_products", 2),
+        ("snack_bar_entity_rates", 2),
+        ("snack_bar_transactions", 2),
+        ("snack_bar_transaction_items", 3),
+        ("snack_bar_sales", 1),
     ] {
         let c = &report[table];
         assert_eq!((c.written, c.rejected), (n, 0), "{table}: {c:?}");
@@ -1082,4 +1104,182 @@ fn each_stock_line_carries_the_par_level_its_item_had() {
         assert!(!item.is_empty(), "{sku}: item has no par level");
         assert_eq!(line, item, "{sku}: line par {line} item par {item}");
     }
+}
+
+fn loaded() -> Option<(Env, String, serde_json::Value)> {
+    let url = url()?;
+    let e = Env::with(&url, &inventory_manifest());
+    let fx = read_json("tests/migration/fixtures/normal_month.json");
+    let run = e.run("rehearsal");
+    e.s().migration_set_run_status(&run, "running").unwrap();
+    load(&e, &run, &fx["tables"]);
+    e.s().migration_set_run_status(&run, "reconciling").unwrap();
+    Some((e, run, fx))
+}
+
+#[test]
+fn snack_bar_totals_are_recomputed_by_the_engine_and_match_each_sale_to_the_cent() {
+    let Some((e, run, fx)) = loaded() else { return };
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    for t in fx["tables"]["snack_bar_transactions"].as_array().unwrap() {
+        let (id, who) = (
+            t["id"].as_str().unwrap(),
+            t["entity_name"].as_str().unwrap(),
+        );
+        for col in ["subtotal", "discount_amount", "tax_amount", "total_amount"] {
+            let legacy = t[col].as_str().unwrap();
+            let engine: String = c
+                .query_one(
+                    &format!(
+                        r#"SELECT {col}::text FROM "{}".snack_bar_transaction WHERE entity_name = $1"#,
+                        e.schema
+                    ),
+                    &[&who],
+                )
+                .unwrap()
+                .get(0);
+            let o = e
+                .s()
+                .migration_check(
+                    T,
+                    &run,
+                    col,
+                    "snack_bar_transaction",
+                    id,
+                    legacy,
+                    &engine,
+                    None,
+                )
+                .unwrap();
+            assert!(o.pass, "{id} {col}: legacy {legacy} engine {engine}");
+        }
+    }
+    // Item line totals are recomputed from unit price and quantity as well.
+    let lines: String = c
+        .query_one(
+            &format!(
+                r#"SELECT coalesce(sum(line_total),0)::text FROM "{}".snack_bar_transaction_item"#,
+                e.schema
+            ),
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(lines, "10.05");
+    // The day's register sale and cash are copied.
+    let sale: (String, String) = {
+        let r = c
+            .query_one(
+                &format!(
+                    r#"SELECT register_sales::text, closing_cash::text FROM "{}".snack_bar_sale"#,
+                    e.schema
+                ),
+                &[],
+            )
+            .unwrap();
+        (r.get(0), r.get(1))
+    };
+    assert_eq!(sale, ("9.90".to_string(), "59.90".to_string()));
+}
+
+#[test]
+fn the_cycle_menu_keeps_every_slot_on_its_day_and_item_and_each_suggestion_its_state() {
+    let Some((e, _run, _fx)) = loaded() else {
+        return;
+    };
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    let slots: Vec<(i32, String, bool)> = c
+        .query(
+            &format!(
+                r#"SELECT d.cycle_day::int, i.item_key, s.active FROM "{s}".menu_cycle_slot s
+                   JOIN "{s}".menu_cycle_day d ON d.id = s.cycle_day
+                   JOIN "{s}".menu_item i ON i.id = s.item ORDER BY s.slot_name, d.cycle_day, i.item_key"#,
+                s = e.schema
+            ),
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    assert_eq!(
+        slots,
+        vec![
+            (1, "synthetic-stew".to_string(), true),
+            (2, "synthetic-stew".to_string(), false),
+            (1, "synthetic-salad".to_string(), true),
+        ]
+    );
+    let states: Vec<(String, String)> = c
+        .query(
+            &format!(
+                r#"SELECT suggested_item, status FROM "{}".menu_suggestion ORDER BY suggested_item"#,
+                e.schema
+            ),
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            ("Synthetic Chili".to_string(), "new".to_string()),
+            ("Synthetic Pie".to_string(), "dismissed".to_string()),
+            ("Synthetic Soup".to_string(), "adopted".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn budget_lines_and_their_monthly_actuals_keep_amounts_and_land_on_the_right_period() {
+    let Some((e, run, fx)) = loaded() else { return };
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    for l in fx["tables"]["budget_line_items"].as_array().unwrap() {
+        let (id, desc) = (
+            l["id"].as_str().unwrap(),
+            l["description"].as_str().unwrap(),
+        );
+        let legacy = l["annual_budget"].as_str().unwrap();
+        let engine: String = c
+            .query_one(
+                &format!(
+                    r#"SELECT annual_budget::text FROM "{}".budget_line_item WHERE description = $1"#,
+                    e.schema
+                ),
+                &[&desc],
+            )
+            .unwrap()
+            .get(0);
+        let o = e
+            .s()
+            .migration_check(
+                T,
+                &run,
+                "annual_budget",
+                "budget_line_item",
+                id,
+                legacy,
+                &engine,
+                None,
+            )
+            .unwrap();
+        assert!(o.pass, "{id}: legacy {legacy} engine {engine}");
+    }
+    // The actual was keyed to month 10 (0-based), which is the November period.
+    let (amount, label): (String, String) = {
+        let r = c
+            .query_one(
+                &format!(
+                    r#"SELECT a.actual_amount::text, p.label FROM "{s}".budget_line_actual a
+                       JOIN "{s}".period p ON p.id = a.period"#,
+                    s = e.schema
+                ),
+                &[],
+            )
+            .unwrap();
+        (r.get(0), r.get(1))
+    };
+    assert_eq!((amount.as_str(), label.as_str()), ("412.35", "2026-11"));
 }
