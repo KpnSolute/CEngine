@@ -388,6 +388,39 @@ fn call(name: &str, raw: &[Expr], env: &Env, r: &dyn Resolver) -> R {
                 _ => Err(ty("expected a string")),
             }
         }
+        "year" | "month" | "day" => {
+            arity(name, &args, 1)?;
+            match &args[0] {
+                Value::Null => Ok(Value::Null),
+                Value::Str(s) => {
+                    // An ISO date or datetime: YYYY-MM-DD, optionally followed by a time.
+                    let b = s.as_bytes();
+                    let digits = |r: std::ops::Range<usize>| {
+                        b.get(r.clone())
+                            .filter(|x| x.iter().all(u8::is_ascii_digit))
+                            .map(|x| x.iter().fold(0i64, |a, d| a * 10 + i64::from(d - b'0')))
+                    };
+                    let shape = b.len() >= 10
+                        && b[4] == b'-'
+                        && b[7] == b'-'
+                        && (b.len() == 10 || b[10] == b'T' || b[10] == b' ');
+                    let (y, m, d) = (digits(0..4), digits(5..7), digits(8..10));
+                    match (shape, y, m, d) {
+                        (true, Some(y), Some(m), Some(d))
+                            if (1..=12).contains(&m) && (1..=31).contains(&d) =>
+                        {
+                            Ok(Value::Int(match name {
+                                "year" => y,
+                                "month" => m,
+                                _ => d,
+                            }))
+                        }
+                        _ => Err(ty("expected an ISO date (YYYY-MM-DD)")),
+                    }
+                }
+                _ => Err(ty("expected a date")),
+            }
+        }
         "trim" => {
             arity(name, &args, 1)?;
             match &args[0] {

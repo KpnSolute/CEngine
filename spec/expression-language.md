@@ -64,6 +64,8 @@ Three-valued logic. `null == null` is **true**; any other comparison with null i
 | `is_null(x)` | bool |
 | `days_between(a, b)` | int (b minus a, whole days) |
 | `add_days(d, n)`, `year(d)`, `month(d)` (1 to 12), `day(d)` | date or int |
+
+`year`, `month` and `day` read an ISO date or datetime string (`YYYY-MM-DD`, optionally followed by `T` or a space and a time) and return an integer; null gives null, anything else is a type error. `add_days` and `days_between` are specified here but not implemented yet.
 | `sum(list)`, `count(list)` | aggregates, **only inside `computed` on a parent over `children(entity, field)`** |
 | `children(entity, ref_field)` | rows of a child entity pointing here (aggregate source) |
 

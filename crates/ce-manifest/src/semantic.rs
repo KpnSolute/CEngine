@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 type Obj = Map<String, Value>;
 
 const ROOTS: [&str; 4] = ["old", "actor", "now", "today"];
-const FUNCS: [&str; 17] = [
+const FUNCS: [&str; 20] = [
     "round",
     "floor",
     "ceil",
@@ -23,6 +23,9 @@ const FUNCS: [&str; 17] = [
     "starts_with",
     "contains",
     "is_null",
+    "year",
+    "month",
+    "day",
     "ref",
 ];
 const AGGS: [&str; 3] = ["sum", "count", "children"];

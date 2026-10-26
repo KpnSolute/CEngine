@@ -112,6 +112,12 @@ def call(f, a):
     if f == 'lower': return a[0].lower()
     if f == 'upper': return a[0].upper()
     if f == 'is_null': return a[0] is None
+    if f in ('year', 'month', 'day'):
+        if a[0] is None: return None
+        m = re.fullmatch(r'(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?', a[0])
+        if not m or not 1 <= int(m.group(2)) <= 12 or not 1 <= int(m.group(3)) <= 31:
+            raise ValueError('expected an ISO date')
+        return int({'year': m.group(1), 'month': m.group(2), 'day': m.group(3)}[f])
     if f == 'concat': return ''.join(a)
     if f == 'starts_with': return a[0].startswith(a[1])
     if f == 'contains': return a[1] in a[0]
