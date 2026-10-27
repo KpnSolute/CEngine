@@ -27,6 +27,7 @@
 //! | `CE_DB_TLS` | `off` (default), `webpki` (public roots) or `ca` (needs `CE_DB_CA`, a PEM file) |
 //! | `CE_DB_CA` | path to the CA certificate(s) the database's certificate must chain to |
 //! | `CE_STAFF_FILE` | staff list JSON (`{"users":[{"username","pin_hash","roles"}]}`); turns on `POST /v1/{id}/_auth/token`, else it answers 503 |
+//! | `CE_TOOLS` | with `CE_TEMPLATE`, a comma list of built-in tools to add to the template before the module is composed (for example `audit,tasks,notifications`); an unknown name stops startup |
 //! | `CE_TENANT` | the one tenant every issued token is for, a lowercase uuid (required with `CE_STAFF_FILE`) |
 //! | `CE_TOKEN_TTL_SECS` | token lifetime, 1 to 86400 (default 43200, 12 hours) |
 //! | `CE_LOGIN_MAX_FAILED` | wrong PINs before a username locks (default 5) |
@@ -218,6 +219,16 @@ fn plugin_command(args: &[String]) -> Result<(), String> {
 /// The manifest to serve: `CE_MANIFEST` as written, or `CE_TEMPLATE` composed with a module and,
 /// when `CE_PLUGIN` is set, that plugin as approved in `CE_INSTALLS`. Anything unapproved,
 /// edited since approval, or invalid is an error, never a quiet fall back to the defaults.
+/// The template with the named built-in tools (`CE_TOOLS`, comma separated) added.
+fn with_tools(template: &serde_json::Value, list: &str) -> Result<serde_json::Value, String> {
+    let names: Vec<&str> = list
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .collect();
+    ce_tools::compose(template, &names).map_err(|e| format!("CE_TOOLS cannot be composed: {e:?}"))
+}
+
 fn load_manifest() -> Result<ce_manifest::Manifest, String> {
     let template = std::env::var("CE_TEMPLATE").ok().filter(|s| !s.is_empty());
     let Some(tpath) = template else {
@@ -236,8 +247,11 @@ fn load_manifest() -> Result<ce_manifest::Manifest, String> {
     }
     let module = var("CE_MODULE")?;
     let text = std::fs::read_to_string(&tpath).map_err(|e| format!("cannot read {tpath}: {e}"))?;
-    let template: serde_json::Value =
+    let mut template: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("{tpath} is not JSON: {e}"))?;
+    if let Some(list) = std::env::var("CE_TOOLS").ok().filter(|s| !s.is_empty()) {
+        template = with_tools(&template, &list)?;
+    }
     let plugin = std::env::var("CE_PLUGIN").ok().filter(|s| !s.is_empty());
     let (root, installed) = match &plugin {
         Some(_) => (
@@ -886,5 +900,20 @@ fn main() -> ExitCode {
             eprintln!("ce-serve: {msg}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tools_tests {
+    use super::with_tools;
+
+    #[test]
+    fn named_tools_add_their_entities_and_an_unknown_name_is_refused() {
+        let t = serde_json::json!({"manifest_version": 1, "entities": {}});
+        let out = with_tools(&t, "tasks, notifications").unwrap();
+        assert!(out["entities"]["task"].is_object());
+        assert!(out["entities"]["notification"].is_object());
+        assert!(with_tools(&t, "tasks,nope").is_err());
+        assert_eq!(with_tools(&t, "").unwrap(), t);
     }
 }

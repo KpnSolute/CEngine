@@ -387,6 +387,7 @@ dependencies = [
  "ce-provider-http",
  "ce-server",
  "ce-store-pg",
+ "ce-tools",
  "postgres",
  "semver",
  "serde_json",
