@@ -78,7 +78,15 @@
         "par_level": "par_level"
       },
       "ignore": [
-        "category_id"
+        "category_id",
+        "active"
+      ],
+      "refs": [
+        {
+          "target": "category",
+          "source": "category_id",
+          "table": "inventory_categories"
+        }
       ]
     },
     {
@@ -102,7 +110,10 @@
         "description",
         "unit_price",
         "par_level"
-      ]
+      ],
+      "fields": {
+        "active": "active"
+      }
     },
     {
       "source": "monthly_inventory",
@@ -182,10 +193,43 @@
             "by": "vendor_id",
             "field": "name"
           }
+        },
+        "week": {
+          "bucket": {
+            "col": "invoice_date",
+            "part": "day",
+            "size": 7,
+            "max": 3
+          }
         }
       },
       "ignore": [
         "subtotal"
+      ],
+      "derive": {
+        "period_id": {
+          "find": {
+            "table": "month_periods",
+            "match": {
+              "month": {
+                "col": "invoice_date",
+                "part": "month"
+              },
+              "year": {
+                "col": "invoice_date",
+                "part": "year"
+              }
+            },
+            "field": "id"
+          }
+        }
+      },
+      "refs": [
+        {
+          "target": "period",
+          "source": "period_id",
+          "table": "month_periods"
+        }
       ]
     },
     {
@@ -532,6 +576,11 @@
           "target": "rate",
           "source": "entity_type",
           "table": "snack_bar_entity_rates"
+        },
+        {
+          "target": "period",
+          "source": "period_id",
+          "table": "month_periods"
         }
       ],
       "ignore": [
@@ -541,7 +590,25 @@
         "total_amount",
         "recorded_by",
         "created_at"
-      ]
+      ],
+      "derive": {
+        "period_id": {
+          "find": {
+            "table": "month_periods",
+            "match": {
+              "month": {
+                "col": "business_date",
+                "part": "month"
+              },
+              "year": {
+                "col": "business_date",
+                "part": "year"
+              }
+            },
+            "field": "id"
+          }
+        }
+      }
     },
     {
       "source": "snack_bar_transaction_items",

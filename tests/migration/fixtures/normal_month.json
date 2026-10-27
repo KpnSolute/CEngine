@@ -56,7 +56,8 @@
         "description": "Rice",
         "category_id": "c1",
         "unit_price": "1.25",
-        "par_level": 10
+        "par_level": 10,
+        "active": true
       },
       {
         "id": "i2",
@@ -64,7 +65,8 @@
         "description": "Milk",
         "category_id": "c2",
         "unit_price": "2.10",
-        "par_level": 6
+        "par_level": 6,
+        "active": false
       }
     ],
     "month_periods": [
