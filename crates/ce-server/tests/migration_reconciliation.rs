@@ -363,8 +363,14 @@ fn inventory_manifest() -> ce_manifest::Manifest {
         "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}}
     });
     let with_audit = ce_tools::compose(&shell, &["audit"]).unwrap();
-    let plugin = ce_plugin::parse(
+    // The category fields reference `inventory_category`, which only this test's shell has.
+    let text = format!(
+        "{}{}",
         include_str!("../../ce-plugin/tests/fixtures/mjcc-legacy-valuation/plugin.toml"),
+        CATEGORY_EXTENDS
+    );
+    let plugin = ce_plugin::parse(
+        &text,
         &ce_plugin::builtin_registry(),
         &semver::Version::new(0, 2, 0),
     )
@@ -378,6 +384,18 @@ fn inventory_manifest() -> ce_manifest::Manifest {
     .unwrap();
     ce_manifest::validate_composed(c.manifest.to_string().as_bytes()).unwrap()
 }
+
+const CATEGORY_EXTENDS: &str = r#"
+[[extend]]
+entity = "stock_item"
+field = "category"
+definition = { type = "ref", ref = "inventory_category", indexed = true }
+
+[[extend]]
+entity = "stock_line"
+field = "category"
+definition = { type = "ref", ref = "inventory_category", indexed = true, computed = "ref(item).category" }
+"#;
 
 fn read_json(rel: &str) -> serde_json::Value {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

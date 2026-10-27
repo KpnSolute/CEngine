@@ -49,13 +49,3 @@ definition = { type = "ref", ref = "period", indexed = true }
 entity = "supplier_invoice"
 field = "week"
 definition = { type = "integer", indexed = true }
-
-[[extend]]
-entity = "stock_item"
-field = "category"
-definition = { type = "ref", ref = "inventory_category", indexed = true }
-
-[[extend]]
-entity = "stock_line"
-field = "category"
-definition = { type = "ref", ref = "inventory_category", indexed = true, computed = "ref(item).category" }
