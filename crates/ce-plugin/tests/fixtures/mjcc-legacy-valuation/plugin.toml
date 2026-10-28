@@ -37,3 +37,15 @@ rule = "par_level > 0 and on_hand < par_level"
 [[policy]]
 slot = "shortage"
 rule = "when(par_level > 0 and on_hand < par_level, par_level - on_hand, 0)"
+
+# Synthetic copy of the fields the MJCC inventory plugin adds to the module's entities
+# (plugin mjcc-inventory 0.5.0). Nothing stamps them: a client or the migration loader writes them.
+[[extend]]
+entity = "supplier_invoice"
+field = "period"
+definition = { type = "ref", ref = "period", indexed = true }
+
+[[extend]]
+entity = "supplier_invoice"
+field = "week"
+definition = { type = "integer", indexed = true }

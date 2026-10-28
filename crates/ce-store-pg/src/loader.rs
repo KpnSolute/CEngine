@@ -131,10 +131,49 @@ fn by_value(spec: &Value, row: &Map<String, Value>) -> Option<String> {
     match spec.as_str() {
         Some(c) => row.get(c).and_then(text),
         None => {
-            let n = row.get(spec["col"].as_str()?)?.as_i64()?;
+            let v = row.get(spec["col"].as_str()?)?;
+            let n = match spec["part"].as_str() {
+                Some(p) => date_part(v.as_str()?, p)?,
+                None => v.as_i64()?,
+            };
             Some((n + spec["add"].as_i64().unwrap_or(0)).to_string())
         }
     }
+}
+
+/// The year, month or day of an ISO date (`2026-11-03` or `2026-11-03T12:00:00Z`).
+fn date_part(iso: &str, part: &str) -> Option<i64> {
+    let mut it = iso.get(..10)?.split('-');
+    let (y, m, d) = (
+        it.next()?.parse::<i64>().ok()?,
+        it.next()?.parse::<i64>().ok()?,
+        it.next()?.parse::<i64>().ok()?,
+    );
+    if !(1..=12).contains(&m) || !(1..=days_in_month(y, m)).contains(&d) {
+        return None;
+    }
+    match part {
+        "year" => Some(y),
+        "month" => Some(m),
+        "day" => Some(d),
+        _ => None,
+    }
+}
+
+/// `{"bucket": {"col": "invoice_date", "part": "day", "size": 7, "max": 3}}`: groups a number
+/// (or a date part) into runs of `size`, counted from 1, never above `max`.
+fn bucket(spec: &Value, row: &Map<String, Value>) -> Option<Value> {
+    let v = row.get(spec["col"].as_str()?)?;
+    let n = match spec["part"].as_str() {
+        Some(p) => date_part(v.as_str()?, p)?,
+        None => v.as_i64()?,
+    };
+    let size = spec["size"].as_i64().filter(|s| *s > 0)?;
+    let max = spec["max"].as_i64().unwrap_or(i64::MAX);
+    if n < 1 {
+        return None;
+    }
+    Some(json!(((n - 1) / size + 1).min(max)))
 }
 
 /// `{"table": "month_periods", "match": {"month": {"col": "month", "add": 1}, "year": "year"},
@@ -233,6 +272,7 @@ fn used_columns(t: &Value) -> BTreeSet<String> {
             }
         }
         add(&mut used, &spec["lookup"]["by"]);
+        add(&mut used, &spec["bucket"]["col"]);
         add(&mut used, &spec["map"]["from"]);
         add(&mut used, &spec["ordinal"]["within"]);
     }
@@ -394,6 +434,8 @@ impl TypedPgStore {
                             .and_then(|v| m["values"].get(&v).cloned())
                     } else if spec.get("lookup").is_some() {
                         lookup_value(&spec["lookup"], row, tables)
+                    } else if spec.get("bucket").is_some() {
+                        bucket(&spec["bucket"], row)
                     } else if let Some(col) = spec["ordinal"]["within"].as_str() {
                         // 1, 2, 3 ... in the order the rows appear, restarting per parent.
                         let n = seen_in_group

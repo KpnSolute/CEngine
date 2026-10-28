@@ -345,7 +345,7 @@ fn inventory_manifest() -> ce_manifest::Manifest {
             "snack_bar_product": {"fields": {"active": {"default": true, "type": "boolean"}, "name": {"indexed": true, "max_length": 120, "required": true, "type": "string"}, "price": {"default": 0, "precision": 10, "scale": 2, "type": "decimal"}, "stock_qty": {"default": 0, "type": "integer"}}, "invariants": [{"expr": "stock_qty >= 0", "message_code": "snack.negative_stock", "name": "stock_not_negative"}], "sort_keys": ["name"]},
             "snack_bar_rate": {"fields": {"discount_pct": {"default": 0, "precision": 5, "scale": 2, "type": "decimal"}, "entity_type": {"required": true, "type": "enum", "unique": true, "values": ["student", "staff"]}, "tax_pct": {"default": 0, "precision": 5, "scale": 2, "type": "decimal"}}, "invariants": [{"expr": "tax_pct >= 0 and tax_pct <= 100 and discount_pct >= 0 and discount_pct <= 100", "message_code": "snack.rate_range", "name": "pct_range"}]},
             "snack_bar_sale": {"fields": {"business_date": {"indexed": true, "required": true, "type": "date", "unique": true}, "closing_cash": {"default": 0, "precision": 12, "scale": 2, "type": "decimal"}, "opening_cash": {"default": 0, "precision": 12, "scale": 2, "type": "decimal"}, "recorded_by": {"max_length": 120, "type": "string"}, "register_sales": {"default": 0, "precision": 12, "scale": 2, "type": "decimal"}}, "sort_keys": ["business_date"]},
-            "snack_bar_transaction": {"fields": {"business_date": {"indexed": true, "required": true, "type": "date"}, "discount_amount": {"computed": "round(subtotal * discount_pct / 100, 2)", "precision": 12, "scale": 2, "type": "decimal"}, "discount_pct": {"computed": "ref(rate).discount_pct", "precision": 5, "scale": 2, "type": "decimal"}, "entity_name": {"max_length": 160, "pii": true, "required": true, "type": "string"}, "entity_type": {"computed": "ref(rate).entity_type", "type": "enum", "values": ["student", "staff"]}, "rate": {"indexed": true, "ref": "snack_bar_rate", "required": true, "type": "ref"}, "recorded_by": {"max_length": 120, "type": "string"}, "subtotal": {"computed": "sum(children(snack_bar_transaction_item, transaction).line_total)", "precision": 12, "scale": 2, "type": "decimal"}, "tax_amount": {"computed": "round((subtotal - discount_amount) * tax_pct / 100, 2)", "precision": 12, "scale": 2, "type": "decimal"}, "tax_pct": {"computed": "ref(rate).tax_pct", "precision": 5, "scale": 2, "type": "decimal"}, "total_amount": {"computed": "round(subtotal - discount_amount + tax_amount, 2)", "precision": 12, "scale": 2, "type": "decimal"}}, "sort_keys": ["business_date"]},
+            "snack_bar_transaction": {"fields": {"period": {"type": "ref", "ref": "period", "indexed": true}, "business_date": {"indexed": true, "required": true, "type": "date"}, "discount_amount": {"computed": "round(subtotal * discount_pct / 100, 2)", "precision": 12, "scale": 2, "type": "decimal"}, "discount_pct": {"computed": "ref(rate).discount_pct", "precision": 5, "scale": 2, "type": "decimal"}, "entity_name": {"max_length": 160, "pii": true, "required": true, "type": "string"}, "entity_type": {"computed": "ref(rate).entity_type", "type": "enum", "values": ["student", "staff"]}, "rate": {"indexed": true, "ref": "snack_bar_rate", "required": true, "type": "ref"}, "recorded_by": {"max_length": 120, "type": "string"}, "subtotal": {"computed": "sum(children(snack_bar_transaction_item, transaction).line_total)", "precision": 12, "scale": 2, "type": "decimal"}, "tax_amount": {"computed": "round((subtotal - discount_amount) * tax_pct / 100, 2)", "precision": 12, "scale": 2, "type": "decimal"}, "tax_pct": {"computed": "ref(rate).tax_pct", "precision": 5, "scale": 2, "type": "decimal"}, "total_amount": {"computed": "round(subtotal - discount_amount + tax_amount, 2)", "precision": 12, "scale": 2, "type": "decimal"}}, "sort_keys": ["business_date"]},
             "snack_bar_transaction_item": {"fields": {"line_total": {"computed": "round(unit_price * qty, 2)", "precision": 12, "scale": 2, "type": "decimal"}, "product": {"indexed": true, "ref": "snack_bar_product", "type": "ref"}, "product_name": {"max_length": 120, "required": true, "type": "string"}, "qty": {"required": true, "type": "integer"}, "transaction": {"indexed": true, "ref": "snack_bar_transaction", "required": true, "type": "ref"}, "unit_price": {"precision": 12, "required": true, "scale": 2, "type": "decimal"}}, "invariants": [{"expr": "qty > 0", "message_code": "snack.qty", "name": "positive_qty"}]},
             "staff_member": {"fields": {
                 "username": {"type": "string", "required": true, "unique": true, "max_length": 80},
@@ -356,14 +356,21 @@ fn inventory_manifest() -> ce_manifest::Manifest {
             "vendor": {"fields": {"name": {"type": "string", "required": true, "unique": true, "max_length": 120}}},
             "stock_item_detail": {"fields": {
                 "item": {"type": "ref", "ref": "stock_item", "required": true},
-                "category": {"type": "ref", "ref": "inventory_category"}
+                "category": {"type": "ref", "ref": "inventory_category", "indexed": true},
+                "active": {"type": "boolean", "default": true, "indexed": true}
             }}
         },
         "roles": {"owner": {"read": ["*"], "write": ["*"], "actions": ["*"]}}
     });
     let with_audit = ce_tools::compose(&shell, &["audit"]).unwrap();
-    let plugin = ce_plugin::parse(
+    // The category fields reference `inventory_category`, which only this test's shell has.
+    let text = format!(
+        "{}{}",
         include_str!("../../ce-plugin/tests/fixtures/mjcc-legacy-valuation/plugin.toml"),
+        CATEGORY_EXTENDS
+    );
+    let plugin = ce_plugin::parse(
+        &text,
         &ce_plugin::builtin_registry(),
         &semver::Version::new(0, 2, 0),
     )
@@ -377,6 +384,18 @@ fn inventory_manifest() -> ce_manifest::Manifest {
     .unwrap();
     ce_manifest::validate_composed(c.manifest.to_string().as_bytes()).unwrap()
 }
+
+const CATEGORY_EXTENDS: &str = r#"
+[[extend]]
+entity = "stock_item"
+field = "category"
+definition = { type = "ref", ref = "inventory_category", indexed = true }
+
+[[extend]]
+entity = "stock_line"
+field = "category"
+definition = { type = "ref", ref = "inventory_category", indexed = true, computed = "ref(item).category" }
+"#;
 
 fn read_json(rel: &str) -> serde_json::Value {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1360,4 +1379,64 @@ fn the_driver_fails_the_run_on_a_one_cent_difference_and_on_a_rejected_row() {
     let r3 = drive(&e3, &checks, &fx3["tables"]);
     assert_eq!(r3.load["menu_cycle_slots"].rejected, 1);
     assert_eq!(r3.status, "failed");
+}
+
+#[test]
+fn imported_records_carry_the_period_week_category_and_detail_the_reports_group_on() {
+    let Some((e, _run, _fx)) = loaded() else {
+        return;
+    };
+    let mut c = connect(&e.url, &Tls::Off).unwrap();
+    let s = &e.schema;
+    let q = |sql: String| -> Vec<(String, String)> {
+        let mut c = connect(&e.url, &Tls::Off).unwrap();
+        c.query(sql.as_str(), &[])
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect()
+    };
+    // Invoices land on the period of their date and the legacy three-week bucket of the day.
+    let inv = q(format!(
+        r#"SELECT i.invoice_no, p.label || ' w' || i.week::text
+           FROM "{s}".supplier_invoice i JOIN "{s}".period p ON p.id = i.period ORDER BY 1"#
+    ));
+    assert_eq!(
+        inv,
+        vec![
+            ("S-1001".to_string(), "2026-11 w1".to_string()),
+            ("S-1002".to_string(), "2026-11 w2".to_string())
+        ]
+    );
+    let snack: i64 = c
+        .query_one(
+            &format!(
+                r#"SELECT count(*) FROM "{s}".snack_bar_transaction t
+                   JOIN "{s}".period p ON p.id = t.period WHERE p.label = '2026-11'"#
+            ),
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(snack, 2);
+    // Each item has its category, its stock line shows the same one, and exactly one detail row.
+    let cats = q(format!(
+        r#"SELECT i.sku, k.name FROM "{s}".stock_item i JOIN "{s}".inventory_category k ON k.id = i.category ORDER BY 1"#
+    ));
+    assert_eq!(cats.len(), 2);
+    let lines = q(format!(
+        r#"SELECT i.sku, k.name FROM "{s}".stock_line l JOIN "{s}".stock_item i ON i.id = l.item
+           JOIN "{s}".inventory_category k ON k.id = l.category ORDER BY 1"#
+    ));
+    assert_eq!(lines, cats);
+    let detail = q(format!(
+        r#"SELECT i.sku, d.active::text FROM "{s}".stock_item_detail d JOIN "{s}".stock_item i ON i.id = d.item ORDER BY 1"#
+    ));
+    assert_eq!(
+        detail,
+        vec![
+            ("SYN-100".to_string(), "true".to_string()),
+            ("SYN-200".to_string(), "false".to_string())
+        ]
+    );
 }
