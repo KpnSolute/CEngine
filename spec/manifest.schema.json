@@ -80,6 +80,7 @@
         "state": { "$ref": "#/$defs/stateModel" },
         "invariants": { "type": "array", "items": { "$ref": "#/$defs/invariant" } },
         "governed": { "type": "boolean", "default": false, "description": "Non-privileged writes become changeset operations that must be merged." },
+        "emit_on_create": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*$", "maxLength": 120, "description": "Event stored in the same transaction whenever a record of this entity is created, by anyone (staff, a guest, an import). Its data is {entity, id, actor, record}. Needs the `events` tool; subscriptions can react to it." },
         "soft_delete": { "type": "boolean", "default": true },
         "locked_when": { "type": "string", "description": "Expression. When true, writes fail with entity_locked." },
         "freeze_windows": { "type": "array", "items": { "type": "object", "required": ["field", "states"], "additionalProperties": false, "properties": { "field": { "$ref": "#/$defs/name" }, "states": { "type": "array", "items": { "$ref": "#/$defs/name" } } } } },
