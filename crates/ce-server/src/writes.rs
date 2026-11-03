@@ -467,6 +467,17 @@ pub(crate) fn step(tx: &dyn Store, env: &Env, entity: &str, op: &Op) -> Result<O
             // A replayed create changed nothing, so the parents are already right.
             if derived {
                 refresh_parents(tx, env, entity, None, rec.data.as_object())?;
+                // A record that was really created (not a replay) announces itself, in this transaction.
+                if let Some(ev) = env.manifest.value["entities"][entity]["emit_on_create"].as_str()
+                {
+                    crate::events::enqueue(
+                        tx,
+                        env,
+                        ev,
+                        Some(&rec.id),
+                        json!({"entity": entity, "id": rec.id, "actor": env.ctx.actor_id, "record": rec.data}),
+                    )?;
+                }
             }
             Ok(Outcome {
                 after: Some(rec),

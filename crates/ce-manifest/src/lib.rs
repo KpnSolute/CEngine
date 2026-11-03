@@ -7,6 +7,7 @@ mod projection;
 mod semantic;
 
 pub use projection::filter_json;
+pub use semantic::snake;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};

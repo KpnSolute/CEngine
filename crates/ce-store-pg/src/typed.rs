@@ -358,6 +358,12 @@ impl TypedPgStore {
         crate::staff::PgStaff::open(self.pool.clone(), &self.schema, tenant)
     }
 
+    /// Guest accounts for the installation's one tenant, kept in this schema. Creates the tables
+    /// when they are missing.
+    pub fn guests(&self, tenant: &str) -> Result<crate::PgGuests, crate::GuestPgError> {
+        crate::guest::PgGuests::open(self.pool.clone(), &self.schema, tenant)
+    }
+
     /// File bytes kept in this installation's schema, sharing the store's connections. Creates the
     /// table when an installation made before files existed does not have it yet.
     pub fn blobs(&self) -> Result<crate::PgBlobs, StoreError> {

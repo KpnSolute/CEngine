@@ -1,0 +1,1075 @@
+//! Guest accounts end to end: sign-up and sign-in, rows only the guest owns, nothing a guest sends can
+//! set state or owner, guest and staff tokens open different doors, and a role-restricted projection.
+use axum::{
+    body::Body,
+    http::{header, Request, StatusCode},
+    Router,
+};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+use ce_auth::Verifier;
+use ce_manifest::validate;
+use ce_server::{router, AppState, GuestPolicy, GuestService, MemoryGuests};
+use ce_store_pg::TypedPgStore;
+use hmac::{Hmac, Mac};
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
+use sha2::Sha256;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+const T1: &str = "11111111-1111-1111-1111-111111111111";
+const INST: &str = "gu-1";
+const NOW: u64 = 1_793_664_000; // 2026-11-03
+
+fn staff_token(role: &str) -> String {
+    let h = B64.encode(r#"{"alg":"HS256"}"#);
+    let p = B64.encode(format!(
+        r#"{{"sub":"{role}-user","tenant":"{T1}","roles":["{role}"],"exp":{}}}"#,
+        NOW + 10_000
+    ));
+    let mut mac = Hmac::<Sha256>::new_from_slice(KEY).unwrap();
+    mac.update(format!("{h}.{p}").as_bytes());
+    format!("{h}.{p}.{}", B64.encode(mac.finalize().into_bytes()))
+}
+
+fn manifest() -> Value {
+    json!({
+        "manifest_version": 1,
+        "template": {"name": "guests", "title": "Guests", "version": "0.1.0"},
+        "entities": {
+            "log": {"fields": {
+                "entry_type": {"type": "string", "max_length": 60, "required": true, "indexed": true},
+                "title": {"type": "string", "max_length": 200},
+                "business_date": {"type": "date", "indexed": true},
+                "created_by": {"type": "string", "max_length": 120, "indexed": true},
+                "data": {"type": "json"}
+            }, "sort_keys": ["business_date"]},
+            "ticket": {"fields": {
+                "title": {"type": "string", "max_length": 100, "required": true},
+                "dept": {"type": "string", "max_length": 60},
+                "requester": {"type": "string", "max_length": 120, "indexed": true},
+                "request_date": {"type": "date", "indexed": true},
+                "note": {"type": "text"}
+            }, "sort_keys": ["request_date"], "state": {"field": "status", "initial": "open", "states": {
+                "open": {"code": 100, "to": ["working", "rejected"]},
+                "working": {"code": 200, "to": ["done"]},
+                "done": {"code": 300},
+                "rejected": {"code": 610}}}},
+            "setting": {"fields": {
+                "setting_key": {"type": "string", "max_length": 80, "required": true, "unique": true},
+                "setting_value": {"type": "json", "required": true}
+            }, "sort_keys": ["setting_key"]}
+        },
+        "roles": {
+            "staff": {"read": ["log", "setting", "ticket"], "write": ["log", "setting", "ticket"], "actions": ["work", "finish", "reject"]},
+            "cook": {"read": ["log"]},
+            "guest": {}
+        },
+        "actions": {
+            "work": {"entity": "ticket", "requires_state": ["open"], "effect": [{"transition": "working"}]},
+            "finish": {"entity": "ticket", "requires_state": ["working"], "effect": [{"transition": "done"}]},
+            "reject": {"entity": "ticket", "requires_state": ["open"], "input": {"note": {"type": "text", "required": true}}, "effect": [{"transition": "rejected"}, {"set": {"note": "input.note"}}]}
+        },
+        "projections": {
+            "access": {"entity": "setting", "fields": ["setting_value"], "filter": "setting_key == 'hub_access'", "roles": ["staff", "cook"]}
+        },
+        "guest": {
+            "role": "guest",
+            "profile": [
+                {"key": "dept", "label": "Department", "required": true, "max_length": 60},
+                {"key": "ext", "label": "Extension", "max_length": 10}
+            ],
+            "resources": {"tickets": {
+                "entity": "ticket", "owner_field": "requester",
+                "stamp": {"request_date": "today"}, "created_at_field": "request_date", "sort": "-request_date",
+                "body": {
+                    "as": "form",
+                    "columns": {"title": "title", "dept": "dept"},
+                    "allow": ["title", "dept"], "required": ["title"],
+                    "defaults": {"dept": "profile.dept"},
+                    "state_field": "status", "note_field": "note",
+                    "status_map": {"open": "pending", "working": "pending", "done": "ready", "rejected": "denied"}
+                }
+            }, "requests": {
+                "entity": "log", "owner_field": "created_by",
+                "fixed": {"entry_type": "food_request"},
+                "stamp": {"business_date": "today"},
+                "created_at_field": "business_date",
+                "sort": "-business_date",
+                "title_field": "title", "title": "concat('Food request: ', dept)",
+                "body": {
+                    "field": "data", "as": "form",
+                    "allow": ["originator", "dept", "eventDate", "location", "food"],
+                    "required": ["originator", "dept", "eventDate", "location"],
+                    "rules": [
+                        {"expr": "event_date >= today", "field": "eventDate", "message": "The event date has passed."},
+                        {"expr": "food != ''", "field": "food", "message": "Ask for something."}
+                    ],
+                    "state": {"key": "status", "initial": "submitted"},
+                    "note_key": "note"
+                }
+            }},
+            "feeds": {"schedule": {
+                "entity": "ticket", "keys": ["status", "title", "dept"],
+                "where": "status == 'working' or status == 'done'",
+                "fields": {"title": {"from": "title"}, "dept": {"from": "dept"}, "status": {"from": "status"}},
+                "enabled_by": {"entity": "setting", "match": {"field": "setting_key", "value": "hub_guest_features"}, "value_field": "setting_value", "key": "schedule"},
+                "order_by": "title"
+            }, "catering": {
+                "entity": "log", "fixed": {"entry_type": "food_request"}, "body_field": "data",
+                "keys": ["status", "eventDate", "theme", "dept", "location"],
+                "where": "event_date >= today and coalesce(status, 'submitted') != 'declined'",
+                "fields": {
+                    "title": {"expr": "when(theme != '', theme, dept)"},
+                    "eventDate": {"from": "eventDate"}, "location": {"from": "location"},
+                    "status": {"expr": "coalesce(status, 'submitted')"}
+                },
+                "sort": "-business_date", "order_by": "eventDate"
+            }},
+            "public": {
+                "survey": {"entity": "setting", "match": {"field": "setting_key", "value": "hub_survey_url"}, "value_field": "setting_value"},
+                "features": {"entity": "setting", "match": {"field": "setting_key", "value": "hub_guest_features"}, "value_field": "setting_value"}
+            }
+        }
+    })
+}
+
+fn url() -> Option<String> {
+    match std::env::var("CE_TEST_DATABASE_URL") {
+        Ok(u) => Some(u),
+        Err(_) => {
+            assert!(
+                std::env::var("CE_REQUIRE_DB").is_err(),
+                "CE_REQUIRE_DB is set but CE_TEST_DATABASE_URL is not"
+            );
+            eprintln!("skipping: CE_TEST_DATABASE_URL not set");
+            None
+        }
+    }
+}
+
+static N: AtomicU32 = AtomicU32::new(0);
+
+fn build(url: &str, clock: Arc<AtomicU64>) -> Router {
+    build_with(url, clock, None)
+}
+
+struct Outbox(std::sync::Mutex<Vec<(String, String)>>);
+impl ce_server::Mailer for Outbox {
+    fn send_reset(&self, to: &str, _name: &str, link: &str) -> Result<(), ce_server::MailError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((to.to_string(), link.to_string()));
+        Ok(())
+    }
+}
+
+fn build_with(
+    url: &str,
+    clock: Arc<AtomicU64>,
+    mailer: Option<Arc<dyn ce_server::Mailer>>,
+) -> Router {
+    let m = validate(manifest().to_string().as_bytes()).unwrap_or_else(|e| panic!("{e:?}"));
+    let schema = format!(
+        "ce_gu_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    );
+    let store = TypedPgStore::install(url, &m, &schema).unwrap();
+    let c = clock.clone();
+    let now: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(move || c.load(Ordering::SeqCst));
+    let policy = GuestPolicy {
+        reset_link_base: "https://hub.example/hub/guest/reset".into(),
+        ..GuestPolicy::default()
+    };
+    let svc = GuestService::new(
+        Arc::new(MemoryGuests::default()),
+        mailer,
+        policy,
+        now.clone(),
+    )
+    .unwrap();
+    let mut st = AppState::new(store, Verifier::new(KEY).unwrap(), m, INST)
+        .with_guests(svc, T1)
+        .unwrap();
+    st.now = now;
+    router(st)
+}
+
+async fn call(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let mut req = Request::builder().method(method).uri(uri);
+    if let Some(t) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    if body.is_some() {
+        req = req.header(header::CONTENT_TYPE, "application/json");
+    }
+    let res = app
+        .clone()
+        .oneshot(
+            req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+fn enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+fn g(path: &str) -> String {
+    format!("/v1/{INST}/_guest/{path}")
+}
+
+fn form(extra: Value) -> Value {
+    let mut f = json!({"originator": "Jo", "dept": "Wellness", "eventDate": "2026-12-10", "location": "Room 4", "food": "Pizza"});
+    f.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    json!({"form": f})
+}
+
+async fn signup(app: &Router, email: &str) -> String {
+    let (s, b) = call(
+        app,
+        "POST",
+        &g("signup"),
+        None,
+        Some(json!({"name": "Guest", "email": email, "password": "correct horse", "profile": {"dept": "Admissions"}})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    b["data"]["token"].as_str().unwrap().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accounts_resources_and_doors() {
+    let Some(url) = url() else { return };
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let c2 = clock.clone();
+    let app = tokio::task::spawn_blocking(move || build(&url, c2))
+        .await
+        .unwrap();
+
+    // Sign up, duplicate, wrong password, right password.
+    let tok = signup(&app, "jo@example.com").await;
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("signup"),
+        None,
+        Some(json!({"name": "Jo", "email": "JO@example.com", "password": "another one 1", "profile": {"dept": "X"}})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, b) = call(
+        &app,
+        "POST",
+        &g("login"),
+        None,
+        Some(json!({"email": "jo@example.com", "password": "wrong password"})),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        (s, b["code"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("invalid_credentials"))
+    );
+    let (s, b) = call(
+        &app,
+        "POST",
+        &g("login"),
+        None,
+        Some(json!({"email": "jo@example.com", "password": "correct horse"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["data"]["name"], "Guest");
+    assert!(b["data"]["expires_at"].as_u64().unwrap() > NOW);
+
+    // A guest sends a request and tries to set the state, the note and the owner.
+    let sent =
+        form(json!({"status": "approved", "note": "free food", "created_by": "guest:other"}));
+    let (s, b) = call(&app, "POST", &g("requests"), Some(&tok), Some(sent), &[]).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    assert_eq!(b["data"]["status"], "submitted");
+    assert_eq!(b["data"]["created_at"], "2026-11-03");
+    assert!(b["data"]["note"].is_null());
+    let id = b["data"]["id"].as_str().unwrap().to_string();
+
+    // Any signed-in guest sees the event, not who asked or what they ordered; nobody else gets in.
+    let (s, b) = call(&app, "GET", &g("catering"), Some(&tok), None, &[]).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(
+        b["data"],
+        json!([{"id": id, "title": "Wellness", "eventDate": "2026-12-10", "location": "Room 4", "status": "submitted"}])
+    );
+    let (s, _) = call(&app, "GET", &g("catering"), None, None, &[]).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = call(
+        &app,
+        "GET",
+        &g("catering"),
+        Some(&staff_token("staff")),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // Validation reads like the staff form.
+    let (s, b) = call(
+        &app,
+        "POST",
+        &g("requests"),
+        Some(&tok),
+        Some(form(json!({"eventDate": "2026-11-01"}))),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(b["errors"]
+        .to_string()
+        .contains("The event date has passed."));
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("requests"),
+        Some(&tok),
+        Some(form(json!({"food": ""}))),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("requests"),
+        Some(&tok),
+        Some(json!({"form": "nope"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Staff see the row as the old app stored it, owned by the guest, and decide it.
+    let staff = staff_token("staff");
+    let (s, b) = call(
+        &app,
+        "GET",
+        &format!(
+            "/v1/{INST}/log?filter={}",
+            enc(&json!({"field": "entry_type", "op": "eq", "value": "food_request"}).to_string())
+        ),
+        Some(&staff),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let row = &b["data"][0];
+    assert_eq!(row["id"], id.as_str());
+    assert!(row["created_by"].as_str().unwrap().starts_with("guest:"));
+    assert_eq!(row["data"]["status"], "submitted");
+    assert_eq!(row["title"], "Food request: Wellness");
+    let mut data = row["data"].clone();
+    data["status"] = json!("declined");
+    data["note"] = json!("Kitchen is closed that day");
+    data["decidedBy"] = json!("staff-user");
+    let version = row["version"].as_u64().unwrap().to_string();
+    let (s, b) = call(
+        &app,
+        "PATCH",
+        &format!("/v1/{INST}/log/{id}"),
+        Some(&staff),
+        Some(json!({"data": data})),
+        &[("if-match", &format!("\"{version}\""))],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+
+    let (_, b) = call(&app, "GET", &g("catering"), Some(&tok), None, &[]).await;
+    assert_eq!(
+        b["data"],
+        json!([]),
+        "a declined request is not on the catering calendar"
+    );
+
+    // The guest sees the decision and the note, never who decided.
+    let (s, b) = call(&app, "GET", &g("requests"), Some(&tok), None, &[]).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["data"].as_array().unwrap().len(), 1);
+    assert_eq!(b["data"][0]["status"], "declined");
+    assert_eq!(b["data"][0]["note"], "Kitchen is closed that day");
+    assert!(b["data"][0]["form"].get("decidedBy").is_none());
+
+    // A second guest sees none of it; a staff-made food_request is not theirs either.
+    let tok2 = signup(&app, "al@example.com").await;
+    let (_, b) = call(&app, "GET", &g("requests"), Some(&tok2), None, &[]).await;
+    assert_eq!(b["data"].as_array().unwrap().len(), 0);
+    let (s, _) = call(&app, "POST", &format!("/v1/{INST}/log"), Some(&staff), Some(json!({"entry_type": "food_request", "title": "staff made", "created_by": "staff-user", "data": {"status": "approved", "eventDate": "2027-01-05", "dept": "Culinary", "location": "Hall", "food": "private"}})), &[("idempotency-key", "s1")]).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (_, b) = call(&app, "GET", &g("catering"), Some(&tok2), None, &[]).await;
+    assert_eq!(b["data"].as_array().unwrap().len(), 1);
+    assert_eq!(b["data"][0]["status"], "approved");
+    assert_eq!(b["data"][0]["title"], "Culinary");
+    assert!(
+        !b.to_string().contains("private")
+            && !b.to_string().contains("staff-user")
+            && !b.to_string().contains("created_by")
+    );
+    let (_, b) = call(&app, "GET", &g("requests"), Some(&tok2), None, &[]).await;
+    assert_eq!(b["data"].as_array().unwrap().len(), 0);
+    let (_, b) = call(&app, "GET", &g("requests"), Some(&tok), None, &[]).await;
+    assert_eq!(b["data"].as_array().unwrap().len(), 1);
+
+    // Different doors: a guest token opens no staff route; a staff token opens no guest route.
+    let (s, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/{INST}/log"),
+        Some(&tok),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &format!("/v1/{INST}/log"),
+        Some(&tok),
+        Some(json!({"entry_type": "x"})),
+        &[("idempotency-key", "g1")],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(&app, "GET", &g("requests"), Some(&staff), None, &[]).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(&app, "GET", &g("requests"), None, None, &[]).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = call(&app, "GET", &g("nothing"), Some(&tok), None, &[]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // The public survey link, then a role-restricted projection.
+    let (s, b) = call(&app, "GET", &g("survey"), None, None, &[]).await;
+    assert_eq!((s, &b["data"]), (StatusCode::OK, &json!({})));
+    for (k, v) in [
+        ("hub_survey_url", json!({"url": "https://forms.example/s"})),
+        ("hub_access", json!({"cook": ["pos"]})),
+    ] {
+        let (s, b) = call(
+            &app,
+            "POST",
+            &format!("/v1/{INST}/setting"),
+            Some(&staff),
+            Some(json!({"setting_key": k, "setting_value": v})),
+            &[("idempotency-key", k)],
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{b}");
+    }
+    let (_, b) = call(&app, "GET", &g("survey"), None, None, &[]).await;
+    assert_eq!(b["data"]["url"], "https://forms.example/s");
+    let view = format!("/v1/{INST}/_view/access");
+    let (s, b) = call(&app, "GET", &view, Some(&staff_token("cook")), None, &[]).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["data"][0]["setting_value"], json!({"cook": ["pos"]}));
+    // The cook still cannot read settings directly, and a guest or an unknown role cannot use the view.
+    let (s, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/{INST}/setting"),
+        Some(&staff_token("cook")),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(&app, "GET", &view, Some(&tok), None, &[]).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(&app, "GET", &view, None, None, &[]).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Sign out ends that guest's old tokens; signing in again straight after still works.
+    let (s, _) = call(&app, "POST", &g("logout"), Some(&tok), None, &[]).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = call(&app, "GET", &g("requests"), Some(&tok), None, &[]).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, b) = call(
+        &app,
+        "POST",
+        &g("login"),
+        None,
+        Some(json!({"email": "jo@example.com", "password": "correct horse"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let fresh = b["data"]["token"].as_str().unwrap().to_string();
+    let (s, _) = call(&app, "GET", &g("requests"), Some(&fresh), None, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(&app, "GET", &g("requests"), Some(&tok2), None, &[]).await;
+    assert_eq!(s, StatusCode::OK); // the other guest was not signed out
+
+    tokio::task::spawn_blocking(move || drop(app))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn guest_routes_answer_404_when_guests_are_off() {
+    let Some(url) = url() else { return };
+    let app = tokio::task::spawn_blocking(move || {
+        let m = validate(manifest().to_string().as_bytes()).unwrap();
+        let schema = format!(
+            "ce_gu_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        );
+        let store = TypedPgStore::install(&url, &m, &schema).unwrap();
+        router(AppState::new(store, Verifier::new(KEY).unwrap(), m, INST))
+    })
+    .await
+    .unwrap();
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("login"),
+        None,
+        Some(json!({"email": "a@b.co", "password": "x"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    tokio::task::spawn_blocking(move || drop(app))
+        .await
+        .unwrap();
+}
+
+#[test]
+fn the_guest_role_must_hold_nothing_and_server_keys_cannot_be_guest_writable() {
+    let mut m = manifest();
+    m["roles"]["guest"] = json!({"read": ["log"]});
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "guest_role_privileged"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["resources"]["requests"]["body"]["allow"] = json!([
+        "originator",
+        "dept",
+        "eventDate",
+        "location",
+        "food",
+        "status"
+    ]);
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(
+        e.iter().any(|i| i.code == "guest_writable_server_key"),
+        "{e:?}"
+    );
+
+    let mut m = manifest();
+    m["guest"]["resources"]["login"] = m["guest"]["resources"]["requests"].clone();
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "reserved_guest_path"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["resources"]["requests"]["owner_field"] = json!("entry_type");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "bad_owner_field"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["feeds"]["catering"]["where"] = json!("nope_key >= today");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_identifier"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["feeds"]["catering"]["fields"]["title"] = json!({"from": "not_declared"});
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_key"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["feeds"]["requests"] = m["guest"]["feeds"]["catering"].clone();
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "duplicate_guest_path"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["feeds"]["catering"]["order_by"] = json!("nothing");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_field"), "{e:?}");
+
+    // Column mode: a guest may not be allowed to write the state, the owner or a column that does not exist.
+    let mut m = manifest();
+    m["guest"]["resources"]["tickets"]["body"]["columns"]["status"] = json!("status");
+    m["guest"]["resources"]["tickets"]["body"]["allow"] = json!(["title", "dept", "status"]);
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(
+        e.iter().any(|i| i.code == "guest_writable_server_key"),
+        "{e:?}"
+    );
+
+    let mut m = manifest();
+    m["guest"]["resources"]["tickets"]["body"]["columns"]["dept"] = json!("requester");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(
+        e.iter().any(|i| i.code == "guest_writable_server_key"),
+        "{e:?}"
+    );
+
+    let mut m = manifest();
+    m["guest"]["resources"]["tickets"]["body"]["columns"]["title"] = json!("nope");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_field"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["resources"]["tickets"]["body"]["status_map"]["vanished"] = json!("pending");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_state"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["resources"]["tickets"]["body"]["defaults"]["dept"] = json!("profile.nothing");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "bad_default"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["resources"]["tickets"]["body"]["field"] = json!("note");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "body_mode"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["feeds"]["schedule"]["enabled_by"]["entity"] = json!("ghost");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_entity"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["profile"] = json!([{"key": "dept"}, {"key": "dept"}]);
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "duplicate_question"), "{e:?}");
+
+    let mut m = manifest();
+    m["projections"]["access"]["roles"] = json!(["ghost"]);
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_role"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["resources"]["requests"]["body"]["rules"][0]["expr"] = json!("nope_field >= today");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_identifier"), "{e:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_password_reset_by_email_works_once_and_ends_old_sessions() {
+    let Some(url) = url() else { return };
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let (c2, outbox) = (
+        clock.clone(),
+        Arc::new(Outbox(std::sync::Mutex::new(vec![]))),
+    );
+    let ob: Arc<dyn ce_server::Mailer> = outbox.clone();
+    let app = tokio::task::spawn_blocking(move || build_with(&url, c2, Some(ob)))
+        .await
+        .unwrap();
+    let old = signup(&app, "jo@example.com").await;
+
+    // The answer is the same for an account that exists and one that does not; mail goes only to the real one.
+    for email in ["nobody@example.com", "jo@example.com"] {
+        let (s, b) = call(
+            &app,
+            "POST",
+            &g("reset"),
+            None,
+            Some(json!({"email": email})),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            (s, &b["data"]["sent"]),
+            (StatusCode::ACCEPTED, &json!(true))
+        );
+    }
+    let sent = outbox.0.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "jo@example.com");
+    let token = sent[0].1.split("token=").nth(1).unwrap().to_string();
+    assert!(sent[0]
+        .1
+        .starts_with("https://hub.example/hub/guest/reset?token="));
+
+    clock.fetch_add(30, Ordering::SeqCst);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset/confirm"),
+        None,
+        Some(json!({"token": token, "password": "short"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset/confirm"),
+        None,
+        Some(json!({"token": "wrong", "password": "brand new pass"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // The weak-password attempt used the token up (single use), so a fresh one is needed.
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset"),
+        None,
+        Some(json!({"email": "jo@example.com"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    let token = outbox.0.lock().unwrap()[1]
+        .1
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset/confirm"),
+        None,
+        Some(json!({"token": token, "password": "brand new pass"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset/confirm"),
+        None,
+        Some(json!({"token": token, "password": "brand new pass"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    let (s, _) = call(&app, "GET", &g("requests"), Some(&old), None, &[]).await;
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "the old session ended with the reset"
+    );
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("login"),
+        None,
+        Some(json!({"email": "jo@example.com", "password": "correct horse"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("login"),
+        None,
+        Some(json!({"email": "jo@example.com", "password": "brand new pass"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    tokio::task::spawn_blocking(move || drop(app))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn onboarding_prefilled_requests_status_words_and_the_manager_switch() {
+    let Some(url) = url() else { return };
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let c2 = clock.clone();
+    let app = tokio::task::spawn_blocking(move || build(&url, c2))
+        .await
+        .unwrap();
+    let staff = staff_token("staff");
+    let act = |name: &'static str, id: String, input: Value| {
+        let (app, staff) = (app.clone(), staff.clone());
+        async move {
+            let (_, r) = call(
+                &app,
+                "GET",
+                &format!("/v1/{INST}/ticket/{id}"),
+                Some(&staff),
+                None,
+                &[],
+            )
+            .await;
+            let v = r["data"]["version"].as_u64().unwrap().to_string();
+            call(
+                &app,
+                "POST",
+                &format!("/v1/{INST}/actions/{name}"),
+                Some(&staff),
+                Some(json!({"id": id, "input": input})),
+                &[
+                    ("if-match", &format!("\"{v}\"")),
+                    ("idempotency-key", &format!("{name}-{id}")),
+                ],
+            )
+            .await
+        }
+    };
+
+    // Onboarding asks what the manifest says, with no sign-in; a required answer cannot be skipped.
+    let (s, b) = call(&app, "GET", &g("onboarding"), None, None, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["data"]["questions"].as_array().unwrap().len(), 2);
+    assert_eq!(b["data"]["questions"][0]["key"], "dept");
+    let (s, b) = call(
+        &app,
+        "POST",
+        &g("signup"),
+        None,
+        Some(json!({"name": "Tanya", "email": "tb@example.org", "password": "correct horse"})),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        (s, b["errors"][0]["path"].as_str()),
+        (StatusCode::UNPROCESSABLE_ENTITY, Some("dept")),
+        "{b}"
+    );
+    let (s, b) = call(&app, "POST", &g("signup"), None, Some(json!({"name": "Tanya", "email": "tb@example.org", "password": "correct horse", "profile": {"dept": " Admissions ", "ext": "2210", "role": "boss"}})), &[]).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    assert_eq!(
+        b["data"]["profile"],
+        json!({"dept": "Admissions", "ext": "2210"})
+    );
+    let tok = b["data"]["token"].as_str().unwrap().to_string();
+
+    // The guest reads and changes their own details.
+    let (s, b) = call(&app, "GET", &g("profile"), Some(&tok), None, &[]).await;
+    assert_eq!(
+        (s, b["data"]["name"].as_str(), b["data"]["email"].as_str()),
+        (StatusCode::OK, Some("Tanya"), Some("tb@example.org"))
+    );
+    let (s, b) = call(
+        &app,
+        "PUT",
+        &g("profile"),
+        Some(&tok),
+        Some(json!({"profile": {"ext": "9"}})),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        (s, b["errors"][0]["path"].as_str()),
+        (StatusCode::UNPROCESSABLE_ENTITY, Some("dept"))
+    );
+    let (s, b) = call(
+        &app,
+        "PUT",
+        &g("profile"),
+        Some(&tok),
+        Some(json!({"name": "Tanya Brooks", "profile": {"dept": "Admissions", "ext": "2211"}})),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        (s, b["data"]["profile"]["ext"].as_str()),
+        (StatusCode::OK, Some("2211"))
+    );
+    let (s, _) = call(&app, "GET", &g("profile"), None, None, &[]).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = call(&app, "GET", &g("profile"), Some(&staff), None, &[]).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // A request writes the entity's own fields and is filled in from the profile; state, note and owner are not theirs.
+    let (s, b) = call(&app, "POST", &g("tickets"), Some(&tok), Some(json!({"form": {"title": "Open house", "status": "done", "note": "free", "requester": "guest:z"}})), &[]).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    let v = &b["data"];
+    assert_eq!(
+        (
+            v["status"].as_str(),
+            v["form"]["dept"].as_str(),
+            v["form"]["title"].as_str()
+        ),
+        (Some("pending"), Some("Admissions"), Some("Open house"))
+    );
+    assert_eq!(v["created_at"], "2026-11-03");
+    assert!(v["note"].is_null());
+    let id = v["id"].as_str().unwrap().to_string();
+    let (_, r) = call(
+        &app,
+        "GET",
+        &format!("/v1/{INST}/ticket/{id}"),
+        Some(&staff),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        (
+            r["data"]["status"].as_str(),
+            r["data"]["dept"].as_str(),
+            r["data"]["requester"]
+                .as_str()
+                .map(|x| x.starts_with("guest:"))
+        ),
+        (Some("open"), Some("Admissions"), Some(true))
+    );
+    assert!(r["data"]["note"].is_null());
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("tickets"),
+        Some(&tok),
+        Some(json!({"form": {"dept": "Only a department"}})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // In process is "pending" at every stage, then ready; a rejection shows as denied with the reason.
+    let (s, _) = act("work", id.clone(), json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    let status = |t: String| {
+        let app = app.clone();
+        async move {
+            call(&app, "GET", &g("tickets"), Some(&t), None, &[])
+                .await
+                .1["data"]
+                .clone()
+        }
+    };
+    assert_eq!(status(tok.clone()).await[0]["status"], "pending");
+    let (s, _) = act("finish", id.clone(), json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(status(tok.clone()).await[0]["status"], "ready");
+    let (_, b) = call(
+        &app,
+        "POST",
+        &g("tickets"),
+        Some(&tok),
+        Some(json!({"form": {"title": "Too big"}})),
+        &[],
+    )
+    .await;
+    let id2 = b["data"]["id"].as_str().unwrap().to_string();
+    let (s, _) = act("reject", id2.clone(), json!({"note": "Kitchen closed"})).await;
+    assert_eq!(s, StatusCode::OK);
+    let rows = status(tok.clone()).await;
+    let denied = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id2.as_str())
+        .unwrap();
+    assert_eq!(
+        (denied["status"].as_str(), denied["note"].as_str()),
+        (Some("denied"), Some("Kitchen closed"))
+    );
+    let text = rows.to_string();
+    assert!(!text.contains("requester") && !text.contains("guest:"));
+
+    // The schedule is for any signed-in guest; a manager switch turns it off, and back on.
+    let tok2 = signup(&app, "other@example.org").await;
+    let (s, b) = call(&app, "GET", &g("schedule"), Some(&tok2), None, &[]).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(
+        b["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["title"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["Open house"]
+    );
+    assert_eq!(b["data"][0]["status"], "done");
+    assert!(!b.to_string().contains("guest:") && !b.to_string().contains("Tanya"));
+    let (s, _) = call(&app, "GET", &g("schedule"), None, None, &[]).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, b) = call(&app, "GET", &g("features"), None, None, &[]).await;
+    assert_eq!(
+        (s, &b["data"]),
+        (StatusCode::OK, &json!({})),
+        "no setting yet means everything on"
+    );
+    let (s, b) = call(
+        &app,
+        "POST",
+        &format!("/v1/{INST}/setting"),
+        Some(&staff),
+        Some(json!({"setting_key": "hub_guest_features", "setting_value": {"schedule": false}})),
+        &[("idempotency-key", "f1")],
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    let setting_id = b["data"]["id"].as_str().unwrap().to_string();
+    let (_, b) = call(&app, "GET", &g("schedule"), Some(&tok2), None, &[]).await;
+    assert_eq!(
+        (b["data"].clone(), b["meta"]["enabled"].clone()),
+        (json!([]), json!(false))
+    );
+    let (_, b) = call(&app, "GET", &g("features"), None, None, &[]).await;
+    assert_eq!(b["data"], json!({"schedule": false}));
+    let (_, b) = call(
+        &app,
+        "GET",
+        &format!("/v1/{INST}/setting/{setting_id}"),
+        Some(&staff),
+        None,
+        &[],
+    )
+    .await;
+    let version = b["data"]["version"].as_u64().unwrap().to_string();
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        &format!("/v1/{INST}/setting/{setting_id}"),
+        Some(&staff),
+        Some(json!({"setting_value": {"schedule": true}})),
+        &[("if-match", &format!("\"{version}\""))],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, b) = call(&app, "GET", &g("schedule"), Some(&tok2), None, &[]).await;
+    assert_eq!(b["data"].as_array().unwrap().len(), 1);
+    tokio::task::spawn_blocking(move || drop(app))
+        .await
+        .unwrap();
+}
