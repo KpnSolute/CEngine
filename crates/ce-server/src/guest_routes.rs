@@ -486,6 +486,81 @@ pub(crate) fn guest_view(res: &Value, rec: &Record) -> Value {
     Value::Object(out)
 }
 
+/// What a guest may see of a feed: only the declared fields of rows that pass `where`, in `order_by`
+/// order. Rows are read from the store first (at most `scan`), then filtered here, because the
+/// keys live inside a json body the store cannot filter on.
+pub(crate) fn feed_view(feed: &Value, recs: &[Record], now: u64) -> Vec<Value> {
+    let keys: Vec<&str> = feed["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let body_field = s(feed, "body_field");
+    let today = iso_date(now);
+    let mut rows: Vec<Map<String, Value>> = Vec::new();
+    for rec in recs {
+        let body = rec.data.get(body_field).and_then(Value::as_object);
+        let mut env: ce_expr::Env = HashMap::new();
+        env.insert("today".into(), ce_expr::Value::Str(today.clone()));
+        env.insert(
+            "now".into(),
+            ce_expr::Value::Int(i64::try_from(now).unwrap_or(0)),
+        );
+        for k in &keys {
+            env.insert(
+                snake(k),
+                body.and_then(|b| b.get(*k))
+                    .map(from_json)
+                    .unwrap_or(ce_expr::Value::Null),
+            );
+        }
+        if !matches!(
+            ce_expr::run(s(feed, "where"), &env),
+            Ok(ce_expr::Value::Bool(true))
+        ) {
+            continue;
+        }
+        let mut row = Map::new();
+        row.insert("id".into(), json!(rec.id));
+        for (name, spec) in feed["fields"].as_object().into_iter().flatten() {
+            let v = match (spec["from"].as_str(), spec["expr"].as_str()) {
+                (Some(k), _) => body.and_then(|b| b.get(k)).cloned().unwrap_or(Value::Null),
+                (_, Some(e)) => ce_expr::run(e, &env).map(to_json).unwrap_or(Value::Null),
+                _ => Value::Null,
+            };
+            if !v.is_null() && v != json!("") {
+                row.insert(name.clone(), v);
+            }
+        }
+        rows.push(row);
+    }
+    if let Some(o) = feed["order_by"].as_str() {
+        let (field, desc) = match o.strip_prefix('-') {
+            Some(f) => (f, true),
+            None => (o, false),
+        };
+        let key = |r: &Map<String, Value>| {
+            r.get(field)
+                .map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| v.to_string())
+                })
+                .unwrap_or_default()
+        };
+        rows.sort_by(|a, b| {
+            if desc {
+                key(b).cmp(&key(a))
+            } else {
+                key(a).cmp(&key(b))
+            }
+        });
+    }
+    rows.truncate(feed["limit"].as_u64().unwrap_or(200).min(500) as usize);
+    rows.into_iter().map(Value::Object).collect()
+}
+
 fn owner_filter(res: &Value, sub: &str) -> Value {
     let mut all = vec![json!({"field": s(res, "owner_field"), "op": "eq", "value": sub})];
     for (k, v) in res["fixed"].as_object().into_iter().flatten() {
@@ -536,6 +611,54 @@ pub(super) async fn guest_get<S: Store + Send + Sync + 'static>(
                 HeaderValue::from_static("public, max-age=30"),
             );
             return Ok(res);
+        }
+        if let Some(feed) = st.manifest.value["guest"]["feeds"]
+            .get(&name)
+            .filter(|f| f.is_object())
+            .cloned()
+        {
+            let who = authenticate_guest(&st, &g, &headers)?;
+            let all: Vec<Value> = feed["fixed"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, v)| json!({"field": k, "op": "eq", "value": v}))
+                .collect();
+            let sort = feed["sort"]
+                .as_str()
+                .map(|t| match t.strip_prefix('-') {
+                    Some(f) => SortKey {
+                        field: f.to_string(),
+                        dir: SortDir::Desc,
+                    },
+                    None => SortKey {
+                        field: t.to_string(),
+                        dir: SortDir::Asc,
+                    },
+                })
+                .into_iter()
+                .collect();
+            let req = ListRequest {
+                select: None,
+                filter: if all.is_empty() {
+                    None
+                } else {
+                    Some(json!({"and": all}))
+                },
+                search: None,
+                sort,
+                limit: Some(feed["scan"].as_u64().unwrap_or(500).min(1000) as usize),
+                after: None,
+            };
+            let scope = who.scope().clone();
+            let entity = s(&feed, "entity").to_string();
+            let page = blocking(&st, move |x| x.list(&scope, &entity, &req)).await?;
+            let data = feed_view(&feed, &page.records, (st.now)());
+            return Ok((
+                StatusCode::OK,
+                Json(json!({"data": data, "meta": {"request_id": rid}})),
+            )
+                .into_response());
         }
         let res = resource(&st.manifest, &name)
             .ok_or_else(Problem::not_found)?
@@ -813,6 +936,87 @@ mod tests {
         )
         .unwrap_err();
         assert!(long.iter().any(|e| e["code"] == "too_long"));
+    }
+
+    fn feed() -> Value {
+        json!({
+            "entity": "log", "fixed": {"entry_type": "food_request"}, "body_field": "data",
+            "keys": ["status", "eventDate", "theme", "dept", "location"],
+            "where": "event_date >= today and coalesce(status, 'submitted') != 'declined'",
+            "fields": {
+                "title": {"expr": "when(theme != '', theme, dept)"},
+                "eventDate": {"from": "eventDate"},
+                "location": {"from": "location"},
+                "status": {"expr": "coalesce(status, 'submitted')"}
+            },
+            "order_by": "eventDate", "limit": 3
+        })
+    }
+
+    fn rec(id: &str, data: Value) -> Record {
+        Record {
+            id: id.into(),
+            entity: "log".into(),
+            version: 1,
+            data: json!({"created_by": "guest:secret", "data": data}),
+        }
+    }
+
+    #[test]
+    fn a_feed_shows_only_declared_fields_of_matching_rows_in_order() {
+        let recs = vec![
+            rec(
+                "late",
+                json!({"status": "approved", "eventDate": "2026-12-20", "dept": "Wellness", "location": "Gym", "food": "secret menu", "originator": "Jo"}),
+            ),
+            rec(
+                "past",
+                json!({"status": "approved", "eventDate": "2026-11-02", "dept": "Old"}),
+            ),
+            rec(
+                "no",
+                json!({"status": "declined", "eventDate": "2026-12-01", "dept": "Declined"}),
+            ),
+            rec(
+                "soon",
+                json!({"eventDate": "2026-11-10", "theme": "Open house", "dept": "Family", "location": ""}),
+            ),
+            rec("bare", json!({"status": "submitted"})),
+        ];
+        let v = feed_view(&feed(), &recs, NOW);
+        assert_eq!(v.len(), 2);
+        assert_eq!(
+            v[0],
+            json!({"id": "soon", "title": "Open house", "eventDate": "2026-11-10", "status": "submitted"})
+        );
+        assert_eq!(
+            v[1],
+            json!({"id": "late", "title": "Wellness", "eventDate": "2026-12-20", "location": "Gym", "status": "approved"})
+        );
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(!text.contains("secret") && !text.contains("Jo") && !text.contains("originator"));
+    }
+
+    #[test]
+    fn a_feed_honours_its_limit_and_descending_order() {
+        let mut f = feed();
+        f["limit"] = json!(2);
+        f["order_by"] = json!("-eventDate");
+        let recs: Vec<Record> = (10..15)
+            .map(|d| {
+                rec(
+                    &format!("r{d}"),
+                    json!({"eventDate": format!("2026-11-{d}"), "dept": "D"}),
+                )
+            })
+            .collect();
+        let v = feed_view(&f, &recs, NOW);
+        assert_eq!(
+            v.iter()
+                .map(|r| r["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["r14", "r13"]
+        );
     }
 
     #[test]

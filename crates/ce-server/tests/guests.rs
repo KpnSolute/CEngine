@@ -80,6 +80,17 @@ fn manifest() -> Value {
                     "note_key": "note"
                 }
             }},
+            "feeds": {"catering": {
+                "entity": "log", "fixed": {"entry_type": "food_request"}, "body_field": "data",
+                "keys": ["status", "eventDate", "theme", "dept", "location"],
+                "where": "event_date >= today and coalesce(status, 'submitted') != 'declined'",
+                "fields": {
+                    "title": {"expr": "when(theme != '', theme, dept)"},
+                    "eventDate": {"from": "eventDate"}, "location": {"from": "location"},
+                    "status": {"expr": "coalesce(status, 'submitted')"}
+                },
+                "sort": "-business_date", "order_by": "eventDate"
+            }},
             "public": {"survey": {"entity": "setting", "match": {"field": "setting_key", "value": "hub_survey_url"}, "value_field": "setting_value"}}
         }
     })
@@ -102,6 +113,25 @@ fn url() -> Option<String> {
 static N: AtomicU32 = AtomicU32::new(0);
 
 fn build(url: &str, clock: Arc<AtomicU64>) -> Router {
+    build_with(url, clock, None)
+}
+
+struct Outbox(std::sync::Mutex<Vec<(String, String)>>);
+impl ce_server::Mailer for Outbox {
+    fn send_reset(&self, to: &str, _name: &str, link: &str) -> Result<(), ce_server::MailError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((to.to_string(), link.to_string()));
+        Ok(())
+    }
+}
+
+fn build_with(
+    url: &str,
+    clock: Arc<AtomicU64>,
+    mailer: Option<Arc<dyn ce_server::Mailer>>,
+) -> Router {
     let m = validate(manifest().to_string().as_bytes()).unwrap_or_else(|e| panic!("{e:?}"));
     let schema = format!(
         "ce_gu_{}_{}",
@@ -111,10 +141,14 @@ fn build(url: &str, clock: Arc<AtomicU64>) -> Router {
     let store = TypedPgStore::install(url, &m, &schema).unwrap();
     let c = clock.clone();
     let now: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(move || c.load(Ordering::SeqCst));
+    let policy = GuestPolicy {
+        reset_link_base: "https://hub.example/hub/guest/reset".into(),
+        ..GuestPolicy::default()
+    };
     let svc = GuestService::new(
         Arc::new(MemoryGuests::default()),
-        None,
-        GuestPolicy::default(),
+        mailer,
+        policy,
         now.clone(),
     )
     .unwrap();
@@ -254,6 +288,26 @@ async fn accounts_resources_and_doors() {
     assert!(b["data"]["note"].is_null());
     let id = b["data"]["id"].as_str().unwrap().to_string();
 
+    // Any signed-in guest sees the event, not who asked or what they ordered; nobody else gets in.
+    let (s, b) = call(&app, "GET", &g("catering"), Some(&tok), None, &[]).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(
+        b["data"],
+        json!([{"id": id, "title": "Wellness", "eventDate": "2026-12-10", "location": "Room 4", "status": "submitted"}])
+    );
+    let (s, _) = call(&app, "GET", &g("catering"), None, None, &[]).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = call(
+        &app,
+        "GET",
+        &g("catering"),
+        Some(&staff_token("staff")),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
     // Validation reads like the staff form.
     let (s, b) = call(
         &app,
@@ -325,6 +379,13 @@ async fn accounts_resources_and_doors() {
     .await;
     assert_eq!(s, StatusCode::OK, "{b}");
 
+    let (_, b) = call(&app, "GET", &g("catering"), Some(&tok), None, &[]).await;
+    assert_eq!(
+        b["data"],
+        json!([]),
+        "a declined request is not on the catering calendar"
+    );
+
     // The guest sees the decision and the note, never who decided.
     let (s, b) = call(&app, "GET", &g("requests"), Some(&tok), None, &[]).await;
     assert_eq!(s, StatusCode::OK, "{b}");
@@ -337,8 +398,17 @@ async fn accounts_resources_and_doors() {
     let tok2 = signup(&app, "al@example.com").await;
     let (_, b) = call(&app, "GET", &g("requests"), Some(&tok2), None, &[]).await;
     assert_eq!(b["data"].as_array().unwrap().len(), 0);
-    let (s, _) = call(&app, "POST", &format!("/v1/{INST}/log"), Some(&staff), Some(json!({"entry_type": "food_request", "title": "staff made", "created_by": "staff-user", "data": {}})), &[("idempotency-key", "s1")]).await;
+    let (s, _) = call(&app, "POST", &format!("/v1/{INST}/log"), Some(&staff), Some(json!({"entry_type": "food_request", "title": "staff made", "created_by": "staff-user", "data": {"status": "approved", "eventDate": "2027-01-05", "dept": "Culinary", "location": "Hall", "food": "private"}})), &[("idempotency-key", "s1")]).await;
     assert_eq!(s, StatusCode::CREATED);
+    let (_, b) = call(&app, "GET", &g("catering"), Some(&tok2), None, &[]).await;
+    assert_eq!(b["data"].as_array().unwrap().len(), 1);
+    assert_eq!(b["data"][0]["status"], "approved");
+    assert_eq!(b["data"][0]["title"], "Culinary");
+    assert!(
+        !b.to_string().contains("private")
+            && !b.to_string().contains("staff-user")
+            && !b.to_string().contains("created_by")
+    );
     let (_, b) = call(&app, "GET", &g("requests"), Some(&tok2), None, &[]).await;
     assert_eq!(b["data"].as_array().unwrap().len(), 0);
     let (_, b) = call(&app, "GET", &g("requests"), Some(&tok), None, &[]).await;
@@ -501,6 +571,26 @@ fn the_guest_role_must_hold_nothing_and_server_keys_cannot_be_guest_writable() {
     assert!(e.iter().any(|i| i.code == "bad_owner_field"), "{e:?}");
 
     let mut m = manifest();
+    m["guest"]["feeds"]["catering"]["where"] = json!("nope_key >= today");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_identifier"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["feeds"]["catering"]["fields"]["title"] = json!({"from": "not_declared"});
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_key"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["feeds"]["requests"] = m["guest"]["feeds"]["catering"].clone();
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "duplicate_guest_path"), "{e:?}");
+
+    let mut m = manifest();
+    m["guest"]["feeds"]["catering"]["order_by"] = json!("nothing");
+    let e = validate(m.to_string().as_bytes()).unwrap_err();
+    assert!(e.iter().any(|i| i.code == "unknown_field"), "{e:?}");
+
+    let mut m = manifest();
     m["projections"]["access"]["roles"] = json!(["ghost"]);
     let e = validate(m.to_string().as_bytes()).unwrap_err();
     assert!(e.iter().any(|i| i.code == "unknown_role"), "{e:?}");
@@ -509,4 +599,132 @@ fn the_guest_role_must_hold_nothing_and_server_keys_cannot_be_guest_writable() {
     m["guest"]["resources"]["requests"]["body"]["rules"][0]["expr"] = json!("nope_field >= today");
     let e = validate(m.to_string().as_bytes()).unwrap_err();
     assert!(e.iter().any(|i| i.code == "unknown_identifier"), "{e:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_password_reset_by_email_works_once_and_ends_old_sessions() {
+    let Some(url) = url() else { return };
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let (c2, outbox) = (
+        clock.clone(),
+        Arc::new(Outbox(std::sync::Mutex::new(vec![]))),
+    );
+    let ob: Arc<dyn ce_server::Mailer> = outbox.clone();
+    let app = tokio::task::spawn_blocking(move || build_with(&url, c2, Some(ob)))
+        .await
+        .unwrap();
+    let old = signup(&app, "jo@example.com").await;
+
+    // The answer is the same for an account that exists and one that does not; mail goes only to the real one.
+    for email in ["nobody@example.com", "jo@example.com"] {
+        let (s, b) = call(
+            &app,
+            "POST",
+            &g("reset"),
+            None,
+            Some(json!({"email": email})),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            (s, &b["data"]["sent"]),
+            (StatusCode::ACCEPTED, &json!(true))
+        );
+    }
+    let sent = outbox.0.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "jo@example.com");
+    let token = sent[0].1.split("token=").nth(1).unwrap().to_string();
+    assert!(sent[0]
+        .1
+        .starts_with("https://hub.example/hub/guest/reset?token="));
+
+    clock.fetch_add(30, Ordering::SeqCst);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset/confirm"),
+        None,
+        Some(json!({"token": token, "password": "short"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset/confirm"),
+        None,
+        Some(json!({"token": "wrong", "password": "brand new pass"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // The weak-password attempt used the token up (single use), so a fresh one is needed.
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset"),
+        None,
+        Some(json!({"email": "jo@example.com"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    let token = outbox.0.lock().unwrap()[1]
+        .1
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset/confirm"),
+        None,
+        Some(json!({"token": token, "password": "brand new pass"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("reset/confirm"),
+        None,
+        Some(json!({"token": token, "password": "brand new pass"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    let (s, _) = call(&app, "GET", &g("requests"), Some(&old), None, &[]).await;
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "the old session ended with the reset"
+    );
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("login"),
+        None,
+        Some(json!({"email": "jo@example.com", "password": "correct horse"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = call(
+        &app,
+        "POST",
+        &g("login"),
+        None,
+        Some(json!({"email": "jo@example.com", "password": "brand new pass"})),
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    tokio::task::spawn_blocking(move || drop(app))
+        .await
+        .unwrap();
 }

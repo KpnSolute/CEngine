@@ -1184,7 +1184,7 @@ fn guest(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
             }
         }
     }
-    for kind in ["resources", "public"] {
+    for kind in ["resources", "public", "feeds"] {
         for name in obj(g, kind).unwrap_or(&empty).keys() {
             if GUEST_ROUTES.contains(&name.as_str()) {
                 out.push(issue(
@@ -1195,18 +1195,21 @@ fn guest(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
             }
         }
     }
-    let both = |n: &str| {
-        obj(g, "resources").is_some_and(|r| r.contains_key(n))
-            && obj(g, "public").is_some_and(|r| r.contains_key(n))
-    };
-    for name in obj(g, "public").unwrap_or(&empty).keys() {
-        if both(name) {
-            out.push(issue(
-                format!("/guest/public/{name}"),
-                "duplicate_guest_path",
-                format!("`{name}` is both a resource and a public read"),
-            ));
+    let kinds = ["resources", "public", "feeds"];
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for kind in kinds {
+        for name in obj(g, kind).unwrap_or(&empty).keys() {
+            if !seen.insert(name.as_str()) {
+                out.push(issue(
+                    format!("/guest/{kind}/{name}"),
+                    "duplicate_guest_path",
+                    format!("`{name}` is declared more than once under `guest`"),
+                ));
+            }
         }
+    }
+    for (name, f) in obj(g, "feeds").unwrap_or(&empty) {
+        guest_feed(out, name, f, entities, &empty);
     }
     for (name, p) in obj(g, "public").unwrap_or(&empty) {
         let pp = format!("/guest/public/{name}");
@@ -1404,5 +1407,97 @@ fn guest_resource(out: &mut Vec<Issue>, name: &str, r: &Value, entities: &Obj, e
     }
     if let Some(t) = r["title"].as_str() {
         expr(out, &format!("{rp}/title"), t, &view, Site::Plain);
+    }
+}
+
+fn guest_feed(out: &mut Vec<Issue>, name: &str, f: &Value, entities: &Obj, empty: &Obj) {
+    let fp = format!("/guest/feeds/{name}");
+    let Some(en) = f["entity"].as_str() else {
+        return;
+    };
+    let Some(ent) = entities.get(en) else {
+        out.push(issue(
+            format!("{fp}/entity"),
+            "unknown_entity",
+            format!("no entity `{en}`"),
+        ));
+        return;
+    };
+    let fields = obj(ent, "fields").unwrap_or(empty);
+    for k in obj(f, "fixed").unwrap_or(empty).keys() {
+        if !fields.contains_key(k) {
+            out.push(issue(
+                format!("{fp}/fixed/{k}"),
+                "unknown_field",
+                format!("no field `{k}`"),
+            ));
+        }
+    }
+    let bf = f["body_field"].as_str().unwrap_or("");
+    match fields.get(bf) {
+        None => out.push(issue(
+            format!("{fp}/body_field"),
+            "unknown_field",
+            format!("no field `{bf}`"),
+        )),
+        Some(x) if x["type"] != "json" => out.push(issue(
+            format!("{fp}/body_field"),
+            "bad_body_field",
+            format!("`{bf}` is not a json field"),
+        )),
+        _ => {}
+    }
+    let keys: Vec<&str> = f["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let snakes: BTreeSet<String> = keys.iter().map(|k| snake(k)).collect();
+    if snakes.len() != keys.len() {
+        out.push(issue(
+            format!("{fp}/keys"),
+            "ambiguous_keys",
+            "two keys become the same expression name",
+        ));
+    }
+    let view: BTreeSet<&str> = snakes.iter().map(String::as_str).collect();
+    if let Some(w) = f["where"].as_str() {
+        expr(out, &format!("{fp}/where"), w, &view, Site::Plain);
+    }
+    let field_names: Vec<&str> = obj(f, "fields")
+        .unwrap_or(empty)
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for (k, spec) in obj(f, "fields").unwrap_or(empty) {
+        if k == "id" {
+            out.push(issue(
+                format!("{fp}/fields/{k}"),
+                "reserved_field",
+                "`id` is always the row's id",
+            ));
+        }
+        if let Some(from) = spec["from"].as_str() {
+            if !keys.contains(&from) {
+                out.push(issue(
+                    format!("{fp}/fields/{k}/from"),
+                    "unknown_key",
+                    format!("`{from}` is not in `keys`"),
+                ));
+            }
+        }
+        if let Some(e) = spec["expr"].as_str() {
+            expr(out, &format!("{fp}/fields/{k}/expr"), e, &view, Site::Plain);
+        }
+    }
+    if let Some(o) = f["order_by"].as_str() {
+        if !field_names.contains(&o.trim_start_matches('-')) {
+            out.push(issue(
+                format!("{fp}/order_by"),
+                "unknown_field",
+                format!("`{o}` is not a declared field"),
+            ));
+        }
     }
 }

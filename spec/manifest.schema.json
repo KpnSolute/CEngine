@@ -160,6 +160,31 @@
         }
       }
     },
+    "guest_feed": {
+      "type": "object",
+      "required": ["entity", "body_field", "keys", "where", "fields"],
+      "additionalProperties": false,
+      "description": "Read-only list any signed-in guest may read: rows of one entity, filtered by an expression, showing only the declared fields. It never shows an owner, an id of the owner, or any key not declared.",
+      "properties": {
+        "entity": { "$ref": "#/$defs/name" },
+        "fixed": { "type": "object", "description": "Fields every listed row must equal." },
+        "body_field": { "$ref": "#/$defs/name" },
+        "keys": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,39}$" }, "minItems": 1, "maxItems": 40, "uniqueItems": true, "description": "The json keys expressions may read (snake_case in expressions); a missing key reads as null." },
+        "where": { "type": "string", "maxLength": 400 },
+        "fields": {
+          "type": "object", "minProperties": 1, "maxProperties": 12,
+          "propertyNames": { "pattern": "^[a-z][A-Za-z0-9_]{0,39}$" },
+          "additionalProperties": {
+            "type": "object", "additionalProperties": false, "minProperties": 1, "maxProperties": 1,
+            "properties": { "from": { "type": "string" }, "expr": { "type": "string", "maxLength": 400 } }
+          }
+        },
+        "sort": { "type": "string", "maxLength": 80, "description": "Order of the rows read from the store, newest first by default (for example -business_date)." },
+        "order_by": { "type": "string", "maxLength": 80, "description": "Order of the result: a declared field, with a leading - for descending." },
+        "scan": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Most rows read from the store before filtering (default 500)." },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Most rows returned (default 200)." }
+      }
+    },
     "guest_public": {
       "type": "object",
       "required": ["entity", "match", "value_field"],
@@ -230,7 +255,8 @@
       "properties": {
         "role": { "$ref": "#/$defs/name" },
         "resources": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/guest_resource" } },
-        "public": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/guest_public" } }
+        "public": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/guest_public" } },
+        "feeds": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/guest_feed" } }
       }
     },
     "projections": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/projection" } },

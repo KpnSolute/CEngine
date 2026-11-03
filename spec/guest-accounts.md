@@ -61,6 +61,23 @@ and at most 20 per guest per hour.
 
 The guest's view of a row is `{id, <state key>, <note key>, created_at, <as>: {allowed and derived keys}}`.
 
+## Feeds (`guest.feeds`)
+
+A feed is a read-only list that **any signed-in guest** may read: rows of one entity (from every owner),
+filtered by an expression, showing only the fields the manifest declares. It is how a guest sees "what is on the
+calendar" without seeing who asked for it or what they ordered.
+
+- `entity`, `fixed` (fields every row must equal), `body_field` (the json field the keys live in).
+- `keys`: the json keys expressions may read (snake_case there; a missing key reads as null).
+- `where`: an expression that must be true for a row to be listed.
+- `fields`: the only output fields, each `{from: key}` or `{expr: ...}`; null and empty values are left out. The
+  row's `id` is always included. Nothing else leaves the server: no owner, no other key.
+- `sort` (order read from the store), `scan` (most rows read, default 500, at most 1000), `order_by` (order of the
+  result, `-` for descending) and `limit` (default 200, at most 500).
+
+Because the keys live in a json body the store cannot filter on, the store returns at most `scan` rows and the
+engine filters them. A feed over a table with more rows than `scan` can miss old rows: sort the read newest-first.
+
 ## Public reads (`guest.public`)
 
 `GET {name}` with no token returns `{data: <value_field>}` of the row where `match.field == match.value`

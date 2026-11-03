@@ -604,7 +604,10 @@ struct ResendMailer {
     agent: ureq::Agent,
     key: String,
     from: String,
+    url: String,
 }
+
+const RESEND_URL: &str = "https://api.resend.com/emails";
 
 impl ce_server::Mailer for ResendMailer {
     fn send_reset(&self, to: &str, name: &str, link: &str) -> Result<(), ce_server::MailError> {
@@ -612,7 +615,7 @@ impl ce_server::Mailer for ResendMailer {
             "Hi {name},\n\nSomeone asked to reset the password for this account. Use this link within an hour:\n\n{link}\n\nIf it was not you, ignore this email and your password stays as it is."
         );
         self.agent
-            .post("https://api.resend.com/emails")
+            .post(&self.url)
             .set("authorization", &format!("Bearer {}", self.key))
             .send_json(serde_json::json!({
                 "from": self.from, "to": [to], "subject": "Reset your password", "text": text
@@ -648,6 +651,7 @@ fn guest_from_env(
                     .build(),
                 key,
                 from: var("CE_MAIL_FROM")?,
+                url: RESEND_URL.to_string(),
             })),
             _ => None,
         };
@@ -1084,5 +1088,100 @@ mod tools_tests {
         assert!(out["entities"]["notification"].is_object());
         assert!(with_tools(&t, "tasks,nope").is_err());
         assert_eq!(with_tools(&t, "").unwrap(), t);
+    }
+}
+
+#[cfg(test)]
+mod mailer_tests {
+    use super::*;
+    use ce_server::Mailer;
+    use std::io::{Read, Write};
+
+    /// Answers one request with `status` and hands back what it received.
+    fn fake_resend(status: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/emails", listener.local_addr().unwrap());
+        let h = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = conn.read(&mut buf).unwrap();
+                got.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&got).to_string();
+                if let Some(i) = text.find("\r\n\r\n") {
+                    let len = text
+                        .lines()
+                        .find_map(|l| {
+                            l.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if got.len() >= i + 4 + len {
+                        break;
+                    }
+                }
+            }
+            conn.write_all(
+                format!("HTTP/1.1 {status}\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}")
+                    .as_bytes(),
+            )
+            .unwrap();
+            String::from_utf8_lossy(&got).to_string()
+        });
+        (url, h)
+    }
+
+    fn mailer(url: String) -> ResendMailer {
+        ResendMailer {
+            agent: ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(5))
+                .build(),
+            key: "re_test_key".into(),
+            from: "Hub <hub@example.com>".into(),
+            url,
+        }
+    }
+
+    #[test]
+    fn the_reset_email_is_a_bearer_authenticated_json_post_with_the_link() {
+        let (url, h) = fake_resend("200 OK");
+        mailer(url)
+            .send_reset(
+                "jo@example.com",
+                "Jo",
+                "https://hub.example/hub/guest/reset?token=abc",
+            )
+            .unwrap();
+        let req = h.join().unwrap();
+        assert!(req.starts_with("POST /emails "), "{req}");
+        let lower = req.to_lowercase();
+        assert!(lower.contains("authorization: bearer re_test_key"));
+        assert!(lower.contains("content-type: application/json"));
+        let body: serde_json::Value =
+            serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["from"], "Hub <hub@example.com>");
+        assert_eq!(body["to"], serde_json::json!(["jo@example.com"]));
+        assert_eq!(body["subject"], "Reset your password");
+        let text = body["text"].as_str().unwrap();
+        assert!(
+            text.contains("Hi Jo,")
+                && text.contains("https://hub.example/hub/guest/reset?token=abc")
+                && text.contains("within an hour")
+        );
+    }
+
+    #[test]
+    fn a_refusal_from_the_mail_service_is_an_error_not_a_panic() {
+        let (url, h) = fake_resend("422 Unprocessable Entity");
+        assert!(mailer(url)
+            .send_reset("jo@example.com", "Jo", "https://x/y?token=t")
+            .is_err());
+        h.join().unwrap();
+        // Nothing listening at all is an error too.
+        assert!(mailer("http://127.0.0.1:1/emails".into())
+            .send_reset("a@b.co", "A", "l")
+            .is_err());
     }
 }
