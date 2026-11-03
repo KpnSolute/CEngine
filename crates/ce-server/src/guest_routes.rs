@@ -95,7 +95,9 @@ fn issue_token<S>(st: &AppState<S>, g: &Guests, who: &GuestIdentity) -> Result<V
         .verifier
         .sign_token(&who.sub, &g.tenant, std::slice::from_ref(&g.role), now, ttl)
         .map_err(|_| store_problem(StoreError::Backend("cannot sign a token".into())))?;
-    Ok(json!({"data": {"token": token, "expires_at": now + ttl, "name": who.name}}))
+    Ok(
+        json!({"data": {"token": token, "expires_at": now + ttl, "name": who.name, "email": who.email, "profile": who.profile}}),
+    )
 }
 
 fn credentials(body: Result<Bytes, BytesRejection>) -> Result<Map<String, Value>, Problem> {
@@ -126,7 +128,8 @@ pub(super) async fn signup<S: Store + Send + Sync + 'static>(
             str_field(&b, "password"),
         );
         let svc = g.svc.clone();
-        let who = off(move || svc.signup(&ip, &name, &email, &pw))
+        let profile = b.get("profile").cloned().unwrap_or(Value::Null);
+        let who = off(move || svc.signup_with_profile(&ip, &name, &email, &pw, &profile))
             .await?
             .map_err(guest_problem)?;
         Ok((StatusCode::CREATED, Json(issue_token(&st, &g, &who)?)).into_response())
@@ -173,6 +176,76 @@ fn authenticate_guest<S>(
         return Err(Problem::forbidden());
     }
     Ok(who)
+}
+
+/// The profile questions the manifest declares, in order.
+fn questions<S>(st: &AppState<S>) -> Value {
+    st.manifest.value["guest"]["profile"].clone()
+}
+
+/// `GET .../_guest/onboarding`: what to ask a new guest (no token needed). Empty when nothing is declared.
+pub(super) async fn onboarding<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        guests(&st, &inst)?;
+        let q = match questions(&st) {
+            Value::Array(a) => Value::Array(a),
+            _ => json!([]),
+        };
+        Ok((StatusCode::OK, Json(json!({"data": {"questions": q}}))).into_response())
+    };
+    finish(&rid, run.await)
+}
+
+fn profile_body<S>(st: &AppState<S>, who: &GuestIdentity) -> Value {
+    json!({"data": {"name": who.name, "email": who.email, "profile": who.profile, "questions": match questions(st) { Value::Array(a) => Value::Array(a), _ => json!([]) }}})
+}
+
+/// `GET .../_guest/profile`: the signed-in guest's own name, email and onboarding answers.
+pub(super) async fn profile_get<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let g = guests(&st, &inst)?;
+        let who = authenticate_guest(&st, &g, &headers)?;
+        let svc = g.svc.clone();
+        let sub = who.user_id.clone();
+        let me = off(move || svc.identity(&sub))
+            .await?
+            .map_err(guest_problem)?;
+        Ok((StatusCode::OK, Json(profile_body(&st, &me))).into_response())
+    };
+    finish(&rid, run.await)
+}
+
+/// `PUT .../_guest/profile` with `{name?, profile}`: replaces the answers (each declared question is re-checked).
+pub(super) async fn profile_put<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let g = guests(&st, &inst)?;
+        let who = authenticate_guest(&st, &g, &headers)?;
+        let b = credentials(body)?;
+        let name = b.get("name").and_then(Value::as_str).map(String::from);
+        let profile = b.get("profile").cloned().unwrap_or(Value::Null);
+        let svc = g.svc.clone();
+        let sub = who.user_id.clone();
+        let me = off(move || svc.update_profile(&sub, name.as_deref(), &profile))
+            .await?
+            .map_err(guest_problem)?;
+        Ok((StatusCode::OK, Json(profile_body(&st, &me))).into_response())
+    };
+    finish(&rid, run.await)
 }
 
 pub(super) async fn logout<S: Store + Send + Sync + 'static>(
@@ -296,6 +369,7 @@ pub(crate) fn build_row(
     sub: &str,
     sent: &Value,
     now: u64,
+    me: Option<&GuestIdentity>,
 ) -> Result<Map<String, Value>, Vec<Value>> {
     let body = &res["body"];
     let key = s(body, "as");
@@ -340,6 +414,32 @@ pub(crate) fn build_row(
                 doc.insert((*k).to_string(), v.clone());
             }
             Some(_) => errors.push(field_error(k, "invalid", "send text, a number or yes/no")),
+        }
+    }
+    // Anything the guest left out is filled in from their account (name, email, onboarding answers).
+    if let (Some(me), Some(defaults)) = (me, body["defaults"].as_object()) {
+        for (k, src) in defaults {
+            let empty = match doc.get(k) {
+                None => true,
+                Some(Value::String(t)) => t.is_empty(),
+                Some(_) => false,
+            };
+            if !empty || !allow.contains(&k.as_str()) {
+                continue;
+            }
+            let from = src.as_str().unwrap_or_default();
+            let v = match from {
+                "$name" => Some(me.name.clone()),
+                "$email" => Some(me.email.clone()),
+                _ => from
+                    .strip_prefix("profile.")
+                    .and_then(|q| me.profile.get(q))
+                    .and_then(Value::as_str)
+                    .map(String::from),
+            };
+            if let Some(v) = v.filter(|v| !v.is_empty()) {
+                doc.insert(k.clone(), json!(v));
+            }
         }
     }
     for k in body["required"]
@@ -428,14 +528,66 @@ pub(crate) fn build_row(
         }
     }
     row.insert(s(res, "owner_field").to_string(), json!(sub));
-    row.insert(s(body, "field").to_string(), Value::Object(doc));
+    match body["columns"].as_object() {
+        // Column mode: every form key lands in its own field of the entity.
+        Some(cols) => {
+            for (k, target) in cols {
+                if let (Some(v), Some(t)) = (doc.get(k), target.as_str()) {
+                    row.insert(t.to_string(), v.clone());
+                }
+            }
+        }
+        None => {
+            row.insert(s(body, "field").to_string(), Value::Object(doc));
+        }
+    }
     Ok(row)
+}
+
+/// Column mode: the guest's own form keys read back from the entity's fields, the state shown through
+/// `status_map` as `status`, and the note. Nothing else of the row leaves the server.
+fn column_view(res: &Value, cols: &Map<String, Value>, rec: &Record) -> Value {
+    let body = &res["body"];
+    let mut out = Map::new();
+    out.insert("id".into(), json!(rec.id));
+    if let Some(sf) = body["state_field"].as_str() {
+        let raw = rec.data.get(sf).and_then(Value::as_str).unwrap_or_default();
+        let shown = body["status_map"][raw].as_str().unwrap_or(raw);
+        out.insert("status".into(), json!(shown));
+    }
+    if let Some(nf) = body["note_field"].as_str() {
+        if let Some(note) = rec
+            .data
+            .get(nf)
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+        {
+            out.insert("note".into(), json!(note));
+        }
+    }
+    if let Some(f) = res["created_at_field"].as_str() {
+        if let Some(d) = rec.data.get(f) {
+            out.insert("created_at".into(), d.clone());
+        }
+    }
+    let form: Map<String, Value> = cols
+        .iter()
+        .filter_map(|(k, target)| {
+            let v = rec.data.get(target.as_str()?)?;
+            (!v.is_null() && v != &json!("")).then(|| (k.clone(), v.clone()))
+        })
+        .collect();
+    out.insert(s(body, "as").to_string(), Value::Object(form));
+    Value::Object(out)
 }
 
 /// A stored row as the guest sees it: its id, its state and note, its date, and only the
 /// allowed and derived keys of its body, never anything staff added.
 pub(crate) fn guest_view(res: &Value, rec: &Record) -> Value {
     let body = &res["body"];
+    if let Some(cols) = body["columns"].as_object() {
+        return column_view(res, cols, rec);
+    }
     let stored = rec
         .data
         .get(s(body, "field"))
@@ -500,7 +652,11 @@ pub(crate) fn feed_view(feed: &Value, recs: &[Record], now: u64) -> Vec<Value> {
     let today = iso_date(now);
     let mut rows: Vec<Map<String, Value>> = Vec::new();
     for rec in recs {
-        let body = rec.data.get(body_field).and_then(Value::as_object);
+        let body = if body_field.is_empty() {
+            rec.data.as_object()
+        } else {
+            rec.data.get(body_field).and_then(Value::as_object)
+        };
         let mut env: ce_expr::Env = HashMap::new();
         env.insert("today".into(), ce_expr::Value::Str(today.clone()));
         env.insert(
@@ -618,6 +774,38 @@ pub(super) async fn guest_get<S: Store + Send + Sync + 'static>(
             .cloned()
         {
             let who = authenticate_guest(&st, &g, &headers)?;
+            // A switch managers control: while it is off the feed lists nothing.
+            if let Some(sw) = feed.get("enabled_by").filter(|v| v.is_object()) {
+                let scope = who.scope().clone();
+                let req = ListRequest {
+                    select: None,
+                    filter: Some(
+                        json!({"field": s(&sw["match"], "field"), "op": "eq", "value": s(&sw["match"], "value")}),
+                    ),
+                    search: None,
+                    sort: vec![],
+                    limit: Some(1),
+                    after: None,
+                };
+                let (entity, vf, key) = (
+                    s(sw, "entity").to_string(),
+                    s(sw, "value_field").to_string(),
+                    s(sw, "key").to_string(),
+                );
+                let page = blocking(&st, move |x| x.list(&scope, &entity, &req)).await?;
+                let off_now = page
+                    .records
+                    .first()
+                    .and_then(|r| r.data.get(&vf))
+                    .is_some_and(|v| v[key.as_str()] == json!(false));
+                if off_now {
+                    return Ok((
+                        StatusCode::OK,
+                        Json(json!({"data": [], "meta": {"request_id": rid, "enabled": false}})),
+                    )
+                        .into_response());
+                }
+            }
             let all: Vec<Value> = feed["fixed"]
                 .as_object()
                 .into_iter()
@@ -717,7 +905,11 @@ pub(super) async fn guest_post<S: Store + Send + Sync + 'static>(
             return Err(guest_problem(GuestError::Throttled));
         }
         let entity = s(&res, "entity").to_string();
-        let mut row = build_row(&res, &who.user_id, &sent, (st.now)())
+        let me = {
+            let (svc, sub) = (g.svc.clone(), who.user_id.clone());
+            off(move || svc.identity(&sub)).await?.ok()
+        };
+        let mut row = build_row(&res, &who.user_id, &sent, (st.now)(), me.as_ref())
             .map_err(|errors| Problem::validation("the request cannot be accepted", errors))?;
         validate_body(&st, &entity, &row, ce_validate::Mode::Create)?;
         prepare_create(&st.manifest, &entity, &mut row);
@@ -819,6 +1011,168 @@ pub(super) async fn view_read<S: Store + Send + Sync + 'static>(
 mod tests {
     use super::*;
 
+    fn br(
+        res: &Value,
+        sub: &str,
+        sent: &Value,
+        now: u64,
+    ) -> Result<Map<String, Value>, Vec<Value>> {
+        build_row(res, sub, sent, now, None)
+    }
+
+    /// The MJCC-shaped request: a form that lands in the columns of its own entity.
+    fn col_res() -> Value {
+        json!({
+            "entity": "catering_request", "owner_field": "requester",
+            "stamp": {"request_date": "today"}, "created_at_field": "request_date",
+            "body": {
+                "as": "form",
+                "columns": {"originator": "originator", "dept": "dept", "ext": "ext", "eventDate": "event_date",
+                            "location": "location", "theme": "theme", "food": "food", "sackLunch": "sack_lunch"},
+                "allow": ["originator", "dept", "ext", "eventDate", "location", "theme", "food", "sackLunch"],
+                "required": ["originator", "dept", "eventDate", "location"],
+                "defaults": {"originator": "$name", "dept": "profile.dept", "ext": "profile.ext"},
+                "rules": [{"expr": "event_date >= today", "field": "eventDate", "message": "The event date has passed."}],
+                "state_field": "status", "note_field": "note",
+                "status_map": {"submitted": "pending", "under_review": "pending", "approved": "pending", "ready": "ready", "denied": "denied"}
+            }
+        })
+    }
+
+    fn me() -> GuestIdentity {
+        GuestIdentity {
+            sub: "guest:abc".into(),
+            name: "Tanya Brooks".into(),
+            email: "tb@example.org".into(),
+            profile: json!({"dept": "Admissions", "ext": "2210"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }
+    }
+
+    #[test]
+    fn column_mode_writes_entity_fields_and_fills_the_form_from_the_profile() {
+        // The guest sends only what is new; name, department and extension come from onboarding.
+        let sent = json!({"form": {"eventDate": "2026-12-10", "location": "Main lobby", "theme": "Open house", "food": "Finger foods", "sackLunch": true}});
+        let row = build_row(&col_res(), "guest:abc", &sent, NOW, Some(&me())).unwrap();
+        assert_eq!(row["requester"], "guest:abc");
+        assert_eq!(row["originator"], "Tanya Brooks");
+        assert_eq!(
+            (row["dept"].as_str(), row["ext"].as_str()),
+            (Some("Admissions"), Some("2210"))
+        );
+        assert_eq!(
+            (row["event_date"].as_str(), row["sack_lunch"].as_bool()),
+            (Some("2026-12-10"), Some(true))
+        );
+        assert_eq!(row["request_date"], "2026-11-03");
+        assert!(
+            !row.contains_key("data") && !row.contains_key("status") && !row.contains_key("note")
+        );
+        // What the guest does send wins over the profile.
+        let own =
+            json!({"form": {"dept": "Academics", "eventDate": "2026-12-10", "location": "Gym"}});
+        let row = build_row(&col_res(), "guest:abc", &own, NOW, Some(&me())).unwrap();
+        assert_eq!(row["dept"], "Academics");
+        // Without an account to read from, a missing required field is refused as usual.
+        let e = build_row(&col_res(), "guest:abc", &own, NOW, None).unwrap_err();
+        assert!(e
+            .iter()
+            .any(|x| x["path"] == "originator" && x["code"] == "required"));
+    }
+
+    #[test]
+    fn column_mode_ignores_server_owned_columns_a_guest_tries_to_send() {
+        let sent = json!({"form": {"originator": "X", "dept": "D", "eventDate": "2026-12-10", "location": "L", "status": "approved", "approval_1_by": "mia", "requester": "guest:other", "note": "free"}});
+        let row = build_row(&col_res(), "guest:abc", &sent, NOW, None).unwrap();
+        assert_eq!(row["requester"], "guest:abc");
+        for k in ["status", "approval_1_by", "note"] {
+            assert!(!row.contains_key(k), "{k}");
+        }
+        let past = json!({"form": {"originator": "X", "dept": "D", "eventDate": "2026-11-01", "location": "L"}});
+        let e = build_row(&col_res(), "guest:abc", &past, NOW, None).unwrap_err();
+        assert!(e
+            .iter()
+            .any(|x| x["detail"] == "The event date has passed."));
+    }
+
+    #[test]
+    fn the_column_view_maps_the_state_to_what_a_guest_should_see() {
+        let rec = |status: &str| Record {
+            id: "r1".into(),
+            entity: "catering_request".into(),
+            version: 4,
+            data: json!({"requester": "guest:abc", "originator": "Tanya", "dept": "Admissions", "event_date": "2026-12-10", "location": "Lobby",
+                "status": status, "note": "Kitchen is closed", "approval_1_by": "mia", "approval_2_by": "max", "decided_by": "max",
+                "request_date": "2026-11-03", "theme": null, "food": ""}),
+        };
+        for (state, shown) in [
+            ("submitted", "pending"),
+            ("under_review", "pending"),
+            ("approved", "pending"),
+            ("ready", "ready"),
+            ("denied", "denied"),
+        ] {
+            assert_eq!(
+                guest_view(&col_res(), &rec(state))["status"],
+                shown,
+                "{state}"
+            );
+        }
+        let v = guest_view(&col_res(), &rec("denied"));
+        assert_eq!(v["note"], "Kitchen is closed");
+        assert_eq!(v["created_at"], "2026-11-03");
+        assert_eq!(
+            v["form"],
+            json!({"originator": "Tanya", "dept": "Admissions", "eventDate": "2026-12-10", "location": "Lobby"})
+        );
+        let text = v.to_string();
+        assert!(
+            !text.contains("mia")
+                && !text.contains("max")
+                && !text.contains("guest:abc")
+                && !text.contains("approval")
+        );
+    }
+
+    #[test]
+    fn a_feed_over_plain_columns_lists_only_declared_fields() {
+        let feed = json!({
+            "entity": "catering_request", "keys": ["status", "event_date", "theme", "dept", "location"],
+            "where": "event_date >= today and (status == 'approved' or status == 'ready')",
+            "fields": {"title": {"expr": "when(theme != '', theme, dept)"}, "eventDate": {"from": "event_date"}, "location": {"from": "location"}, "status": {"from": "status"}},
+            "order_by": "eventDate"
+        });
+        let rec = |id: &str, status: &str, date: &str| Record {
+            id: id.into(),
+            entity: "catering_request".into(),
+            version: 1,
+            data: json!({"status": status, "event_date": date, "dept": "Academics", "theme": "Graduation", "location": "Gym", "food": "secret", "requester": "guest:x", "originator": "Sam"}),
+        };
+        let v = feed_view(
+            &feed,
+            &[
+                rec("b", "approved", "2026-12-20"),
+                rec("a", "ready", "2026-11-10"),
+                rec("c", "submitted", "2026-11-11"),
+                rec("d", "approved", "2026-11-01"),
+            ],
+            NOW,
+        );
+        assert_eq!(
+            v.iter()
+                .map(|r| r["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            v[0],
+            json!({"id": "a", "title": "Graduation", "eventDate": "2026-11-10", "location": "Gym", "status": "ready"})
+        );
+        assert!(!serde_json::to_string(&v).unwrap().contains("secret"));
+    }
+
     fn res() -> Value {
         json!({
             "entity": "log", "owner_field": "created_by",
@@ -861,7 +1215,7 @@ mod tests {
 
     #[test]
     fn a_good_request_becomes_an_owned_stamped_row() {
-        let row = build_row(&res(), "guest:abc", &form(json!({})), NOW).unwrap();
+        let row = br(&res(), "guest:abc", &form(json!({})), NOW).unwrap();
         assert_eq!(row["created_by"], "guest:abc");
         assert_eq!(row["entry_type"], "food_request");
         assert_eq!(row["business_date"], "2026-11-03");
@@ -874,7 +1228,7 @@ mod tests {
 
     #[test]
     fn derived_values_follow_the_form() {
-        let sack = build_row(&res(), "guest:abc", &form(json!({"sackLunch": true})), NOW).unwrap();
+        let sack = br(&res(), "guest:abc", &form(json!({"sackLunch": true})), NOW).unwrap();
         assert_eq!(sack["data"]["meal"], "sack lunch");
     }
 
@@ -883,7 +1237,7 @@ mod tests {
         let sent = form(
             json!({"status": "approved", "note": "ok", "decidedBy": "boss", "created_by": "guest:other", "meal": "hacked"}),
         );
-        let row = build_row(&res(), "guest:abc", &sent, NOW).unwrap();
+        let row = br(&res(), "guest:abc", &sent, NOW).unwrap();
         assert_eq!(row["created_by"], "guest:abc");
         let d = row["data"].as_object().unwrap();
         assert_eq!(d["status"], "submitted");
@@ -897,7 +1251,7 @@ mod tests {
 
     #[test]
     fn rules_and_required_fields_stop_a_request_with_a_reason() {
-        let past = build_row(
+        let past = br(
             &res(),
             "guest:abc",
             &form(json!({"eventDate": "2026-11-02"})),
@@ -907,9 +1261,9 @@ mod tests {
         assert!(past
             .iter()
             .any(|e| e["path"] == "eventDate" && e["detail"] == "The event date has passed."));
-        let nothing = build_row(&res(), "guest:abc", &form(json!({"food": ""})), NOW).unwrap_err();
+        let nothing = br(&res(), "guest:abc", &form(json!({"food": ""})), NOW).unwrap_err();
         assert!(nothing.iter().any(|e| e["detail"] == "Ask for something."));
-        let blank = build_row(
+        let blank = br(
             &res(),
             "guest:abc",
             &form(json!({"location": "  ", "dept": ""})),
@@ -920,15 +1274,14 @@ mod tests {
             .iter()
             .any(|e| e["path"] == "location" && e["code"] == "required"));
         assert!(blank.iter().any(|e| e["path"] == "dept"));
-        assert!(build_row(&res(), "guest:abc", &json!({}), NOW).is_err());
+        assert!(br(&res(), "guest:abc", &json!({}), NOW).is_err());
     }
 
     #[test]
     fn odd_values_are_refused() {
-        let nested =
-            build_row(&res(), "guest:abc", &form(json!({"food": {"a": 1}})), NOW).unwrap_err();
+        let nested = br(&res(), "guest:abc", &form(json!({"food": {"a": 1}})), NOW).unwrap_err();
         assert!(nested.iter().any(|e| e["path"] == "food"));
-        let long = build_row(
+        let long = br(
             &res(),
             "guest:abc",
             &form(json!({"food": "x".repeat(2001)})),

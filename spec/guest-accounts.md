@@ -34,9 +34,27 @@ Security model:
   from `_ce_guest` at start). A token issued in the same second as a cutoff is issued one second after it.
 - Tables `_ce_guest` and `_ce_guest_reset` are created in the installation's schema on first start, like `_ce_staff`.
 
+## Onboarding and the guest profile (`guest.profile`)
+
+`guest.profile` is an ordered list of questions (`key`, `label`, `required`, `max_length`). Sign-up takes the answers
+as `profile`, a guest reads and changes them, and a required answer cannot be skipped.
+
+| Call | Answer |
+| --- | --- |
+| `GET _guest/onboarding` (no token) | `{data:{questions:[...]}}`: what to ask |
+| `POST signup` with `profile` | as before; the answer also carries `email` and `profile` (login does too) |
+| `GET _guest/profile` | `{data:{name, email, profile, questions}}` |
+| `PUT _guest/profile` `{name?, profile}` | the same, after re-checking every question |
+
+Only declared keys are kept, text is trimmed and bounded, and the answers live on the account (`_ce_guest.profile`,
+added to an existing table on first start).
+
 ## Guest resources (`guest.resources`)
 
-A resource is rows of one entity that a guest may create and list, only their own. The guest never names the
+A resource is rows of one entity that a guest may create and list, only their own. It runs in one of two modes:
+**json mode** (`body.field`: the guest's answers live in one json field) or **column mode** (`body.columns`: each form
+key is written to its own field of the entity, so the row is an ordinary record that staff, state machines, actions
+and reports all work on). The guest never names the
 entity, the owner or the state.
 
 - `owner_field`: a string field (at least 64 characters) that holds `guest:<uuid>`. Every list is filtered by it
@@ -51,6 +69,12 @@ entity, the owner or the state.
   `body.derive` (server-computed keys; a guest cannot send them) and `body.max_bytes`.
 - `body.state` (`key`, `initial`) and `body.note_key`: the lifecycle lives in the same json, set by the server on
   create and changed by staff through the normal write path. The guest sees both, never who decided.
+
+Column mode adds: `columns` (form key to entity field; keys in `allow` are the guest-writable ones, the others are
+server-owned), `state_field` (the entity's state, shown as `status` and never writable), `note_field` (shown as
+`note`), `status_map` (state to the word the guest sees, for example approved to `pending`) and `defaults` (form keys
+filled from the account when the guest sends none: `$name`, `$email` or `profile.<question>`). The manifest check
+refuses an `allow`ed key that maps to the owner, a fixed or stamped field, the state or the note.
 
 Rule and derive expressions see the allowed keys in snake_case (`eventDate` is `event_date`), plus `today` (a
 `YYYY-MM-DD` string) and `now`. The date functions `add_days` and `days_between` are in the expression
@@ -72,6 +96,9 @@ calendar" without seeing who asked for it or what they ordered.
 - `where`: an expression that must be true for a row to be listed.
 - `fields`: the only output fields, each `{from: key}` or `{expr: ...}`; null and empty values are left out. The
   row's `id` is always included. Nothing else leaves the server: no owner, no other key.
+- `body_field` is optional: without it `keys` are fields of the entity itself (the state field included).
+- `enabled_by` (`entity`, `match`, `value_field`, `key`): a switch managers control. While that setting's json has
+  `key` set to false the feed lists nothing (and says `meta.enabled: false`); a missing setting means on.
 - `sort` (order read from the store), `scan` (most rows read, default 500, at most 1000), `order_by` (order of the
   result, `-` for descending) and `limit` (default 200, at most 500).
 

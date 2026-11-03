@@ -11,18 +11,21 @@
 //! memory (warmed from the directory at start), because it runs on every request.
 
 use crate::pin_login::{check_secret, hash_pin_random};
+use serde_json::{Map, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// One guest account. `email` is the lower-cased, trimmed key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuestRecord {
     pub id: String,
     pub email: String,
     pub name: String,
     pub hash: String,
     pub active: bool,
+    /// What the guest told us at onboarding (department, extension...), keys the manifest declares.
+    pub profile: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,8 +42,16 @@ pub trait GuestDirectory: Send + Sync {
         email: &str,
         name: &str,
         hash: &str,
+        profile: &Map<String, Value>,
         now: u64,
     ) -> Result<GuestRecord, GuestDirError>;
+    /// Replaces the guest's name and profile.
+    fn set_profile(
+        &self,
+        id: &str,
+        name: &str,
+        profile: &Map<String, Value>,
+    ) -> Result<(), GuestDirError>;
     fn by_email(&self, email: &str) -> Result<Option<GuestRecord>, GuestDirError>;
     fn by_id(&self, id: &str) -> Result<Option<GuestRecord>, GuestDirError>;
     /// Sets a new hash and ends every earlier session of this guest.
@@ -83,6 +94,8 @@ pub struct GuestPolicy {
     pub signup_window_secs: u64,
     /// Base of the link in the reset email; the token is appended as `?token=`.
     pub reset_link_base: String,
+    /// The profile questions, in order. Empty means a guest has only a name and an email.
+    pub profile: Vec<ProfileField>,
 }
 
 impl Default for GuestPolicy {
@@ -101,15 +114,27 @@ impl Default for GuestPolicy {
             window_secs: 15 * 60,
             signup_window_secs: 3600,
             reset_link_base: String::new(),
+            profile: Vec::new(),
         }
     }
 }
 
 /// A signed-in guest, before the server signs the token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuestIdentity {
     pub sub: String,
     pub name: String,
+    pub email: String,
+    pub profile: Map<String, Value>,
+}
+
+/// One question onboarding asks (declared in the manifest's `guest.profile`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileField {
+    pub key: String,
+    pub label: String,
+    pub required: bool,
+    pub max_length: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +253,11 @@ impl GuestService {
         })
     }
 
+    /// Replaces the onboarding questions (the server sets them from the manifest when guests are switched on).
+    pub(crate) fn set_questions(&mut self, q: Vec<ProfileField>) {
+        self.policy.profile = q;
+    }
+
     pub fn ttl_secs(&self) -> u64 {
         self.policy.ttl_secs
     }
@@ -276,6 +306,53 @@ impl GuestService {
         email: &str,
         password: &str,
     ) -> Result<GuestIdentity, GuestError> {
+        self.signup_with_profile(ip, name, email, password, &Value::Null)
+    }
+
+    /// Checks the profile answers against the declared questions: only declared keys, trimmed text no longer than
+    /// the limit, and every required one filled in. `None` means every question is unanswered.
+    pub fn validate_profile(&self, raw: &Value) -> Result<Map<String, Value>, GuestError> {
+        let given = raw.as_object().cloned().unwrap_or_default();
+        let mut out = Map::new();
+        for f in &self.policy.profile {
+            let text = match given.get(&f.key) {
+                None | Some(Value::Null) => String::new(),
+                Some(Value::String(t)) => t.trim().to_string(),
+                Some(_) => {
+                    return Err(GuestError::Invalid(
+                        leak(&f.key),
+                        format!("{}: send text.", f.label),
+                    ))
+                }
+            };
+            if text.chars().count() > f.max_length || text.chars().any(|c| c.is_control()) {
+                return Err(GuestError::Invalid(
+                    leak(&f.key),
+                    format!("{}: use at most {} characters.", f.label, f.max_length),
+                ));
+            }
+            if text.is_empty() {
+                if f.required {
+                    return Err(GuestError::Invalid(
+                        leak(&f.key),
+                        format!("{} is required.", f.label),
+                    ));
+                }
+            } else {
+                out.insert(f.key.clone(), Value::String(text));
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn signup_with_profile(
+        &self,
+        ip: &str,
+        name: &str,
+        email: &str,
+        password: &str,
+        profile: &Value,
+    ) -> Result<GuestIdentity, GuestError> {
         let now = self.now();
         if !self.limiter.allow(
             &format!("su:{ip}"),
@@ -296,13 +373,11 @@ impl GuestService {
         if let Some(why) = self.password_problem(password, &email) {
             return Err(GuestError::Invalid("password", why));
         }
+        let profile = self.validate_profile(profile)?;
         let _permit = self.gate()?;
         let hash = hash_pin_random(password).ok_or(GuestError::Unavailable)?;
-        match self.dir.create(&email, name, &hash, now) {
-            Ok(rec) => Ok(GuestIdentity {
-                sub: format!("{SUB_PREFIX}{}", rec.id),
-                name: rec.name,
-            }),
+        match self.dir.create(&email, name, &hash, &profile, now) {
+            Ok(rec) => Ok(identity_of(&rec)),
             Err(GuestDirError::Exists) => Err(GuestError::Exists),
             Err(_) => Err(GuestError::Unavailable),
         }
@@ -347,12 +422,42 @@ impl GuestService {
             .unwrap_or(&self.dummy);
         let matched = check_secret(password, hash);
         match found {
-            Some(rec) if matched && rec.active => Ok(GuestIdentity {
-                sub: format!("{SUB_PREFIX}{}", rec.id),
-                name: rec.name,
-            }),
+            Some(rec) if matched && rec.active => Ok(identity_of(&rec)),
             _ => Err(GuestError::Denied),
         }
+    }
+
+    /// Who this token's guest is, for the profile page and for pre-filling their forms.
+    pub fn identity(&self, sub: &str) -> Result<GuestIdentity, GuestError> {
+        let id = sub.strip_prefix(SUB_PREFIX).ok_or(GuestError::Denied)?;
+        match self.dir.by_id(id) {
+            Ok(Some(rec)) if rec.active => Ok(identity_of(&rec)),
+            Ok(_) => Err(GuestError::Denied),
+            Err(_) => Err(GuestError::Unavailable),
+        }
+    }
+
+    /// Changes the guest's name and profile answers (every declared question is re-checked).
+    pub fn update_profile(
+        &self,
+        sub: &str,
+        name: Option<&str>,
+        profile: &Value,
+    ) -> Result<GuestIdentity, GuestError> {
+        let current = self.identity(sub)?;
+        let name = name.map(str::trim).unwrap_or(&current.name);
+        if name.is_empty()
+            || name.chars().count() > self.policy.max_name
+            || name.chars().any(|c| c.is_control())
+        {
+            return Err(GuestError::Invalid("name", "Enter your name.".into()));
+        }
+        let profile = self.validate_profile(profile)?;
+        let id = sub.strip_prefix(SUB_PREFIX).ok_or(GuestError::Denied)?;
+        self.dir
+            .set_profile(id, name, &profile)
+            .map_err(|_| GuestError::Unavailable)?;
+        self.identity(sub)
     }
 
     /// Counts one write by this guest and says whether it is within `max` per hour.
@@ -473,6 +578,46 @@ impl GuestService {
     }
 }
 
+/// The onboarding questions a manifest declares in `guest.profile`, in order.
+pub fn questions_from_manifest(m: &ce_manifest::Manifest) -> Vec<ProfileField> {
+    m.value["guest"]["profile"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|q| {
+            let key = q["key"].as_str()?.to_string();
+            Some(ProfileField {
+                label: q["label"].as_str().unwrap_or(&key).to_string(),
+                required: q["required"].as_bool().unwrap_or(false),
+                max_length: q["max_length"].as_u64().unwrap_or(120).clamp(1, 200) as usize,
+                key,
+            })
+        })
+        .collect()
+}
+
+fn identity_of(rec: &GuestRecord) -> GuestIdentity {
+    GuestIdentity {
+        sub: format!("{SUB_PREFIX}{}", rec.id),
+        name: rec.name.clone(),
+        email: rec.email.clone(),
+        profile: rec.profile.clone(),
+    }
+}
+
+/// An error path names a profile key; the keys are manifest constants, so keeping one for the life of
+/// the process is bounded by the manifest.
+fn leak(key: &str) -> &'static str {
+    static KEYS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut k = KEYS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(found) = k.iter().find(|x| **x == key) {
+        return found;
+    }
+    let b: &'static str = Box::leak(key.to_string().into_boxed_str());
+    k.push(b);
+    b
+}
+
 struct HashingPermit<'a>(&'a AtomicUsize);
 impl Drop for HashingPermit<'_> {
     fn drop(&mut self) {
@@ -500,6 +645,7 @@ impl GuestDirectory for MemoryGuests {
         email: &str,
         name: &str,
         hash: &str,
+        profile: &Map<String, Value>,
         _now: u64,
     ) -> Result<GuestRecord, GuestDirError> {
         let mut m = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -513,9 +659,22 @@ impl GuestDirectory for MemoryGuests {
             name: name.to_string(),
             hash: hash.to_string(),
             active: true,
+            profile: profile.clone(),
         };
         m.by_id.insert(rec.id.clone(), rec.clone());
         Ok(rec)
+    }
+    fn set_profile(
+        &self,
+        id: &str,
+        name: &str,
+        profile: &Map<String, Value>,
+    ) -> Result<(), GuestDirError> {
+        let mut m = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let r = m.by_id.get_mut(id).ok_or(GuestDirError::Missing)?;
+        r.name = name.to_string();
+        r.profile = profile.clone();
+        Ok(())
     }
     fn by_email(&self, email: &str) -> Result<Option<GuestRecord>, GuestDirError> {
         let m = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -566,6 +725,7 @@ impl GuestDirectory for MemoryGuests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::atomic::AtomicU64;
 
     struct Sent(Mutex<Vec<(String, String)>>);
@@ -819,5 +979,115 @@ mod tests {
         first.logout(&me.sub).unwrap();
         let second = mk(dir);
         assert_eq!(second.not_before(&me.sub), Some(2_000_000));
+    }
+
+    fn svc_with_questions() -> GuestService {
+        let policy = GuestPolicy {
+            profile: vec![
+                ProfileField {
+                    key: "dept".into(),
+                    label: "Department".into(),
+                    required: true,
+                    max_length: 20,
+                },
+                ProfileField {
+                    key: "ext".into(),
+                    label: "Extension".into(),
+                    required: false,
+                    max_length: 8,
+                },
+            ],
+            ..GuestPolicy::default()
+        };
+        GuestService::new(
+            Arc::new(MemoryGuests::default()),
+            None,
+            policy,
+            Arc::new(|| 1_000_000),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn onboarding_questions_are_required_trimmed_bounded_and_stored() {
+        let s = svc_with_questions();
+        let ask = |p: Value, email: &str| {
+            s.signup_with_profile("1.1.1.1", "Tanya", email, "correct horse", &p)
+        };
+        assert!(matches!(
+            ask(json!({}), "a@example.com"),
+            Err(GuestError::Invalid("dept", _))
+        ));
+        assert!(matches!(
+            ask(json!({"dept": "   "}), "a@example.com"),
+            Err(GuestError::Invalid("dept", _))
+        ));
+        assert!(matches!(
+            ask(json!({"dept": "x".repeat(21)}), "a@example.com"),
+            Err(GuestError::Invalid("dept", _))
+        ));
+        assert!(matches!(
+            ask(json!({"dept": 5}), "a@example.com"),
+            Err(GuestError::Invalid("dept", _))
+        ));
+        let me = ask(
+            json!({"dept": "  Admissions ", "ext": "2210", "role": "boss", "nonsense": 1}),
+            "a@example.com",
+        )
+        .unwrap();
+        // Only declared questions are kept, trimmed.
+        assert_eq!(
+            Value::Object(me.profile.clone()),
+            json!({"dept": "Admissions", "ext": "2210"})
+        );
+        let back = s
+            .login("1.1.1.1", "a@example.com", "correct horse")
+            .unwrap();
+        assert_eq!(back.profile, me.profile);
+        assert_eq!(back.email, "a@example.com");
+        // Optional questions may stay empty.
+        assert_eq!(
+            Value::Object(
+                ask(json!({"dept": "Academics"}), "b@example.com")
+                    .unwrap()
+                    .profile
+            ),
+            json!({"dept": "Academics"})
+        );
+    }
+
+    #[test]
+    fn a_guest_can_change_their_own_answers_and_name() {
+        let s = svc_with_questions();
+        let me = s
+            .signup_with_profile(
+                "1.1.1.1",
+                "Tanya",
+                "a@example.com",
+                "correct horse",
+                &json!({"dept": "Admissions"}),
+            )
+            .unwrap();
+        let after = s
+            .update_profile(
+                &me.sub,
+                Some(" Tanya B "),
+                &json!({"dept": "Academics", "ext": "99"}),
+            )
+            .unwrap();
+        assert_eq!(
+            (after.name.as_str(), Value::Object(after.profile.clone())),
+            ("Tanya B", json!({"dept": "Academics", "ext": "99"}))
+        );
+        assert_eq!(s.identity(&me.sub).unwrap().profile, after.profile);
+        assert!(matches!(
+            s.update_profile(&me.sub, None, &json!({"ext": "1"})),
+            Err(GuestError::Invalid("dept", _))
+        ));
+        assert!(matches!(
+            s.update_profile(&me.sub, Some(" "), &json!({"dept": "X"})),
+            Err(GuestError::Invalid("name", _))
+        ));
+        assert!(s.identity("staff-user").is_err());
     }
 }

@@ -542,6 +542,7 @@ fn guest_record(r: ce_store_pg::GuestRow) -> ce_server::GuestRecord {
         name: r.name,
         hash: r.hash,
         active: r.active,
+        profile: r.profile.as_object().cloned().unwrap_or_default(),
     }
 }
 
@@ -551,11 +552,27 @@ impl ce_server::GuestDirectory for PgGuestDirectory {
         email: &str,
         name: &str,
         hash: &str,
+        profile: &serde_json::Map<String, serde_json::Value>,
         _now: u64,
     ) -> Result<ce_server::GuestRecord, ce_server::GuestDirError> {
         self.0
-            .create(email, name, hash)
+            .create(
+                email,
+                name,
+                hash,
+                &serde_json::Value::Object(profile.clone()),
+            )
             .map(guest_record)
+            .map_err(Self::map)
+    }
+    fn set_profile(
+        &self,
+        id: &str,
+        name: &str,
+        profile: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), ce_server::GuestDirError> {
+        self.0
+            .set_profile(id, name, &serde_json::Value::Object(profile.clone()))
             .map_err(Self::map)
     }
     fn by_email(

@@ -1245,12 +1245,32 @@ fn guest(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
             }
         }
     }
+    let profile_keys: Vec<String> = g["profile"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|q| q["key"].as_str().map(String::from))
+        .collect();
+    if profile_keys.iter().collect::<BTreeSet<_>>().len() != profile_keys.len() {
+        out.push(issue(
+            "/guest/profile",
+            "duplicate_question",
+            "two onboarding questions share a key",
+        ));
+    }
     for (name, r) in obj(g, "resources").unwrap_or(&empty) {
-        guest_resource(out, name, r, entities, &empty);
+        guest_resource(out, name, r, entities, &empty, &profile_keys);
     }
 }
 
-fn guest_resource(out: &mut Vec<Issue>, name: &str, r: &Value, entities: &Obj, empty: &Obj) {
+fn guest_resource(
+    out: &mut Vec<Issue>,
+    name: &str,
+    r: &Value,
+    entities: &Obj,
+    empty: &Obj,
+    profile_keys: &[String],
+) {
     let rp = format!("/guest/resources/{name}");
     let Some(en) = r["entity"].as_str() else {
         return;
@@ -1316,13 +1336,123 @@ fn guest_resource(out: &mut Vec<Issue>, name: &str, r: &Value, entities: &Obj, e
         ));
     }
     let b = &r["body"];
-    let bf = b["field"].as_str().unwrap_or("");
-    if known(out, format!("{rp}/body/field"), bf) && ty(bf) != "json" {
-        out.push(issue(
-            format!("{rp}/body/field"),
-            "bad_body_field",
-            format!("`{bf}` is not a json field"),
-        ));
+    let columns = obj(b, "columns");
+    match (b["field"].as_str(), columns) {
+        (Some(_), Some(_)) | (None, None) => out.push(issue(
+            format!("{rp}/body"),
+            "body_mode",
+            "give exactly one of `field` (json mode) or `columns` (column mode)",
+        )),
+        (Some(bf), None) => {
+            if known(out, format!("{rp}/body/field"), bf) && ty(bf) != "json" {
+                out.push(issue(
+                    format!("{rp}/body/field"),
+                    "bad_body_field",
+                    format!("`{bf}` is not a json field"),
+                ));
+            }
+        }
+        (None, Some(cols)) => {
+            for (k, target) in cols {
+                let target = target.as_str().unwrap_or("");
+                known(out, format!("{rp}/body/columns/{k}"), target);
+                let protected = target == owner
+                    || obj(r, "fixed").unwrap_or(empty).contains_key(target)
+                    || obj(r, "stamp").unwrap_or(empty).contains_key(target)
+                    || ent["state"]["field"].as_str() == Some(target)
+                    || b["note_field"].as_str() == Some(target);
+                if protected
+                    && b["allow"]
+                        .as_array()
+                        .is_some_and(|a| a.iter().any(|x| x == k))
+                {
+                    out.push(issue(
+                        format!("{rp}/body/columns/{k}"),
+                        "guest_writable_server_key",
+                        format!(
+                            "`{target}` is owned by the server and cannot be written from `allow`"
+                        ),
+                    ));
+                }
+            }
+            for k in b["allow"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                if !cols.contains_key(k) {
+                    out.push(issue(
+                        format!("{rp}/body/allow"),
+                        "not_a_column",
+                        format!("`{k}` is allowed but has no entry in `columns`"),
+                    ));
+                }
+            }
+            for k in obj(b, "derive").unwrap_or(empty).keys() {
+                if !cols.contains_key(k) {
+                    out.push(issue(
+                        format!("{rp}/body/derive/{k}"),
+                        "not_a_column",
+                        format!("`{k}` is derived but has no entry in `columns`"),
+                    ));
+                }
+            }
+            if let Some(sf) = b["state_field"].as_str() {
+                if ent["state"]["field"].as_str() != Some(sf) {
+                    out.push(issue(
+                        format!("{rp}/body/state_field"),
+                        "bad_state_field",
+                        format!("`{sf}` is not the entity's state field"),
+                    ));
+                }
+            }
+            if let Some(nf) = b["note_field"].as_str() {
+                known(out, format!("{rp}/body/note_field"), nf);
+            }
+            for st in obj(b, "status_map").unwrap_or(empty).keys() {
+                if !ent["state"]["states"].get(st).is_some_and(Value::is_object) {
+                    out.push(issue(
+                        format!("{rp}/body/status_map/{st}"),
+                        "unknown_state",
+                        format!("no state `{st}`"),
+                    ));
+                }
+            }
+            if b.get("state").is_some() || b.get("note_key").is_some() {
+                out.push(issue(
+                    format!("{rp}/body"),
+                    "body_mode",
+                    "`state` and `note_key` belong to json mode; use `state_field` and `note_field`",
+                ));
+            }
+        }
+    }
+    let profile_keys: Vec<&str> = profile_keys.iter().map(String::as_str).collect();
+    for (k, src) in obj(b, "defaults").unwrap_or(empty) {
+        let src = src.as_str().unwrap_or("");
+        let ok = src == "$name"
+            || src == "$email"
+            || src
+                .strip_prefix("profile.")
+                .is_some_and(|q| profile_keys.contains(&q));
+        if !ok {
+            out.push(issue(
+                format!("{rp}/body/defaults/{k}"),
+                "bad_default",
+                "use `$name`, `$email` or `profile.<a declared question>`",
+            ));
+        }
+        if !b["allow"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x == k))
+        {
+            out.push(issue(
+                format!("{rp}/body/defaults/{k}"),
+                "not_allowed_key",
+                "a default's key must be in `allow`",
+            ));
+        }
     }
     let allow: Vec<&str> = b["allow"]
         .as_array()
@@ -1433,19 +1563,62 @@ fn guest_feed(out: &mut Vec<Issue>, name: &str, f: &Value, entities: &Obj, empty
             ));
         }
     }
-    let bf = f["body_field"].as_str().unwrap_or("");
-    match fields.get(bf) {
-        None => out.push(issue(
-            format!("{fp}/body_field"),
-            "unknown_field",
-            format!("no field `{bf}`"),
-        )),
-        Some(x) if x["type"] != "json" => out.push(issue(
-            format!("{fp}/body_field"),
-            "bad_body_field",
-            format!("`{bf}` is not a json field"),
-        )),
-        _ => {}
+    match f["body_field"].as_str() {
+        Some(bf) => match fields.get(bf) {
+            None => out.push(issue(
+                format!("{fp}/body_field"),
+                "unknown_field",
+                format!("no field `{bf}`"),
+            )),
+            Some(x) if x["type"] != "json" => out.push(issue(
+                format!("{fp}/body_field"),
+                "bad_body_field",
+                format!("`{bf}` is not a json field"),
+            )),
+            _ => {}
+        },
+        None => {
+            let state_field = ent["state"]["field"].as_str();
+            for k in f["keys"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                if !fields.contains_key(k) && state_field != Some(k) {
+                    out.push(issue(
+                        format!("{fp}/keys"),
+                        "unknown_field",
+                        format!("`{k}` is not a field of `{en}` (without `body_field` the keys are entity fields)"),
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(sw) = f.get("enabled_by") {
+        match sw["entity"].as_str().and_then(|e| entities.get(e)) {
+            None => out.push(issue(
+                format!("{fp}/enabled_by/entity"),
+                "unknown_entity",
+                "no such entity",
+            )),
+            Some(se) => {
+                let sf = obj(se, "fields").unwrap_or(empty);
+                for (path, v) in [
+                    ("match/field", &sw["match"]["field"]),
+                    ("value_field", &sw["value_field"]),
+                ] {
+                    let v = v.as_str().unwrap_or("");
+                    if !sf.contains_key(v) {
+                        out.push(issue(
+                            format!("{fp}/enabled_by/{path}"),
+                            "unknown_field",
+                            format!("no field `{v}`"),
+                        ));
+                    }
+                }
+            }
+        }
     }
     let keys: Vec<&str> = f["keys"]
         .as_array()

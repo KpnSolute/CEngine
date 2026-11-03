@@ -7,13 +7,15 @@ use postgres::Row;
 use std::sync::Arc;
 
 /// One account as stored. `email` is already lower-cased by the caller.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuestRow {
     pub id: String,
     pub email: String,
     pub name: String,
     pub hash: String,
     pub active: bool,
+    /// Onboarding answers (a json object).
+    pub profile: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,10 +34,13 @@ pub(crate) fn ddl(schema: &str) -> String {
                name              text        NOT NULL,
                pass_hash         text        NOT NULL,
                active            boolean     NOT NULL DEFAULT true,
+               profile           jsonb       NOT NULL DEFAULT '{{}}'::jsonb,
                sessions_ended_at timestamptz,
                created_at        timestamptz NOT NULL DEFAULT now(),
                PRIMARY KEY (tenant_id, id)
            );
+           ALTER TABLE "{schema}"."_ce_guest"
+               ADD COLUMN IF NOT EXISTS profile jsonb NOT NULL DEFAULT '{{}}'::jsonb;
            CREATE UNIQUE INDEX IF NOT EXISTS "_ce_guest_email"
                ON "{schema}"."_ce_guest" (tenant_id, email);
            CREATE TABLE IF NOT EXISTS "{schema}"."_ce_guest_reset" (
@@ -55,10 +60,11 @@ fn row(r: &Row) -> GuestRow {
         name: r.get(2),
         hash: r.get(3),
         active: r.get(4),
+        profile: r.get(5),
     }
 }
 
-const COLS: &str = "id::text, email, name, pass_hash, active";
+const COLS: &str = "id::text, email, name, pass_hash, active, profile";
 
 /// Guest accounts for one tenant. Cheap to clone.
 #[derive(Clone)]
@@ -90,10 +96,16 @@ impl PgGuests {
     }
 
     /// Creates the account, or `Exists` when the email is taken.
-    pub fn create(&self, email: &str, name: &str, hash: &str) -> Result<GuestRow, GuestPgError> {
+    pub fn create(
+        &self,
+        email: &str,
+        name: &str,
+        hash: &str,
+        profile: &serde_json::Value,
+    ) -> Result<GuestRow, GuestPgError> {
         let sql = format!(
-            r#"INSERT INTO "{}"."_ce_guest" (tenant_id, email, name, pass_hash)
-               VALUES ($1::text::uuid, $2, $3, $4)
+            r#"INSERT INTO "{}"."_ce_guest" (tenant_id, email, name, pass_hash, profile)
+               VALUES ($1::text::uuid, $2, $3, $4, $5)
                ON CONFLICT (tenant_id, email) DO NOTHING
                RETURNING {COLS}"#,
             self.schema
@@ -102,7 +114,7 @@ impl PgGuests {
             .pool
             .get()
             .map_err(Self::backend)?
-            .query(&sql, &[&self.tenant, &email, &name, &hash])
+            .query(&sql, &[&self.tenant, &email, &name, &hash, profile])
             .map_err(Self::backend)?;
         rows.first().map(row).ok_or(GuestPgError::Exists)
     }
@@ -133,6 +145,31 @@ impl PgGuests {
             .query(&sql, &[&self.tenant, &id])
             .map_err(Self::backend)?;
         Ok(rows.first().map(row))
+    }
+
+    /// Replaces the guest's name and onboarding answers.
+    pub fn set_profile(
+        &self,
+        id: &str,
+        name: &str,
+        profile: &serde_json::Value,
+    ) -> Result<(), GuestPgError> {
+        let sql = format!(
+            r#"UPDATE "{}"."_ce_guest" SET name = $3, profile = $4
+               WHERE tenant_id = $1::text::uuid AND id = $2::text::uuid"#,
+            self.schema
+        );
+        let n = self
+            .pool
+            .get()
+            .map_err(Self::backend)?
+            .execute(&sql, &[&self.tenant, &id, &name, profile])
+            .map_err(Self::backend)?;
+        if n == 0 {
+            Err(GuestPgError::Missing)
+        } else {
+            Ok(())
+        }
     }
 
     /// Sets a new hash and ends every earlier session.

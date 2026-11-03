@@ -144,10 +144,15 @@
         "sort": { "type": "string", "maxLength": 80 },
         "body": {
           "type": "object",
-          "required": ["field", "as", "allow"],
+          "required": ["as", "allow"],
           "additionalProperties": false,
           "properties": {
-            "field": { "$ref": "#/$defs/name" },
+            "field": { "$ref": "#/$defs/name", "description": "JSON mode: the json field that holds what the guest sent." },
+            "columns": { "type": "object", "minProperties": 1, "maxProperties": 40, "propertyNames": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/name" }, "description": "Column mode (instead of `field`): each form key and the entity field it is stored in. Keys in `allow` are what a guest may send; other keys here are server-owned (derived)." },
+            "state_field": { "$ref": "#/$defs/name", "description": "Column mode: the entity's state field, shown to the guest as `status` and never writable by them." },
+            "note_field": { "$ref": "#/$defs/name", "description": "Column mode: the field shown to the guest as `note`." },
+            "status_map": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 40 }, "description": "State to the word the guest sees (for example approved to pending)." },
+            "defaults": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 60 }, "description": "Form keys filled in from the guest's account when they send none: `$name`, `$email` or `profile.<question>`." },
             "as": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" },
             "allow": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,39}$" }, "minItems": 1, "maxItems": 40, "uniqueItems": true },
             "required": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
@@ -163,13 +168,14 @@
     },
     "guest_feed": {
       "type": "object",
-      "required": ["entity", "body_field", "keys", "where", "fields"],
+      "required": ["entity", "keys", "where", "fields"],
       "additionalProperties": false,
       "description": "Read-only list any signed-in guest may read: rows of one entity, filtered by an expression, showing only the declared fields. It never shows an owner, an id of the owner, or any key not declared.",
       "properties": {
         "entity": { "$ref": "#/$defs/name" },
         "fixed": { "type": "object", "description": "Fields every listed row must equal." },
-        "body_field": { "$ref": "#/$defs/name" },
+        "body_field": { "$ref": "#/$defs/name", "description": "The json field the keys live in. Without it the keys are fields of the entity itself." },
+        "enabled_by": { "type": "object", "required": ["entity", "match", "value_field", "key"], "additionalProperties": false, "description": "A switch managers control: the feed lists nothing while the setting's json has `key` set to false. A missing setting means on.", "properties": { "entity": { "$ref": "#/$defs/name" }, "match": { "type": "object", "required": ["field", "value"], "additionalProperties": false, "properties": { "field": { "$ref": "#/$defs/name" }, "value": { "type": "string" } } }, "value_field": { "$ref": "#/$defs/name" }, "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" } } },
         "keys": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,39}$" }, "minItems": 1, "maxItems": 40, "uniqueItems": true, "description": "The json keys expressions may read (snake_case in expressions); a missing key reads as null." },
         "where": { "type": "string", "maxLength": 400 },
         "fields": {
@@ -255,6 +261,7 @@
       "description": "Guest accounts (email and password, outside the staff). Guest tokens carry only `role`, which must have no permissions; guests reach only what resources and public declare.",
       "properties": {
         "role": { "$ref": "#/$defs/name" },
+        "profile": { "type": "array", "maxItems": 12, "description": "What onboarding asks a new guest, in order. Answers are stored on the account and can pre-fill a resource's form (`defaults`).", "items": { "type": "object", "required": ["key"], "additionalProperties": false, "properties": { "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,29}$" }, "label": { "type": "string", "minLength": 1, "maxLength": 60 }, "required": { "type": "boolean" }, "max_length": { "type": "integer", "minimum": 1, "maximum": 200 } } } },
         "resources": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/guest_resource" } },
         "public": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/guest_public" } },
         "feeds": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/guest_feed" } }

@@ -59,7 +59,8 @@ pub use deliveries::{run_once as deliver_once, Report as DeliveryReport};
 pub use events::{relay_once, Deliver, Delivery, Relay, Report as RelayReport};
 pub use guest::{
     normalize_email, GuestDirError, GuestDirectory, GuestError, GuestIdentity, GuestPolicy,
-    GuestRecord, GuestService, MailError, Mailer, MemoryGuests, SUB_PREFIX as GUEST_SUB_PREFIX,
+    GuestRecord, GuestService, MailError, Mailer, MemoryGuests, ProfileField,
+    SUB_PREFIX as GUEST_SUB_PREFIX,
 };
 pub use guest_routes::Guests;
 pub use login::{Identity, Issuing, Login, LoginError};
@@ -180,7 +181,11 @@ impl<S> AppState<S> {
 
     /// Turns on guest accounts for `tenant`. The manifest must declare a `guest` block; guest
     /// tokens carry that block's role and nothing else.
-    pub fn with_guests(mut self, svc: GuestService, tenant: &str) -> Result<Self, &'static str> {
+    pub fn with_guests(
+        mut self,
+        mut svc: GuestService,
+        tenant: &str,
+    ) -> Result<Self, &'static str> {
         if self.verifier.public_scope(tenant).is_none() {
             return Err("the tenant must be a lowercase uuid");
         }
@@ -188,6 +193,7 @@ impl<S> AppState<S> {
             .as_str()
             .ok_or("the manifest declares no `guest` block")?
             .to_string();
+        svc.set_questions(guest::questions_from_manifest(&self.manifest));
         self.guests = Some(Arc::new(Guests {
             svc: Arc::new(svc),
             tenant: tenant.to_string(),
@@ -245,6 +251,14 @@ where
         .route("/v1/{inst}/_guest/signup", post(guest_routes::signup::<S>))
         .route("/v1/{inst}/_guest/login", post(guest_routes::login::<S>))
         .route("/v1/{inst}/_guest/logout", post(guest_routes::logout::<S>))
+        .route(
+            "/v1/{inst}/_guest/onboarding",
+            get(guest_routes::onboarding::<S>),
+        )
+        .route(
+            "/v1/{inst}/_guest/profile",
+            get(guest_routes::profile_get::<S>).put(guest_routes::profile_put::<S>),
+        )
         .route("/v1/{inst}/_guest/reset", post(guest_routes::reset::<S>))
         .route(
             "/v1/{inst}/_guest/reset/confirm",

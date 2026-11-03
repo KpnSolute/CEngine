@@ -39,13 +39,32 @@ fn store() -> Option<TypedPgStore> {
 fn accounts_sessions_and_single_use_resets() {
     let Some(store) = store() else { return };
     let g = store.guests(T1).unwrap();
-    let a = g.create("jo@example.com", "Jo", "hash-1").unwrap();
+    let a = g
+        .create(
+            "jo@example.com",
+            "Jo",
+            "hash-1",
+            &json!({"dept": "Admissions"}),
+        )
+        .unwrap();
     assert_eq!(
-        g.create("jo@example.com", "Other", "hash-2"),
+        g.create("jo@example.com", "Other", "hash-2", &json!({})),
         Err(GuestPgError::Exists)
     );
-    assert_eq!(g.by_email("jo@example.com").unwrap().unwrap(), a);
+    assert_eq!(g.by_email("jo@example.com").unwrap().unwrap().id, a.id);
     assert_eq!(g.by_id(&a.id).unwrap().unwrap().name, "Jo");
+    assert_eq!(a.profile, json!({"dept": "Admissions"}));
+    g.set_profile(&a.id, "Jo Q", &json!({"dept": "Academics", "ext": "2210"}))
+        .unwrap();
+    let b = g.by_id(&a.id).unwrap().unwrap();
+    assert_eq!(
+        (b.name.as_str(), &b.profile),
+        ("Jo Q", &json!({"dept": "Academics", "ext": "2210"}))
+    );
+    assert_eq!(
+        g.set_profile("00000000-0000-4000-8000-000000000000", "x", &json!({})),
+        Err(GuestPgError::Missing)
+    );
     assert!(g.by_email("nobody@example.com").unwrap().is_none());
     assert!(g
         .by_id("00000000-0000-4000-8000-000000000000")
@@ -54,7 +73,9 @@ fn accounts_sessions_and_single_use_resets() {
     // The same email is a different account in another tenant.
     let other = store.guests(T2).unwrap();
     assert!(other.by_email("jo@example.com").unwrap().is_none());
-    assert!(other.create("jo@example.com", "Jo", "h").is_ok());
+    assert!(other
+        .create("jo@example.com", "Jo", "h", &json!({}))
+        .is_ok());
     assert!(other.by_id(&a.id).unwrap().is_none());
 
     // Sign-out and password changes leave a cutoff that a restart can read back.
