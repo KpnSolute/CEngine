@@ -123,7 +123,52 @@
       "properties": {
         "entity": { "$ref": "#/$defs/name" },
         "fields": { "type": "array", "items": { "$ref": "#/$defs/name" }, "minItems": 1, "uniqueItems": true },
-        "filter": { "type": "string" }
+        "filter": { "type": "string" },
+        "roles": { "type": "array", "items": { "$ref": "#/$defs/name" }, "minItems": 1, "uniqueItems": true, "description": "When set, the projection is not public: signed-in callers holding one of these roles read it at GET /v1/{inst}/_view/{projection}." }
+      }
+    },
+    "guest_resource": {
+      "type": "object",
+      "required": ["entity", "owner_field", "body"],
+      "additionalProperties": false,
+      "description": "Rows a guest may create and list, only their own. The guest never names an entity, a field outside body.allow, an owner or a state.",
+      "properties": {
+        "entity": { "$ref": "#/$defs/name" },
+        "owner_field": { "$ref": "#/$defs/name" },
+        "fixed": { "type": "object", "description": "Fields the server sets on every row and filters every list by." },
+        "stamp": { "type": "object", "additionalProperties": { "const": "today" }, "description": "Date fields set to today (UTC)." },
+        "created_at_field": { "$ref": "#/$defs/name" },
+        "title_field": { "$ref": "#/$defs/name" },
+        "title": { "type": "string", "maxLength": 400 },
+        "sort": { "type": "string", "maxLength": 80 },
+        "body": {
+          "type": "object",
+          "required": ["field", "as", "allow"],
+          "additionalProperties": false,
+          "properties": {
+            "field": { "$ref": "#/$defs/name" },
+            "as": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" },
+            "allow": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,39}$" }, "minItems": 1, "maxItems": 40, "uniqueItems": true },
+            "required": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "rules": { "type": "array", "maxItems": 20, "items": { "type": "object", "required": ["expr", "message"], "additionalProperties": false, "properties": { "expr": { "type": "string", "maxLength": 400 }, "field": { "type": "string" }, "message": { "type": "string", "maxLength": 200 } } } },
+            "derive": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 400 } },
+            "hide": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "state": { "type": "object", "required": ["key", "initial"], "additionalProperties": false, "properties": { "key": { "type": "string" }, "initial": { "type": "string" } } },
+            "note_key": { "type": "string" },
+            "max_bytes": { "type": "integer", "minimum": 64, "maximum": 65536 }
+          }
+        }
+      }
+    },
+    "guest_public": {
+      "type": "object",
+      "required": ["entity", "match", "value_field"],
+      "additionalProperties": false,
+      "description": "One value anyone may read without signing in, from the row where match.field equals match.value.",
+      "properties": {
+        "entity": { "$ref": "#/$defs/name" },
+        "match": { "type": "object", "required": ["field", "value"], "additionalProperties": false, "properties": { "field": { "$ref": "#/$defs/name" }, "value": { "type": "string" } } },
+        "value_field": { "$ref": "#/$defs/name" }
       }
     },
     "report": {
@@ -177,6 +222,17 @@
     "entities": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/entity" } },
     "actions": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/action" } },
     "roles": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "type": "object", "additionalProperties": false, "properties": { "read": { "type": "array", "items": { "type": "string" } }, "write": { "type": "array", "items": { "type": "string" } }, "actions": { "type": "array", "items": { "type": "string" } } } } },
+    "guest": {
+      "type": "object",
+      "required": ["role"],
+      "additionalProperties": false,
+      "description": "Guest accounts (email and password, outside the staff). Guest tokens carry only `role`, which must have no permissions; guests reach only what resources and public declare.",
+      "properties": {
+        "role": { "$ref": "#/$defs/name" },
+        "resources": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/guest_resource" } },
+        "public": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,39}$" }, "additionalProperties": { "$ref": "#/$defs/guest_public" } }
+      }
+    },
     "projections": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/projection" } },
     "reports": { "type": "object", "propertyNames": { "$ref": "#/$defs/name" }, "additionalProperties": { "$ref": "#/$defs/report" } },
     "runtime": { "$ref": "#/$defs/runtime" },

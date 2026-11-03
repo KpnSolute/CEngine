@@ -453,6 +453,8 @@ pub fn check(m: &Value) -> Vec<Issue> {
         }
     }
 
+    projection_roles(&mut out, m);
+    guest(&mut out, m, entities);
     subscriptions(&mut out, m, entities);
     deliveries(&mut out, m, entities);
     for (rn, r) in obj(m, "reports").unwrap_or(&empty) {
@@ -1118,5 +1120,289 @@ fn deliveries(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
                 }
             }
         }
+    }
+}
+
+/// A projection with `roles` is read by signed-in callers holding one of them, so each must exist.
+fn projection_roles(out: &mut Vec<Issue>, m: &Value) {
+    let empty = Obj::new();
+    let roles = obj(m, "roles").unwrap_or(&empty);
+    for (pn, p) in obj(m, "projections").unwrap_or(&empty) {
+        for (i, r) in p["roles"].as_array().into_iter().flatten().enumerate() {
+            let r = r.as_str().unwrap_or("");
+            if !roles.contains_key(r) {
+                out.push(issue(
+                    format!("/projections/{pn}/roles/{i}"),
+                    "unknown_role",
+                    format!("no role `{r}`"),
+                ));
+            }
+        }
+    }
+}
+
+/// `eventDate` becomes `event_date`: expression names are lower snake case, form keys often are not.
+pub fn snake(key: &str) -> String {
+    let mut o = String::new();
+    for (i, c) in key.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                o.push('_');
+            }
+            o.push(c.to_ascii_lowercase());
+        } else {
+            o.push(c);
+        }
+    }
+    o
+}
+
+const GUEST_ROUTES: [&str; 4] = ["signup", "login", "logout", "reset"];
+
+/// The `guest` block: the guest role holds nothing, every name resolves, and what a guest sends
+/// can never name a server-owned key (owner, state, note, derived values).
+fn guest(out: &mut Vec<Issue>, m: &Value, entities: &Obj) {
+    let Some(g) = m.get("guest") else { return };
+    let empty = Obj::new();
+    let roles = obj(m, "roles").unwrap_or(&empty);
+    let role = g["role"].as_str().unwrap_or("");
+    match roles.get(role) {
+        None => out.push(issue(
+            "/guest/role",
+            "unknown_role",
+            format!("no role `{role}`"),
+        )),
+        Some(r) => {
+            for key in ["read", "write", "actions"] {
+                if r[key].as_array().is_some_and(|a| !a.is_empty()) {
+                    out.push(issue(
+                        format!("/roles/{role}/{key}"),
+                        "guest_role_privileged",
+                        "the guest role must hold no permissions: guests reach only what `guest` declares",
+                    ));
+                }
+            }
+        }
+    }
+    for kind in ["resources", "public"] {
+        for name in obj(g, kind).unwrap_or(&empty).keys() {
+            if GUEST_ROUTES.contains(&name.as_str()) {
+                out.push(issue(
+                    format!("/guest/{kind}/{name}"),
+                    "reserved_guest_path",
+                    format!("`{name}` is a sign-in route"),
+                ));
+            }
+        }
+    }
+    let both = |n: &str| {
+        obj(g, "resources").is_some_and(|r| r.contains_key(n))
+            && obj(g, "public").is_some_and(|r| r.contains_key(n))
+    };
+    for name in obj(g, "public").unwrap_or(&empty).keys() {
+        if both(name) {
+            out.push(issue(
+                format!("/guest/public/{name}"),
+                "duplicate_guest_path",
+                format!("`{name}` is both a resource and a public read"),
+            ));
+        }
+    }
+    for (name, p) in obj(g, "public").unwrap_or(&empty) {
+        let pp = format!("/guest/public/{name}");
+        let Some(en) = p["entity"].as_str() else {
+            continue;
+        };
+        let Some(ent) = entities.get(en) else {
+            out.push(issue(
+                format!("{pp}/entity"),
+                "unknown_entity",
+                format!("no entity `{en}`"),
+            ));
+            continue;
+        };
+        let fields = obj(ent, "fields").unwrap_or(&empty);
+        for (key, f) in [
+            ("match/field", &p["match"]["field"]),
+            ("value_field", &p["value_field"]),
+        ] {
+            let f = f.as_str().unwrap_or("");
+            if !fields.contains_key(f) {
+                out.push(issue(
+                    format!("{pp}/{key}"),
+                    "unknown_field",
+                    format!("no field `{f}`"),
+                ));
+            } else if fields[f]["pii"] == true {
+                out.push(issue(
+                    format!("{pp}/{key}"),
+                    "pii_in_public_projection",
+                    format!("`{f}` is marked pii"),
+                ));
+            }
+        }
+    }
+    for (name, r) in obj(g, "resources").unwrap_or(&empty) {
+        guest_resource(out, name, r, entities, &empty);
+    }
+}
+
+fn guest_resource(out: &mut Vec<Issue>, name: &str, r: &Value, entities: &Obj, empty: &Obj) {
+    let rp = format!("/guest/resources/{name}");
+    let Some(en) = r["entity"].as_str() else {
+        return;
+    };
+    let Some(ent) = entities.get(en) else {
+        out.push(issue(
+            format!("{rp}/entity"),
+            "unknown_entity",
+            format!("no entity `{en}`"),
+        ));
+        return;
+    };
+    let fields = obj(ent, "fields").unwrap_or(empty);
+    let ty = |f: &str| fields.get(f).and_then(|x| x["type"].as_str()).unwrap_or("");
+    let known = |out: &mut Vec<Issue>, path: String, f: &str| -> bool {
+        if fields.contains_key(f) {
+            true
+        } else {
+            out.push(issue(path, "unknown_field", format!("no field `{f}`")));
+            false
+        }
+    };
+    let owner = r["owner_field"].as_str().unwrap_or("");
+    if known(out, format!("{rp}/owner_field"), owner) {
+        let max = fields[owner]["max_length"].as_u64();
+        if ty(owner) != "string" || max.is_some_and(|m| m < 64) {
+            out.push(issue(
+                format!("{rp}/owner_field"),
+                "bad_owner_field",
+                "the owner field must be a string of at least 64 characters (it holds `guest:` and a uuid)",
+            ));
+        }
+    }
+    for k in obj(r, "fixed").unwrap_or(empty).keys() {
+        known(out, format!("{rp}/fixed/{k}"), k);
+        if k == owner {
+            out.push(issue(
+                format!("{rp}/fixed/{k}"),
+                "owner_is_fixed",
+                "the owner field is set per guest, not fixed",
+            ));
+        }
+    }
+    for k in obj(r, "stamp").unwrap_or(empty).keys() {
+        if known(out, format!("{rp}/stamp/{k}"), k) && ty(k) != "date" {
+            out.push(issue(
+                format!("{rp}/stamp/{k}"),
+                "bad_stamp_field",
+                format!("`{k}` is not a date field"),
+            ));
+        }
+    }
+    for key in ["created_at_field", "title_field"] {
+        if let Some(f) = r[key].as_str() {
+            known(out, format!("{rp}/{key}"), f);
+        }
+    }
+    if r.get("title").is_some() && r.get("title_field").is_none() {
+        out.push(issue(
+            format!("{rp}/title"),
+            "title_needs_field",
+            "`title` needs `title_field`",
+        ));
+    }
+    let b = &r["body"];
+    let bf = b["field"].as_str().unwrap_or("");
+    if known(out, format!("{rp}/body/field"), bf) && ty(bf) != "json" {
+        out.push(issue(
+            format!("{rp}/body/field"),
+            "bad_body_field",
+            format!("`{bf}` is not a json field"),
+        ));
+    }
+    let allow: Vec<&str> = b["allow"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut names: BTreeSet<String> = allow.iter().map(|k| snake(k)).collect();
+    let snakes: BTreeSet<String> = allow.iter().map(|k| snake(k)).collect();
+    if snakes.len() != allow.len() {
+        out.push(issue(
+            format!("{rp}/body/allow"),
+            "ambiguous_keys",
+            "two allowed keys become the same expression name",
+        ));
+    }
+    let server_keys: Vec<(&str, Option<&str>)> = vec![
+        ("state/key", b["state"]["key"].as_str()),
+        ("note_key", b["note_key"].as_str()),
+    ];
+    for (path, k) in &server_keys {
+        if let Some(k) = k {
+            if allow.contains(k) {
+                out.push(issue(
+                    format!("{rp}/body/{path}"),
+                    "guest_writable_server_key",
+                    format!("`{k}` is owned by the server and cannot be in `allow`"),
+                ));
+            }
+        }
+    }
+    for k in obj(b, "derive").unwrap_or(empty).keys() {
+        if allow.contains(&k.as_str()) {
+            out.push(issue(
+                format!("{rp}/body/derive/{k}"),
+                "guest_writable_server_key",
+                format!("`{k}` is derived and cannot be in `allow`"),
+            ));
+        }
+    }
+    for (i, k) in b["required"].as_array().into_iter().flatten().enumerate() {
+        if !allow.contains(&k.as_str().unwrap_or("")) {
+            out.push(issue(
+                format!("{rp}/body/required/{i}"),
+                "not_allowed_key",
+                "a required key must be in `allow`",
+            ));
+        }
+    }
+    // Expressions see the allowed keys (snake case) and, for rules after derive, the derived ones.
+    let derived: Vec<String> = obj(b, "derive")
+        .unwrap_or(empty)
+        .keys()
+        .map(|k| snake(k))
+        .collect();
+    names.extend(derived.iter().cloned());
+    let view: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+    for (k, e) in obj(b, "derive").unwrap_or(empty) {
+        if let Some(e) = e.as_str() {
+            expr(out, &format!("{rp}/body/derive/{k}"), e, &view, Site::Plain);
+        }
+    }
+    for (i, rule) in b["rules"].as_array().into_iter().flatten().enumerate() {
+        if let Some(e) = rule["expr"].as_str() {
+            expr(
+                out,
+                &format!("{rp}/body/rules/{i}/expr"),
+                e,
+                &view,
+                Site::Plain,
+            );
+        }
+        if let Some(f) = rule["field"].as_str() {
+            if !allow.contains(&f) {
+                out.push(issue(
+                    format!("{rp}/body/rules/{i}/field"),
+                    "not_allowed_key",
+                    "a rule's field must be in `allow`",
+                ));
+            }
+        }
+    }
+    if let Some(t) = r["title"].as_str() {
+        expr(out, &format!("{rp}/title"), t, &view, Site::Plain);
     }
 }

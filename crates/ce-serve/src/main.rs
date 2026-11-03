@@ -41,6 +41,11 @@
 //! | `CE_PUBLIC_WORKSPACE` | the workspace name public projection URLs answer for (`/public/{installation}/{workspace}/{projection}`), served for `CE_TENANT`; unset keeps every public URL at 404 |
 //! | `CE_STAFF_ADMIN_ROLE` | the role that may use `/_staff` (default `admin`) |
 //! | `CE_MIN_PIN_LEN` | shortest PIN anyone may set, 4 to 64 (default 6) |
+//! | `CE_GUESTS` | `postgres` turns on guest accounts (`/v1/{id}/_guest/...`, table `_ce_guest`); needs the manifest's `guest` block and `CE_TENANT`; unset leaves them at 404 |
+//! | `CE_GUEST_TTL_SECS` | guest token lifetime, 1 to 86400 (default 43200) |
+//! | `CE_GUEST_RESET_URL` | page that finishes a password reset; the emailed link is this URL plus `?token=...` (required with `CE_RESEND_API_KEY`) |
+//! | `CE_RESEND_API_KEY` | Resend API key for the reset email (a secret); without it a reset request answers 503 |
+//! | `CE_MAIL_FROM` | the From address of the reset email (required with `CE_RESEND_API_KEY`) |
 //! | `CE_BIND` | listen address (default `127.0.0.1:8080`) |
 
 use ce_auth::Verifier;
@@ -518,6 +523,164 @@ impl ce_server::BlobStore for PgFiles {
     }
 }
 
+struct PgGuestDirectory(ce_store_pg::PgGuests);
+
+impl PgGuestDirectory {
+    fn map(e: ce_store_pg::GuestPgError) -> ce_server::GuestDirError {
+        match e {
+            ce_store_pg::GuestPgError::Exists => ce_server::GuestDirError::Exists,
+            ce_store_pg::GuestPgError::Missing => ce_server::GuestDirError::Missing,
+            ce_store_pg::GuestPgError::Backend => ce_server::GuestDirError::Backend,
+        }
+    }
+}
+
+fn guest_record(r: ce_store_pg::GuestRow) -> ce_server::GuestRecord {
+    ce_server::GuestRecord {
+        id: r.id,
+        email: r.email,
+        name: r.name,
+        hash: r.hash,
+        active: r.active,
+    }
+}
+
+impl ce_server::GuestDirectory for PgGuestDirectory {
+    fn create(
+        &self,
+        email: &str,
+        name: &str,
+        hash: &str,
+        _now: u64,
+    ) -> Result<ce_server::GuestRecord, ce_server::GuestDirError> {
+        self.0
+            .create(email, name, hash)
+            .map(guest_record)
+            .map_err(Self::map)
+    }
+    fn by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<ce_server::GuestRecord>, ce_server::GuestDirError> {
+        self.0
+            .by_email(email)
+            .map(|r| r.map(guest_record))
+            .map_err(Self::map)
+    }
+    fn by_id(&self, id: &str) -> Result<Option<ce_server::GuestRecord>, ce_server::GuestDirError> {
+        self.0
+            .by_id(id)
+            .map(|r| r.map(guest_record))
+            .map_err(Self::map)
+    }
+    fn set_password(&self, id: &str, hash: &str, now: u64) -> Result<(), ce_server::GuestDirError> {
+        self.0.set_password(id, hash, now).map_err(Self::map)
+    }
+    fn end_sessions(&self, id: &str, now: u64) -> Result<(), ce_server::GuestDirError> {
+        self.0.end_sessions(id, now).map_err(Self::map)
+    }
+    fn recently_ended(&self, since: u64) -> Result<Vec<(String, u64)>, ce_server::GuestDirError> {
+        self.0.recently_ended(since).map_err(Self::map)
+    }
+    fn put_reset(
+        &self,
+        id: &str,
+        token_hash: &str,
+        expires: u64,
+    ) -> Result<(), ce_server::GuestDirError> {
+        self.0.put_reset(id, token_hash, expires).map_err(Self::map)
+    }
+    fn take_reset(
+        &self,
+        token_hash: &str,
+        now: u64,
+    ) -> Result<Option<String>, ce_server::GuestDirError> {
+        self.0.take_reset(token_hash, now).map_err(Self::map)
+    }
+}
+
+/// Sends the password-reset email through Resend. The key is never printed.
+struct ResendMailer {
+    agent: ureq::Agent,
+    key: String,
+    from: String,
+}
+
+impl ce_server::Mailer for ResendMailer {
+    fn send_reset(&self, to: &str, name: &str, link: &str) -> Result<(), ce_server::MailError> {
+        let text = format!(
+            "Hi {name},\n\nSomeone asked to reset the password for this account. Use this link within an hour:\n\n{link}\n\nIf it was not you, ignore this email and your password stays as it is."
+        );
+        self.agent
+            .post("https://api.resend.com/emails")
+            .set("authorization", &format!("Bearer {}", self.key))
+            .send_json(serde_json::json!({
+                "from": self.from, "to": [to], "subject": "Reset your password", "text": text
+            }))
+            .map(|_| ())
+            .map_err(|_| ce_server::MailError)
+    }
+}
+
+/// Guest accounts when `CE_GUESTS=postgres`: the service and the tenant they belong to.
+fn guest_from_env(
+    store: &TypedPgStore,
+    manifest: &ce_manifest::Manifest,
+) -> Result<Option<(ce_server::GuestService, String)>, String> {
+    match std::env::var("CE_GUESTS").ok().as_deref() {
+        None | Some("") => return Ok(None),
+        Some("postgres") => {}
+        Some(_) => return Err("CE_GUESTS must be `postgres` or unset".into()),
+    }
+    if manifest.value["guest"]["role"].as_str().is_none() {
+        return Err("CE_GUESTS needs the manifest to declare a `guest` block".into());
+    }
+    let tenant = var("CE_TENANT")?;
+    let ttl = env_num("CE_GUEST_TTL_SECS", 12 * 3600u64)?;
+    if !(1..=86_400).contains(&ttl) {
+        return Err("CE_GUEST_TTL_SECS is 1 to 86400".into());
+    }
+    let mailer: Option<std::sync::Arc<dyn ce_server::Mailer>> =
+        match std::env::var("CE_RESEND_API_KEY") {
+            Ok(key) if !key.is_empty() => Some(std::sync::Arc::new(ResendMailer {
+                agent: ureq::AgentBuilder::new()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build(),
+                key,
+                from: var("CE_MAIL_FROM")?,
+            })),
+            _ => None,
+        };
+    let mut policy = ce_server::GuestPolicy {
+        ttl_secs: ttl,
+        ..ce_server::GuestPolicy::default()
+    };
+    if mailer.is_some() {
+        let base = var("CE_GUEST_RESET_URL")?;
+        if !base.starts_with("https://") {
+            return Err("CE_GUEST_RESET_URL must be an https URL".into());
+        }
+        policy.reset_link_base = base;
+    }
+    let guests = store
+        .guests(&tenant)
+        .map_err(|e| format!("cannot prepare guest storage: {e:?}"))?;
+    let now: std::sync::Arc<dyn Fn() -> u64 + Send + Sync> = std::sync::Arc::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    });
+    let svc = ce_server::GuestService::new(
+        std::sync::Arc::new(PgGuestDirectory(guests)),
+        mailer,
+        policy,
+        now,
+    )
+    .map_err(|e| format!("cannot start guest accounts: {e:?}"))?;
+    Ok(Some((svc, tenant)))
+}
+
 /// The gateway provider when `CE_PROVIDER_URL` is set. The token is never printed.
 fn provider_from_env() -> Result<Option<ce_provider_http::HttpProvider>, String> {
     let Some(url) = std::env::var("CE_PROVIDER_URL")
@@ -646,6 +809,7 @@ fn run() -> Result<(), String> {
     };
     let provider = provider_from_env()?;
     let login = staff_login(&store)?;
+    let guests = guest_from_env(&store, &manifest)?;
     let mut state = AppState::new(store, verifier, manifest, &installation);
     if let Some(b) = blobs {
         state = state.with_blobs(std::sync::Arc::new(PgFiles(b)));
@@ -662,6 +826,11 @@ fn run() -> Result<(), String> {
                 state = state.with_staff_admin_role(&role);
             }
         }
+    }
+    if let Some((svc, tenant)) = guests {
+        state = state
+            .with_guests(svc, &tenant)
+            .map_err(|e| format!("cannot enable guest accounts: {e}"))?;
     }
     if let Some((name, tenant)) = public_workspace()? {
         if state.verifier.public_scope(&tenant).is_none() {

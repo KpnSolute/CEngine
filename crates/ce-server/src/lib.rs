@@ -21,6 +21,8 @@ mod deliveries;
 mod events;
 mod files;
 pub mod files_migrate;
+mod guest;
+mod guest_routes;
 mod login;
 mod openapi;
 mod periods;
@@ -55,6 +57,11 @@ use std::{collections::HashMap, sync::Arc};
 pub use ce_provider::{Provider, ProviderError, ProviderRequest, ProviderResponse};
 pub use deliveries::{run_once as deliver_once, Report as DeliveryReport};
 pub use events::{relay_once, Deliver, Delivery, Relay, Report as RelayReport};
+pub use guest::{
+    normalize_email, GuestDirError, GuestDirectory, GuestError, GuestIdentity, GuestPolicy,
+    GuestRecord, GuestService, MailError, Mailer, MemoryGuests, SUB_PREFIX as GUEST_SUB_PREFIX,
+};
+pub use guest_routes::Guests;
 pub use login::{Identity, Issuing, Login, LoginError};
 pub use pin_login::{
     hash_pin, hash_pin_random, parse_staff_file, weak_pin, DirectoryError, PinLogin, PinPolicy,
@@ -86,6 +93,8 @@ pub struct AppState<S> {
     pub issuing: Option<Arc<Issuing>>,
     /// Where AI calls go (Infajn); without one `POST .../_ai/entry` answers 503.
     pub provider: Option<Arc<dyn ce_provider::Provider>>,
+    /// Guest accounts (email and password, outside the staff); without them `/_guest` answers 404.
+    pub guests: Option<Arc<Guests>>,
 }
 
 /// Looks up the tenant behind a public workspace name.
@@ -106,6 +115,7 @@ impl<S> Clone for AppState<S> {
             relay: self.relay.clone(),
             issuing: self.issuing.clone(),
             provider: self.provider.clone(),
+            guests: self.guests.clone(),
         }
     }
 }
@@ -130,6 +140,7 @@ impl<S> AppState<S> {
             relay: None,
             issuing: None,
             provider: None,
+            guests: None,
         }
     }
 
@@ -163,6 +174,24 @@ impl<S> AppState<S> {
             login,
             tenant: tenant.to_string(),
             ttl_secs,
+        }));
+        Ok(self)
+    }
+
+    /// Turns on guest accounts for `tenant`. The manifest must declare a `guest` block; guest
+    /// tokens carry that block's role and nothing else.
+    pub fn with_guests(mut self, svc: GuestService, tenant: &str) -> Result<Self, &'static str> {
+        if self.verifier.public_scope(tenant).is_none() {
+            return Err("the tenant must be a lowercase uuid");
+        }
+        let role = self.manifest.value["guest"]["role"]
+            .as_str()
+            .ok_or("the manifest declares no `guest` block")?
+            .to_string();
+        self.guests = Some(Arc::new(Guests {
+            svc: Arc::new(svc),
+            tenant: tenant.to_string(),
+            role,
         }));
         Ok(self)
     }
@@ -213,6 +242,19 @@ where
                 .put(file_put::<S>)
                 .layer(DefaultBodyLimit::max(max_file_bytes(&state.manifest))),
         )
+        .route("/v1/{inst}/_guest/signup", post(guest_routes::signup::<S>))
+        .route("/v1/{inst}/_guest/login", post(guest_routes::login::<S>))
+        .route("/v1/{inst}/_guest/logout", post(guest_routes::logout::<S>))
+        .route("/v1/{inst}/_guest/reset", post(guest_routes::reset::<S>))
+        .route(
+            "/v1/{inst}/_guest/reset/confirm",
+            post(guest_routes::reset_confirm::<S>),
+        )
+        .route(
+            "/v1/{inst}/_guest/{name}",
+            get(guest_routes::guest_get::<S>).post(guest_routes::guest_post::<S>),
+        )
+        .route("/v1/{inst}/_view/{name}", get(guest_routes::view_read::<S>))
         .route(
             "/public/{inst}/{workspace}/{projection}",
             get(public_read::<S>),
@@ -315,6 +357,17 @@ fn authenticate_any<S>(st: &AppState<S>, headers: &HeaderMap) -> Result<Principa
         .as_ref()
         .filter(|i| i.tenant == who.scope().tenant_id())
         .and_then(|i| i.login.not_before(&who.user_id))
+    {
+        if who.issued_at <= nb {
+            return Err(Problem::unauthenticated());
+        }
+    }
+    // A guest's sign-out or password reset ends the sessions that came before it.
+    if let Some(nb) = st
+        .guests
+        .as_ref()
+        .filter(|g| g.tenant == who.scope().tenant_id())
+        .and_then(|g| g.svc.not_before(&who.user_id))
     {
         if who.issued_at <= nb {
             return Err(Problem::unauthenticated());

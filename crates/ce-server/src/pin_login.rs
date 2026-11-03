@@ -186,6 +186,12 @@ pub fn hash_pin_random(pin: &str) -> Option<String> {
     hash_pin(pin, &salt)
 }
 
+/// True when `secret` matches a stored hash (the same format serves PINs and guest passwords).
+/// A hash that does not parse never matches.
+pub(crate) fn check_secret(secret: &str, encoded: &str) -> bool {
+    parse_hash(encoded).is_some_and(|p| verify(secret, &p))
+}
+
 fn verify(pin: &str, p: &Parsed) -> bool {
     match derive(pin, &p.params, &p.salt, p.digest.len()) {
         Some(got) => got.ct_eq(&p.digest).into(),

@@ -17,6 +17,7 @@
 //! from user input.
 
 mod blobs;
+mod guest;
 pub mod import;
 pub mod loader;
 pub mod migrations;
@@ -28,6 +29,7 @@ mod staff;
 mod tls;
 mod typed;
 pub use blobs::PgBlobs;
+pub use guest::{GuestPgError, GuestRow, PgGuests};
 pub use staff::{PgStaff, StaffError, StaffRow};
 pub use tls::{connect, Tls};
 pub use typed::{PoolConfig, TypedPgStore};
