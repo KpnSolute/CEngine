@@ -209,6 +209,7 @@ impl TypedPgStore {
         ))
         .map_err(db)?;
         tx.batch_execute(&crate::blobs::ddl(schema)).map_err(db)?;
+        tx.batch_execute(&crate::jobs::ddl(schema)).map_err(db)?;
         tx.batch_execute(&crate::staff::ddl(schema)).map_err(db)?;
         tx.batch_execute(&crate::migrations::history_ddl(schema))
             .map_err(db)?;
@@ -362,6 +363,12 @@ impl TypedPgStore {
     /// table when an installation made before files existed does not have it yet.
     pub fn blobs(&self) -> Result<crate::PgBlobs, StoreError> {
         crate::PgBlobs::open(self.pool.clone(), &self.schema)
+    }
+
+    /// Durable import jobs kept in this installation's schema, sharing the store's connections.
+    /// Creates the tables when an installation made before jobs existed does not have them yet.
+    pub fn jobs(&self) -> Result<crate::ImportJobs, StoreError> {
+        crate::ImportJobs::open(self.pool.clone(), &self.schema)
     }
 
     /// Drops the schema and everything in it. For tests.
