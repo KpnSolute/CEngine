@@ -609,6 +609,26 @@ pub(crate) fn execute_all_with<S: Store>(
     ops: &[(String, Op)],
     rehearse: bool,
 ) -> Result<Vec<Option<Record>>, Failure> {
+    execute_all_checked(store, env, ops, &[], rehearse)
+}
+
+/// A condition on a record that must hold after all writes of a job, checked in the same
+/// transaction: if it does not, nothing is kept.
+pub(crate) struct Check {
+    pub entity: String,
+    pub id: String,
+    pub field: String,
+    pub equals: Value,
+}
+
+/// Like [`execute_all_with`], then verifies `checks` before the transaction may commit.
+pub(crate) fn execute_all_checked<S: Store>(
+    store: &S,
+    env: &Env,
+    ops: &[(String, Op)],
+    checks: &[Check],
+    rehearse: bool,
+) -> Result<Vec<Option<Record>>, Failure> {
     let mut done = Vec::new();
     let mut failed = None;
     let out = store.atomic(&mut |tx| {
@@ -641,6 +661,23 @@ pub(crate) fn execute_all_with<S: Store>(
                     failed = Some(f);
                     return Err(e);
                 }
+            }
+        }
+        for (i, c) in checks.iter().enumerate() {
+            let got = match tx.get(env.scope, &c.entity, &c.id) {
+                Ok(r) => r.data.get(&c.field).cloned().unwrap_or(Value::Null),
+                Err(e) => return Err(e),
+            };
+            if got != c.equals {
+                failed = Some(Failure::Rules(vec![FieldError {
+                    path: format!("/checks/{i}"),
+                    code: "post_condition_failed",
+                    detail: format!(
+                        "{}.{} is {} after the import, expected {}",
+                        c.entity, c.field, got, c.equals
+                    ),
+                }]));
+                return Err(StoreError::Aborted);
             }
         }
         if rehearse {

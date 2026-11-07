@@ -15,6 +15,7 @@
 
 #[cfg(feature = "contract-tests")]
 pub mod contract;
+pub mod jobs;
 mod memory;
 
 pub use ce_auth::TenantScope;
