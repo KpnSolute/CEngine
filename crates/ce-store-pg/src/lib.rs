@@ -18,6 +18,7 @@
 
 mod blobs;
 pub mod import;
+mod jobs;
 pub mod loader;
 pub mod migrations;
 mod pool;
@@ -28,6 +29,7 @@ mod staff;
 mod tls;
 mod typed;
 pub use blobs::PgBlobs;
+pub use jobs::{ImportJobs, Job, JobError, JobEvent, JobState, NewJob};
 pub use staff::{PgStaff, StaffError, StaffRow};
 pub use tls::{connect, Tls};
 pub use typed::{PoolConfig, TypedPgStore};
