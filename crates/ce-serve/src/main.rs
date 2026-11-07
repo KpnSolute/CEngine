@@ -653,11 +653,15 @@ fn run() -> Result<(), String> {
         .as_deref()
     {
         None | Some("off") => None,
-        Some("on") => Some(
-            store
-                .jobs()
-                .map_err(|e| format!("cannot prepare import jobs: {e:?}"))?,
-        ),
+        // An optional capability must not take the service down: if the tables cannot be made
+        // (for example the database user may not create them), say so and serve without jobs.
+        Some("on") => match store.jobs() {
+            Ok(j) => Some(j),
+            Err(e) => {
+                eprintln!("CE_JOBS=on but import jobs could not be prepared, continuing without them: {e:?}");
+                None
+            }
+        },
         Some(_) => return Err("CE_JOBS must be `on`, `off` or unset".into()),
     };
     let provider = provider_from_env()?;
