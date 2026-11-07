@@ -1,4 +1,4 @@
-//! Durable import jobs on a real Postgres (`CE_TEST_DATABASE_URL`; CI sets `CE_REQUIRE_DB`).
+﻿//! Durable import jobs on a real Postgres (`CE_TEST_DATABASE_URL`; CI sets `CE_REQUIRE_DB`).
 use ce_store_pg::{ImportJobs, JobError, JobState, NewJob, TypedPgStore};
 use serde_json::json;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -50,6 +50,7 @@ fn new<'a>(tenant: &'a str, key: &'a str, scope: &'a str) -> NewJob<'a> {
         file_sha256: Some("abc"),
         upload_ref: Some("uploads/abc"),
         actor: "tester",
+        actor_role: Some("manager"),
         total: 502,
     }
 }
@@ -181,6 +182,11 @@ fn staging_is_repeatable_and_closed_once_the_job_leaves_parsing() {
     let page = jobs.staged(T1, &a.id, 1, 2).unwrap();
     assert_eq!(page.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [2, 3]);
     assert_eq!(jobs.staged_count(T2, &a.id).unwrap(), 0, "tenant isolation");
+    // The same position with different content is refused, not silently ignored.
+    assert_eq!(
+        jobs.stage_rows(T1, &a.id, &[(0, json!({"line": 99}))]),
+        Err(JobError::StagedMismatch { seq: 0 })
+    );
     queue(&jobs, T1, &a.id);
     assert_eq!(
         jobs.stage_rows(T1, &a.id, &[(9, json!({}))]),

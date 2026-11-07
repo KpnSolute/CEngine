@@ -19,24 +19,13 @@
 //!   the tenant id given by the caller's verified scope.
 
 use crate::pool::Pool;
+use ce_store::jobs::STATES;
 use ce_store::StoreError;
 use postgres::error::SqlState;
 use serde_json::Value;
 use std::sync::Arc;
 
-const STATES: &[&str] = &[
-    "uploaded",
-    "parsing",
-    "needs_review",
-    "validated",
-    "queued",
-    "processing",
-    "committing",
-    "completed",
-    "retryable",
-    "failed",
-    "cancelled",
-];
+pub use ce_store::jobs::{Job, JobError, JobEvent, JobState, JobStore, NewJob};
 
 pub(crate) fn ddl(schema: &str) -> String {
     let states = STATES
@@ -56,6 +45,7 @@ pub(crate) fn ddl(schema: &str) -> String {
                file_sha256      text,
                upload_ref       text,
                actor            text        NOT NULL,
+               actor_role       text,
                state            text        NOT NULL CHECK (state IN ({states})),
                total            bigint      NOT NULL DEFAULT 0 CHECK (total >= 0),
                processed        bigint      NOT NULL DEFAULT 0 CHECK (processed >= 0),
@@ -97,204 +87,8 @@ pub(crate) fn ddl(schema: &str) -> String {
     )
 }
 
-/// Where a job is in its life. `Completed`, `Failed` and `Cancelled` are final.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JobState {
-    Uploaded,
-    Parsing,
-    NeedsReview,
-    Validated,
-    Queued,
-    Processing,
-    Committing,
-    Completed,
-    /// Stopped by a transient problem; may be queued again.
-    Retryable,
-    Failed,
-    Cancelled,
-}
-
-impl JobState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            JobState::Uploaded => "uploaded",
-            JobState::Parsing => "parsing",
-            JobState::NeedsReview => "needs_review",
-            JobState::Validated => "validated",
-            JobState::Queued => "queued",
-            JobState::Processing => "processing",
-            JobState::Committing => "committing",
-            JobState::Completed => "completed",
-            JobState::Retryable => "retryable",
-            JobState::Failed => "failed",
-            JobState::Cancelled => "cancelled",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<JobState> {
-        STATES.iter().position(|x| *x == s).map(|i| ALL[i])
-    }
-
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            JobState::Completed | JobState::Failed | JobState::Cancelled
-        )
-    }
-
-    /// Whether a job may move from `self` to `to`. A job that is committing cannot be cancelled:
-    /// its final post is one transaction that either lands or does not.
-    pub fn can_move_to(self, to: JobState) -> bool {
-        use JobState::*;
-        matches!(
-            (self, to),
-            (Uploaded, Parsing | Cancelled)
-                | (
-                    Parsing,
-                    NeedsReview | Validated | Retryable | Failed | Cancelled
-                )
-                | (NeedsReview, Validated | Cancelled)
-                | (Validated, Queued | Cancelled)
-                | (Queued, Processing | Cancelled)
-                | (Processing, Committing | Retryable | Failed | Cancelled)
-                | (Committing, Completed | Retryable | Failed)
-                | (Retryable, Queued | Failed | Cancelled)
-        )
-    }
-}
-
-const ALL: [JobState; 11] = [
-    JobState::Uploaded,
-    JobState::Parsing,
-    JobState::NeedsReview,
-    JobState::Validated,
-    JobState::Queued,
-    JobState::Processing,
-    JobState::Committing,
-    JobState::Completed,
-    JobState::Retryable,
-    JobState::Failed,
-    JobState::Cancelled,
-];
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum JobError {
-    Store(StoreError),
-    /// The idempotency key was used before for a different request.
-    IdempotencyKeyReused,
-    /// The scope already has a live job.
-    ScopeBusy {
-        job_id: String,
-    },
-    BadTransition {
-        from: JobState,
-        to: JobState,
-    },
-    /// The job is not in the state the caller expected.
-    StateChanged {
-        actual: JobState,
-    },
-    NotFound,
-    /// The caller does not hold a live lease on the job.
-    LeaseLost,
-}
-
-impl std::fmt::Display for JobError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            JobError::Store(e) => write!(f, "store error: {e:?}"),
-            JobError::IdempotencyKeyReused => {
-                write!(
-                    f,
-                    "this idempotency key was already used for a different job"
-                )
-            }
-            JobError::ScopeBusy { job_id } => {
-                write!(
-                    f,
-                    "another import for this scope is still live (job {job_id})"
-                )
-            }
-            JobError::BadTransition { from, to } => {
-                write!(
-                    f,
-                    "a job cannot move from {} to {}",
-                    from.as_str(),
-                    to.as_str()
-                )
-            }
-            JobError::StateChanged { actual } => {
-                write!(f, "the job is now {}", actual.as_str())
-            }
-            JobError::NotFound => write!(f, "no such job"),
-            JobError::LeaseLost => write!(f, "the worker no longer holds this job's lease"),
-        }
-    }
-}
-
-impl std::error::Error for JobError {}
-
 fn db(e: postgres::Error) -> JobError {
     JobError::Store(StoreError::Backend(e.to_string()))
-}
-
-impl From<StoreError> for JobError {
-    fn from(e: StoreError) -> Self {
-        JobError::Store(e)
-    }
-}
-
-/// A job as stored. Times are milliseconds since the Unix epoch.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Job {
-    pub id: String,
-    pub tenant_id: String,
-    pub kind: String,
-    pub scope_key: String,
-    pub generation: i32,
-    pub idempotency_key: String,
-    pub fingerprint: String,
-    pub file_sha256: Option<String>,
-    pub upload_ref: Option<String>,
-    pub actor: String,
-    pub state: JobState,
-    pub total: i64,
-    pub processed: i64,
-    pub attempt: i32,
-    pub lease_owner: Option<String>,
-    pub lease_expires_at: Option<i64>,
-    pub error_code: Option<String>,
-    pub error_message: Option<String>,
-    pub result: Option<Value>,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub completed_at: Option<i64>,
-}
-
-/// What the caller supplies to start a job.
-#[derive(Debug, Clone)]
-pub struct NewJob<'a> {
-    pub tenant: &'a str,
-    pub kind: &'a str,
-    /// Names the thing being imported (for example `vendor/usfoods/invoice/511063`). At most one
-    /// live job exists per scope.
-    pub scope_key: &'a str,
-    pub idempotency_key: &'a str,
-    /// A hash of the request that matters (file hash, period, options). The same key with a
-    /// different fingerprint is refused.
-    pub fingerprint: &'a str,
-    pub file_sha256: Option<&'a str>,
-    pub upload_ref: Option<&'a str>,
-    pub actor: &'a str,
-    pub total: i64,
-}
-
-/// One entry of a job's transition log.
-#[derive(Debug, Clone, PartialEq)]
-pub struct JobEvent {
-    pub from_state: Option<String>,
-    pub to_state: String,
-    pub detail: Value,
 }
 
 const COLS: &str = "id::text, tenant_id::text, kind, scope_key, generation, idempotency_key, \
@@ -302,7 +96,7 @@ const COLS: &str = "id::text, tenant_id::text, kind, scope_key, generation, idem
     (extract(epoch from lease_expires_at) * 1000)::bigint, error_code, error_message, result, \
     (extract(epoch from created_at) * 1000)::bigint, \
     (extract(epoch from updated_at) * 1000)::bigint, \
-    (extract(epoch from completed_at) * 1000)::bigint";
+    (extract(epoch from completed_at) * 1000)::bigint, actor_role";
 
 fn job_from(r: &postgres::Row) -> Job {
     let state: String = r.get(10);
@@ -329,6 +123,7 @@ fn job_from(r: &postgres::Row) -> Job {
         created_at: r.get(19),
         updated_at: r.get(20),
         completed_at: r.get(21),
+        actor_role: r.get(22),
     }
 }
 
@@ -415,8 +210,8 @@ impl ImportJobs {
             .query_one(
                 &format!(
                     "INSERT INTO {t} (tenant_id, kind, scope_key, generation, idempotency_key, \
-                     fingerprint, file_sha256, upload_ref, actor, state, total) \
-                     VALUES ($1::text::uuid, $2, $3, $4, $5, $6, $7, $8, $9, 'uploaded', $10) \
+                     fingerprint, file_sha256, upload_ref, actor, actor_role, state, total) \
+                     VALUES ($1::text::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $11, 'uploaded', $10) \
                      RETURNING {COLS}"
                 ),
                 &[
@@ -430,6 +225,7 @@ impl ImportJobs {
                     &n.upload_ref,
                     &n.actor,
                     &n.total,
+                    &n.actor_role,
                 ],
             )
             .map_err(|e| {
@@ -738,7 +534,7 @@ impl ImportJobs {
         }
         let mut added = 0;
         for (seq, payload) in rows {
-            added += tx
+            let new = tx
                 .execute(
                     &format!(
                         r#"INSERT INTO "{s}"."_ce_import_staging" (job_id, tenant_id, seq, payload)
@@ -748,6 +544,24 @@ impl ImportJobs {
                     &[&id, &tenant, seq, payload],
                 )
                 .map_err(db)?;
+            if new == 0 {
+                // A repeat must carry the same content; anything else is a client bug that would
+                // otherwise be silently dropped.
+                let same: bool = tx
+                    .query_one(
+                        &format!(
+                            r#"SELECT payload = $3 FROM "{s}"."_ce_import_staging"
+                               WHERE job_id = $1::text::uuid AND seq = $2"#
+                        ),
+                        &[&id, seq, payload],
+                    )
+                    .map_err(db)?
+                    .get(0);
+                if !same {
+                    return Err(JobError::StagedMismatch { seq: *seq });
+                }
+            }
+            added += new;
         }
         tx.commit().map_err(db)?;
         Ok(added)
@@ -821,39 +635,60 @@ fn log_event(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn states_round_trip_and_final_states_have_no_exits() {
-        for s in ALL {
-            assert_eq!(JobState::parse(s.as_str()), Some(s));
-            if s.is_terminal() {
-                assert!(
-                    ALL.iter().all(|t| !s.can_move_to(*t)),
-                    "{s:?} must be final"
-                );
-            }
-        }
-        assert_eq!(STATES.len(), ALL.len());
+impl JobStore for ImportJobs {
+    fn create(&self, n: &NewJob<'_>) -> Result<(Job, bool), JobError> {
+        ImportJobs::create(self, n)
     }
-
-    #[test]
-    fn the_happy_path_is_allowed_and_shortcuts_are_not() {
-        use JobState::*;
-        let path = [
-            Uploaded, Parsing, Validated, Queued, Processing, Committing, Completed,
-        ];
-        for w in path.windows(2) {
-            assert!(w[0].can_move_to(w[1]), "{:?} -> {:?}", w[0], w[1]);
-        }
-        assert!(!Uploaded.can_move_to(Completed));
-        assert!(!Validated.can_move_to(Processing));
-        assert!(
-            !Committing.can_move_to(Cancelled),
-            "a commit in flight cannot be cancelled"
-        );
-        assert!(Retryable.can_move_to(Queued));
+    fn get(&self, tenant: &str, id: &str) -> Result<Job, JobError> {
+        ImportJobs::get(self, tenant, id)
+    }
+    fn events(&self, tenant: &str, id: &str) -> Result<Vec<JobEvent>, JobError> {
+        ImportJobs::events(self, tenant, id)
+    }
+    fn transition(
+        &self,
+        tenant: &str,
+        id: &str,
+        from: JobState,
+        to: JobState,
+        error: Option<(&str, &str)>,
+    ) -> Result<Job, JobError> {
+        ImportJobs::transition(self, tenant, id, from, to, error)
+    }
+    fn complete(&self, tenant: &str, id: &str, result: &Value) -> Result<Job, JobError> {
+        ImportJobs::complete(self, tenant, id, result)
+    }
+    fn claim(
+        &self,
+        worker: &str,
+        lease_secs: i64,
+        max_attempts: i32,
+    ) -> Result<Option<Job>, JobError> {
+        ImportJobs::claim(self, worker, lease_secs, max_attempts)
+    }
+    fn heartbeat(
+        &self,
+        tenant: &str,
+        id: &str,
+        worker: &str,
+        lease_secs: i64,
+        processed: Option<i64>,
+    ) -> Result<Job, JobError> {
+        ImportJobs::heartbeat(self, tenant, id, worker, lease_secs, processed)
+    }
+    fn stage_rows(&self, tenant: &str, id: &str, rows: &[(i32, Value)]) -> Result<u64, JobError> {
+        ImportJobs::stage_rows(self, tenant, id, rows)
+    }
+    fn staged(
+        &self,
+        tenant: &str,
+        id: &str,
+        after: i32,
+        limit: i64,
+    ) -> Result<Vec<(i32, Value)>, JobError> {
+        ImportJobs::staged(self, tenant, id, after, limit)
+    }
+    fn staged_count(&self, tenant: &str, id: &str) -> Result<i64, JobError> {
+        ImportJobs::staged_count(self, tenant, id)
     }
 }

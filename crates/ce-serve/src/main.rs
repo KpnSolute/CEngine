@@ -34,6 +34,7 @@
 //! | `CE_LOGIN_LOCKOUT_SECS` | how long it stays locked (default 900) |
 //! | `CE_ROLE_LADDER` | comma-separated roles, lowest first (default `staff,assistant,manager,admin,sudo`); a role also grants those below it |
 //! | `CE_FILES` | `postgres` keeps uploaded files in the installation's schema (`_ce_blobs`); unset leaves file routes answering 503 |
+//! | `CE_JOBS` | `on` turns on durable import jobs (`/v1/{id}/_jobs`) and their background worker; it creates the three `_ce_import_*` tables in the schema if missing. Unset or `off` leaves the routes answering 503 and no worker running |
 //! | `CE_PROVIDER_URL` | the host gateway's https endpoint for provider calls (AI invoice import); unset leaves them answering 503 |
 //! | `CE_PROVIDER_TOKEN` | bearer token the gateway expects (a secret; required with `CE_PROVIDER_URL`) |
 //! | `CE_PROVIDER_TIMEOUT_SECS` | longest one provider call may take, 1 to 300 (default 30) |
@@ -644,9 +645,31 @@ fn run() -> Result<(), String> {
         ),
         Some(_) => return Err("CE_FILES must be `postgres` or unset".into()),
     };
+    // Durable import jobs (#103). Off unless asked for; turning it on creates the three job
+    // tables in this schema if they are missing (additive, `IF NOT EXISTS`).
+    let jobs = match std::env::var("CE_JOBS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .as_deref()
+    {
+        None | Some("off") => None,
+        Some("on") => Some(
+            store
+                .jobs()
+                .map_err(|e| format!("cannot prepare import jobs: {e:?}"))?,
+        ),
+        Some(_) => return Err("CE_JOBS must be `on`, `off` or unset".into()),
+    };
     let provider = provider_from_env()?;
     let login = staff_login(&store)?;
     let mut state = AppState::new(store, verifier, manifest, &installation);
+    if let Some(j) = jobs {
+        state = state.with_jobs(std::sync::Arc::new(j));
+        spawn_job_worker(
+            state.clone(),
+            format!("{installation}-{}", std::process::id()),
+        );
+    }
     if let Some(b) = blobs {
         state = state.with_blobs(std::sync::Arc::new(PgFiles(b)));
     }
@@ -691,6 +714,31 @@ fn run() -> Result<(), String> {
     drop(rt);
     drop(app);
     Ok(())
+}
+
+/// Runs the import-job worker on its own thread for the life of the process. It posts one job at
+/// a time; a restart mid-commit loses nothing, because the post is one transaction and the lease
+/// lets the next pass pick the job up.
+fn spawn_job_worker(state: AppState<TypedPgStore>, worker: String) {
+    const LEASE_SECS: i64 = 300;
+    const MAX_ATTEMPTS: i32 = 3;
+    std::thread::spawn(move || {
+        // Polling is one cheap query; 5 seconds is the longest a queued job waits to start.
+        let idle = std::time::Duration::from_secs(5);
+        loop {
+            match ce_server::run_next_job(&state, &worker, LEASE_SECS, MAX_ATTEMPTS) {
+                Ok(Some(run)) => eprintln!(
+                    "job {} ({}): {} {}",
+                    run.job_id, run.tenant_id, run.outcome, run.detail
+                ),
+                Ok(None) => std::thread::sleep(idle),
+                Err(e) => {
+                    eprintln!("job worker: {e}");
+                    std::thread::sleep(idle * 5);
+                }
+            }
+        }
+    });
 }
 
 /// `ce-serve migrate [--plan] [--adopt]`: applies the migrations this binary carries to an

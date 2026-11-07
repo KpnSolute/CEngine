@@ -21,6 +21,7 @@ mod deliveries;
 mod events;
 mod files;
 pub mod files_migrate;
+mod jobs;
 mod login;
 mod openapi;
 mod periods;
@@ -34,6 +35,7 @@ mod writes;
 pub use writes::{settle_imported, SettleReport};
 
 pub use files::{BlobStore, MemoryBlobs};
+pub use jobs::{run_next as run_next_job, JobRun};
 
 pub use problem::Problem;
 
@@ -86,6 +88,8 @@ pub struct AppState<S> {
     pub issuing: Option<Arc<Issuing>>,
     /// Where AI calls go (Infajn); without one `POST .../_ai/entry` answers 503.
     pub provider: Option<Arc<dyn ce_provider::Provider>>,
+    /// Durable import jobs (`/_jobs`); without one those routes answer 503.
+    pub jobs: Option<Arc<dyn ce_store::jobs::JobStore>>,
 }
 
 /// Looks up the tenant behind a public workspace name.
@@ -106,6 +110,7 @@ impl<S> Clone for AppState<S> {
             relay: self.relay.clone(),
             issuing: self.issuing.clone(),
             provider: self.provider.clone(),
+            jobs: self.jobs.clone(),
         }
     }
 }
@@ -130,7 +135,14 @@ impl<S> AppState<S> {
             relay: None,
             issuing: None,
             provider: None,
+            jobs: None,
         }
+    }
+
+    /// Turns on durable import jobs (`/_jobs`) backed by the host's job store.
+    pub fn with_jobs(mut self, jobs: Arc<dyn ce_store::jobs::JobStore>) -> Self {
+        self.jobs = Some(jobs);
+        self
     }
 
     /// Attaches the host's provider handle (Infajn), which makes every call to an AI model.
@@ -218,6 +230,11 @@ where
             get(public_read::<S>),
         )
         .route("/v1/{inst}/_batch", post(batch::<S>))
+        .route("/v1/{inst}/_jobs", post(jobs::create::<S>))
+        .route("/v1/{inst}/_jobs/{id}", get(jobs::status::<S>))
+        .route("/v1/{inst}/_jobs/{id}/rows", post(jobs::stage::<S>))
+        .route("/v1/{inst}/_jobs/{id}/submit", post(jobs::submit::<S>))
+        .route("/v1/{inst}/_jobs/{id}/cancel", post(jobs::cancel::<S>))
         .route("/v1/{inst}/_barcode", get(barcode::<S>))
         .route(
             "/v1/{inst}/_auth/token",
