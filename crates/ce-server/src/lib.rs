@@ -230,11 +230,17 @@ where
             get(public_read::<S>),
         )
         .route("/v1/{inst}/_batch", post(batch::<S>))
-        .route("/v1/{inst}/_jobs", post(jobs::create::<S>))
+        .route(
+            "/v1/{inst}/_jobs",
+            post(jobs::create::<S>).get(jobs::list::<S>),
+        )
         .route("/v1/{inst}/_jobs/{id}", get(jobs::status::<S>))
         .route("/v1/{inst}/_jobs/{id}/rows", post(jobs::stage::<S>))
         .route("/v1/{inst}/_jobs/{id}/submit", post(jobs::submit::<S>))
         .route("/v1/{inst}/_jobs/{id}/cancel", post(jobs::cancel::<S>))
+        .route("/v1/{inst}/_jobs/{id}/pause", post(jobs::pause::<S>))
+        .route("/v1/{inst}/_jobs/{id}/resume", post(jobs::resume::<S>))
+        .route("/v1/{inst}/_jobs/{id}/restart", post(jobs::restart::<S>))
         .route("/v1/{inst}/_barcode", get(barcode::<S>))
         .route(
             "/v1/{inst}/_auth/token",

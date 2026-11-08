@@ -1,4 +1,4 @@
-﻿//! Durable import jobs: types, the state machine and the `JobStore` contract (CEngine #103).
+//! Durable import jobs: types, the state machine and the `JobStore` contract (CEngine #103).
 //!
 //! The server owns a long, multi-step import as one job row with a checked state machine, so a
 //! lost response, a closed tab or a restarted process no longer decides whether an import
@@ -19,6 +19,7 @@ pub const STATES: &[&str] = &[
     "retryable",
     "failed",
     "cancelled",
+    "paused",
 ];
 
 /// Where a job is in its life. `Completed`, `Failed` and `Cancelled` are final.
@@ -36,6 +37,8 @@ pub enum JobState {
     Retryable,
     Failed,
     Cancelled,
+    /// Held by a person before a worker picks it up; resuming queues it again.
+    Paused,
 }
 
 impl JobState {
@@ -52,6 +55,7 @@ impl JobState {
             JobState::Retryable => "retryable",
             JobState::Failed => "failed",
             JobState::Cancelled => "cancelled",
+            JobState::Paused => "paused",
         }
     }
 
@@ -83,11 +87,14 @@ impl JobState {
                 | (Processing, Committing | Retryable | Failed | Cancelled)
                 | (Committing, Completed | Retryable | Failed)
                 | (Retryable, Queued | Failed | Cancelled)
+                // Pause only holds a job no worker has; a running post is one transaction.
+                | (Queued | Retryable, Paused)
+                | (Paused, Queued | Cancelled)
         )
     }
 }
 
-pub const ALL: [JobState; 11] = [
+pub const ALL: [JobState; 12] = [
     JobState::Uploaded,
     JobState::Parsing,
     JobState::NeedsReview,
@@ -99,6 +106,7 @@ pub const ALL: [JobState; 11] = [
     JobState::Retryable,
     JobState::Failed,
     JobState::Cancelled,
+    JobState::Paused,
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,6 +233,8 @@ pub struct JobEvent {
     pub from_state: Option<String>,
     pub to_state: String,
     pub detail: Value,
+    /// When the move happened, in milliseconds since the epoch (when the store records it).
+    pub at: Option<i64>,
 }
 
 /// What a store must offer to run import jobs. Every method except `claim` takes the tenant id of
@@ -273,6 +283,11 @@ pub trait JobStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<(i32, Value)>, JobError>;
     fn staged_count(&self, tenant: &str, id: &str) -> Result<i64, JobError>;
+    /// The tenant's jobs, newest first, at most `limit`; only `actor`'s when it is given.
+    fn list(&self, tenant: &str, actor: Option<&str>, limit: i64) -> Result<Vec<Job>, JobError>;
+    /// Starts the next generation of a failed or cancelled job with the same staged rows, in
+    /// `uploaded`, ready to be submitted. Repeating it returns the generation it already made.
+    fn restart(&self, tenant: &str, id: &str, actor: &str) -> Result<Job, JobError>;
 }
 
 #[cfg(test)]
@@ -309,5 +324,21 @@ mod tests {
             "a commit in flight cannot be cancelled"
         );
         assert!(Retryable.can_move_to(Queued));
+    }
+
+    #[test]
+    fn pause_holds_only_jobs_no_worker_has() {
+        use JobState::*;
+        assert!(Queued.can_move_to(Paused));
+        assert!(Retryable.can_move_to(Paused));
+        assert!(Paused.can_move_to(Queued));
+        assert!(Paused.can_move_to(Cancelled));
+        assert!(!Processing.can_move_to(Paused));
+        assert!(!Committing.can_move_to(Paused));
+        assert!(
+            !Paused.can_move_to(Processing),
+            "a paused job is never claimed"
+        );
+        assert!(!Paused.is_terminal());
     }
 }

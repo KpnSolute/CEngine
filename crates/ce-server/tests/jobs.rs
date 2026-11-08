@@ -130,6 +130,12 @@ impl JobStore for DropFirstComplete {
     fn staged_count(&self, t: &str, id: &str) -> Result<i64, JobError> {
         self.inner.staged_count(t, id)
     }
+    fn list(&self, t: &str, a: Option<&str>, l: i64) -> Result<Vec<Job>, JobError> {
+        self.inner.list(t, a, l)
+    }
+    fn restart(&self, t: &str, id: &str, by: &str) -> Result<Job, JobError> {
+        self.inner.restart(t, id, by)
+    }
 }
 
 struct Rig {
@@ -628,5 +634,70 @@ async fn without_the_feature_the_routes_say_so() {
         .await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
     assert_eq!(v["code"], "jobs_unavailable");
+    close(r).await;
+}
+
+#[tokio::test]
+async fn jobs_can_be_listed_paused_resumed_and_restarted() {
+    let Some(mut r) = rig(true, false).await else {
+        return;
+    };
+    let id = queued_job(&mut r, "k1", "s", vec![widget(W1, "bolt", 5)]).await;
+
+    // The starter sees the job in the list; a colleague who is not an admin does not.
+    let (s, v) = r.own("GET", "/_jobs?limit=10", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"][0]["id"], json!(id));
+    let (s, v) = r.call(T1, "dropbox", "GET", "/_jobs", None, None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"], json!([]));
+    let (s, _) = r
+        .call(
+            T1,
+            "dropbox",
+            "POST",
+            &format!("/_jobs/{id}/pause"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Paused: no worker runs it, and pausing again changes nothing.
+    let (s, v) = r.own("POST", &format!("/_jobs/{id}/pause"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["state"], "paused");
+    let (s, _) = r.own("POST", &format!("/_jobs/{id}/pause"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(r.work(60).await.is_none());
+    assert!(r.list("widget").await.is_empty());
+    // A paused job cannot be restarted; it is still live.
+    let (s, _) = r.own("POST", &format!("/_jobs/{id}/restart"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // Resumed: it runs.
+    let (s, v) = r.own("POST", &format!("/_jobs/{id}/resume"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["state"], "queued");
+    assert!(r.work(60).await.is_some());
+    assert_eq!(r.state_of(&id).await["state"], "completed");
+    let ev = r.state_of(&id).await["events"].clone();
+    assert!(ev.as_array().unwrap().iter().all(|e| e["at"].is_number()));
+    // A finished job cannot be paused.
+    let (s, _) = r.own("POST", &format!("/_jobs/{id}/pause"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // A cancelled job restarts as generation 2 with its rows, ready to submit.
+    let id2 = queued_job(&mut r, "k2", "s2", vec![widget(W2, "nut", 1)]).await;
+    r.own("POST", &format!("/_jobs/{id2}/cancel"), None).await;
+    let (s, v) = r.own("POST", &format!("/_jobs/{id2}/restart"), None).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(v["data"]["generation"], 2);
+    assert_eq!(v["data"]["state"], "uploaded");
+    let id3 = v["data"]["id"].as_str().unwrap().to_string();
+    let (s, v) = r.own("POST", &format!("/_jobs/{id3}/submit"), None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    assert!(r.work(60).await.is_some());
+    assert_eq!(r.list("widget").await.len(), 2);
     close(r).await;
 }
