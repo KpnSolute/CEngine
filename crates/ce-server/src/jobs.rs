@@ -29,7 +29,7 @@ use super::{
 };
 use axum::{
     body::Bytes,
-    extract::{rejection::BytesRejection, Path, State},
+    extract::{rejection::BytesRejection, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -39,6 +39,7 @@ use ce_policy::Access;
 use ce_store::jobs::{Job, JobError, JobEvent, JobState, JobStore, NewJob};
 use ce_store::Store;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The most rows one job may hold.
@@ -127,7 +128,7 @@ fn job_json(j: &Job) -> Value {
 }
 
 fn event_json(e: &JobEvent) -> Value {
-    json!({"from": e.from_state, "to": e.to_state, "detail": e.detail})
+    json!({"from": e.from_state, "to": e.to_state, "detail": e.detail, "at": e.at})
 }
 
 fn envelope(status: StatusCode, rid: &str, data: Value) -> Response {
@@ -594,6 +595,130 @@ pub(crate) async fn cancel<S: Store + Send + Sync + 'static>(
         })
         .await?;
         Ok(envelope(StatusCode::OK, &rid, job_json(&job)))
+    };
+    finish(&rid, run.await)
+}
+
+/// `GET .../_jobs?limit=100&mine=true`: newest first. The staff-admin role sees every job in the
+/// installation unless it asks for its own; anyone else sees only the jobs they started.
+pub(crate) async fn list<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path(inst): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authed(&st, &headers, &inst)?;
+        let jobs = store_of(&st)?;
+        let tenant = who.scope().tenant_id().to_string();
+        let limit = q
+            .get("limit")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(100)
+            .clamp(1, 500);
+        let mine = q.get("mine").is_some_and(|v| v == "true" || v == "1");
+        let actor = if mine || !who.has_role(&st.staff_admin_role) {
+            Some(who.user_id.clone())
+        } else {
+            None
+        };
+        let rows = blocking(move || {
+            jobs.list(&tenant, actor.as_deref(), limit)
+                .map_err(job_problem)
+        })
+        .await?;
+        Ok(envelope(
+            StatusCode::OK,
+            &rid,
+            Value::Array(rows.iter().map(job_json).collect()),
+        ))
+    };
+    finish(&rid, run.await)
+}
+
+/// Moves a job the caller may touch from one of `from` to `to`. Repeating it once the job is
+/// already in `to` returns the job unchanged.
+async fn hold<S: Store + Send + Sync + 'static>(
+    st: AppState<S>,
+    inst: String,
+    id: String,
+    headers: HeaderMap,
+    from: &'static [JobState],
+    to: JobState,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authed(&st, &headers, &inst)?;
+        let jobs = store_of(&st)?;
+        let tenant = who.scope().tenant_id().to_string();
+        let st2 = st.clone();
+        let job = blocking(move || {
+            let job = jobs.get(&tenant, &id).map_err(job_problem)?;
+            may_touch(&st2, &who, &job)?;
+            if job.state == to {
+                return Ok(job);
+            }
+            if !from.contains(&job.state) {
+                return Err(job_problem(JobError::StateChanged { actual: job.state }));
+            }
+            jobs.transition(&tenant, &id, job.state, to, None)
+                .map_err(job_problem)
+        })
+        .await?;
+        Ok(envelope(StatusCode::OK, &rid, job_json(&job)))
+    };
+    finish(&rid, run.await)
+}
+
+/// `POST .../_jobs/{id}/pause`: holds a queued or retryable job so no worker picks it up.
+pub(crate) async fn pause<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    hold(
+        st,
+        inst,
+        id,
+        headers,
+        &[JobState::Queued, JobState::Retryable],
+        JobState::Paused,
+    )
+    .await
+}
+
+/// `POST .../_jobs/{id}/resume`: queues a paused job again.
+pub(crate) async fn resume<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    hold(st, inst, id, headers, &[JobState::Paused], JobState::Queued).await
+}
+
+/// `POST .../_jobs/{id}/restart`: a failed or cancelled job runs again as its next generation,
+/// with the same staged rows. The new job is returned in `uploaded`; submit it to rehearse and
+/// queue it. Safe to repeat.
+pub(crate) async fn restart<S: Store + Send + Sync + 'static>(
+    State(st): State<AppState<S>>,
+    Path((inst, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id();
+    let run = async {
+        let who = authed(&st, &headers, &inst)?;
+        let jobs = store_of(&st)?;
+        let tenant = who.scope().tenant_id().to_string();
+        let st2 = st.clone();
+        let job = blocking(move || {
+            let job = jobs.get(&tenant, &id).map_err(job_problem)?;
+            may_touch(&st2, &who, &job)?;
+            jobs.restart(&tenant, &id, &who.user_id)
+                .map_err(job_problem)
+        })
+        .await?;
+        Ok(envelope(StatusCode::CREATED, &rid, job_json(&job)))
     };
     finish(&rid, run.await)
 }

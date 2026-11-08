@@ -1,4 +1,4 @@
-﻿//! Durable import jobs on a real Postgres (`CE_TEST_DATABASE_URL`; CI sets `CE_REQUIRE_DB`).
+//! Durable import jobs on a real Postgres (`CE_TEST_DATABASE_URL`; CI sets `CE_REQUIRE_DB`).
 use ce_store_pg::{ImportJobs, JobError, JobState, NewJob, TypedPgStore};
 use serde_json::json;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -297,5 +297,89 @@ fn a_job_completes_through_committing_with_its_result() {
             actual: JobState::Completed
         })
     );
+    store.drop_schema().unwrap();
+}
+
+#[test]
+fn a_paused_job_is_never_claimed_until_it_is_resumed() {
+    let Some(u) = url() else { return };
+    let (store, jobs) = fresh(&u);
+    let (a, _) = jobs.create(&new(T1, "k1", "us/511063")).unwrap();
+    queue(&jobs, T1, &a.id);
+    jobs.transition(T1, &a.id, JobState::Queued, JobState::Paused, None)
+        .unwrap();
+    assert_eq!(jobs.claim("w1", 30, 3).unwrap(), None);
+    // Still the live job for its scope: a second upload is refused.
+    assert!(matches!(
+        jobs.create(&new(T1, "k2", "us/511063")),
+        Err(JobError::ScopeBusy { .. })
+    ));
+    jobs.transition(T1, &a.id, JobState::Paused, JobState::Queued, None)
+        .unwrap();
+    assert_eq!(jobs.claim("w1", 30, 3).unwrap().unwrap().id, a.id);
+    let ev = jobs.events(T1, &a.id).unwrap();
+    assert!(ev.iter().any(|e| e.to_state == "paused"));
+    assert!(ev.iter().all(|e| e.at.is_some()), "every move has a time");
+    store.drop_schema().unwrap();
+}
+
+#[test]
+fn the_list_is_newest_first_per_tenant_and_per_actor() {
+    let Some(u) = url() else { return };
+    let (store, jobs) = fresh(&u);
+    let (a, _) = jobs.create(&new(T1, "k1", "us/1")).unwrap();
+    let mut b = new(T1, "k2", "us/2");
+    b.actor = "someone-else";
+    let (b, _) = jobs.create(&b).unwrap();
+    jobs.create(&new(T2, "k1", "us/1")).unwrap();
+    let all = jobs.list(T1, None, 100).unwrap();
+    assert_eq!(
+        all.iter().map(|j| j.id.clone()).collect::<Vec<_>>(),
+        vec![b.id.clone(), a.id.clone()]
+    );
+    let mine = jobs.list(T1, Some("tester"), 100).unwrap();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0].id, a.id);
+    assert_eq!(jobs.list(T1, None, 1).unwrap().len(), 1);
+    store.drop_schema().unwrap();
+}
+
+#[test]
+fn a_restart_is_the_next_generation_with_the_same_rows() {
+    let Some(u) = url() else { return };
+    let (store, jobs) = fresh(&u);
+    let (a, _) = jobs.create(&new(T1, "k1", "us/511063")).unwrap();
+    jobs.stage_rows(T1, &a.id, &[(0, json!({"x": 1})), (1, json!({"x": 2}))])
+        .unwrap();
+    // A live job cannot be restarted.
+    assert!(matches!(
+        jobs.restart(T1, &a.id, "boss"),
+        Err(JobError::StateChanged { .. })
+    ));
+    jobs.transition(T1, &a.id, JobState::Uploaded, JobState::Parsing, None)
+        .unwrap();
+    jobs.transition(
+        T1,
+        &a.id,
+        JobState::Parsing,
+        JobState::Failed,
+        Some(("period_closed", "the period is closed")),
+    )
+    .unwrap();
+    let b = jobs.restart(T1, &a.id, "boss").unwrap();
+    assert_eq!(b.generation, 2);
+    assert_eq!(b.state, JobState::Uploaded);
+    assert_eq!(b.total, a.total);
+    assert_eq!(b.actor, "tester", "the post keeps the starter's roles");
+    assert_eq!(jobs.staged_count(T1, &b.id).unwrap(), 2);
+    assert_eq!(
+        jobs.restart(T1, &a.id, "boss").unwrap().id,
+        b.id,
+        "repeat is safe"
+    );
+    assert_eq!(jobs.get(T1, &a.id).unwrap().state, JobState::Failed);
+    assert_eq!(jobs.restart(T2, &a.id, "boss"), Err(JobError::NotFound));
+    let ev = jobs.events(T1, &b.id).unwrap();
+    assert_eq!(ev[0].detail["restart_of"], json!(a.id));
     store.drop_schema().unwrap();
 }

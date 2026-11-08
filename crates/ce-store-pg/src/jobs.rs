@@ -83,7 +83,10 @@ pub(crate) fn ddl(schema: &str) -> String {
                seq       integer NOT NULL CHECK (seq >= 0),
                payload   jsonb   NOT NULL,
                PRIMARY KEY (job_id, seq)
-           )"#
+           );
+           ALTER TABLE "{schema}"."_ce_import_job" DROP CONSTRAINT IF EXISTS "_ce_import_job_state_check";
+           ALTER TABLE "{schema}"."_ce_import_job" ADD CONSTRAINT "_ce_import_job_state_check"
+               CHECK (state IN ({states}))"#
     )
 }
 
@@ -274,7 +277,9 @@ impl ImportJobs {
             .get()?
             .query(
                 &format!(
-                    r#"SELECT from_state, to_state, detail FROM "{s}"."_ce_import_job_event"
+                    r#"SELECT from_state, to_state, detail,
+                              (extract(epoch from at) * 1000)::bigint
+                       FROM "{s}"."_ce_import_job_event"
                        WHERE tenant_id = $1::text::uuid AND job_id = $2::text::uuid ORDER BY id"#
                 ),
                 &[&tenant, &id],
@@ -286,8 +291,107 @@ impl ImportJobs {
                 from_state: r.get(0),
                 to_state: r.get(1),
                 detail: r.get(2),
+                at: r.get(3),
             })
             .collect())
+    }
+
+    /// The tenant's jobs, newest first, at most `limit` (1 to 500); only `actor`'s when given.
+    pub fn list(
+        &self,
+        tenant: &str,
+        actor: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Job>, JobError> {
+        let t = self.t();
+        let limit = limit.clamp(1, 500);
+        let rows = self
+            .pool
+            .get()?
+            .query(
+                &format!(
+                    "SELECT {COLS} FROM {t} WHERE tenant_id = $1::text::uuid \
+                     AND ($2::text IS NULL OR actor = $2) ORDER BY created_at DESC, id LIMIT $3"
+                ),
+                &[&tenant, &actor, &limit],
+            )
+            .map_err(db)?;
+        Ok(rows.iter().map(job_from).collect())
+    }
+
+    /// Starts the next generation of a failed or cancelled job with a copy of its staged rows.
+    /// The new job is `uploaded`; submitting it rehearses and queues it as usual. The old job and
+    /// its history stay as they are. A repeat returns the generation this restart already made.
+    pub fn restart(&self, tenant: &str, id: &str, by: &str) -> Result<Job, JobError> {
+        let (s, t) = (&self.schema, self.t());
+        let old = self.get(tenant, id)?;
+        if !matches!(old.state, JobState::Failed | JobState::Cancelled) {
+            return Err(JobError::StateChanged { actual: old.state });
+        }
+        let key = format!("restart:{}", old.id);
+        let mut c = self.pool.get()?;
+        let mut tx = c.transaction().map_err(db)?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            &[&format!(
+                "{s}/import_job/{}/{}/{}",
+                tenant, old.kind, old.scope_key
+            )],
+        )
+        .map_err(db)?;
+        if let Some(r) = tx
+            .query_opt(
+                &format!(
+                    "SELECT {COLS} FROM {t} WHERE tenant_id = $1::text::uuid AND kind = $2 \
+                     AND idempotency_key = $3"
+                ),
+                &[&tenant, &old.kind, &key],
+            )
+            .map_err(db)?
+        {
+            return Ok(job_from(&r));
+        }
+        if let Some(r) = tx
+            .query_opt(
+                &format!(
+                    "SELECT id::text FROM {t} WHERE tenant_id = $1::text::uuid AND kind = $2 \
+                     AND scope_key = $3 AND state NOT IN ('completed', 'failed', 'cancelled')"
+                ),
+                &[&tenant, &old.kind, &old.scope_key],
+            )
+            .map_err(db)?
+        {
+            return Err(JobError::ScopeBusy { job_id: r.get(0) });
+        }
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO {t} (tenant_id, kind, scope_key, generation, idempotency_key, \
+                     fingerprint, file_sha256, upload_ref, actor, actor_role, state, total) \
+                     SELECT tenant_id, kind, scope_key, \
+                       (SELECT COALESCE(MAX(generation), 0) + 1 FROM {t} g \
+                        WHERE g.tenant_id = o.tenant_id AND g.kind = o.kind AND g.scope_key = o.scope_key), \
+                       $3, fingerprint, file_sha256, upload_ref, actor, actor_role, 'uploaded', total \
+                     FROM {t} o WHERE o.tenant_id = $1::text::uuid AND o.id = $2::text::uuid \
+                     RETURNING {COLS}"
+                ),
+                &[&tenant, &id, &key],
+            )
+            .map_err(db)?;
+        let job = job_from(&row);
+        tx.execute(
+            &format!(
+                r#"INSERT INTO "{s}"."_ce_import_staging" (job_id, tenant_id, seq, payload)
+                   SELECT $1::text::uuid, tenant_id, seq, payload FROM "{s}"."_ce_import_staging"
+                   WHERE tenant_id = $2::text::uuid AND job_id = $3::text::uuid"#
+            ),
+            &[&job.id, &tenant, &id],
+        )
+        .map_err(db)?;
+        let detail = serde_json::json!({"restart_of": old.id, "by": by});
+        log_event(&mut tx, s, &job.id, tenant, None, "uploaded", &detail)?;
+        tx.commit().map_err(db)?;
+        Ok(job)
     }
 
     /// Moves a job from the state the caller saw to the next one. `error` is a code and message
@@ -690,5 +794,11 @@ impl JobStore for ImportJobs {
     }
     fn staged_count(&self, tenant: &str, id: &str) -> Result<i64, JobError> {
         ImportJobs::staged_count(self, tenant, id)
+    }
+    fn list(&self, tenant: &str, actor: Option<&str>, limit: i64) -> Result<Vec<Job>, JobError> {
+        ImportJobs::list(self, tenant, actor, limit)
+    }
+    fn restart(&self, tenant: &str, id: &str, by: &str) -> Result<Job, JobError> {
+        ImportJobs::restart(self, tenant, id, by)
     }
 }
